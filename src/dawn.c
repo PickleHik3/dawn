@@ -561,6 +561,10 @@ static void restore_undo_state(int32_t pos)
     size_t len = gap_len(&app.text);
     if (app.cursor > len)
         app.cursor = len;
+    // The block cache only reparses when the length changes; undoing a same-length edit (a task
+    // box tick, a one-letter fix) would otherwise keep drawing the old blocks.
+    if (app.block_cache)
+        block_cache_invalidate((BlockCache*)app.block_cache);
 }
 
 //! Restore cursor to a saved position, clamping to buffer bounds and UTF-8 boundary
@@ -3875,6 +3879,8 @@ static bool try_toggle_task_box(const Layout* L, int32_t screen_row, int32_t scr
     gap_delete(&app.text, check_pos, 1);
     gap_insert(&app.text, check_pos, (c == ' ') ? 'x' : ' ');
     app.dirty = true;
+    // Same length as before, so the block cache wouldn't notice and the box would stay unticked.
+    block_cache_invalidate(bc);
     return true;
 }
 
