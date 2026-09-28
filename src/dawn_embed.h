@@ -81,6 +81,10 @@ void embed_shutdown(void);
 //! the pieces whose text changed. A later call for the same path replaces an earlier one.
 void embed_note_changed(const char* path, const char* title, const char* body, size_t len);
 
+//! A note's file was renamed (a live title): its index follows it to new_path, pieces and all, so
+//! nothing is embedded again and old_path is never offered as a hit. Copied.
+void embed_note_renamed(const char* old_path, const char* new_path);
+
 //! Whether meaning features have anything to offer: an embedder exists and at least one note is
 //! indexed. When false the UI shows nothing embedding-related.
 bool embed_ready(void);

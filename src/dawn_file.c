@@ -9,6 +9,7 @@
 #include "dawn_block.h"
 #include "dawn_chat.h"
 #include "dawn_date.h"
+#include "dawn_embed.h"
 #include "dawn_fm.h"
 #include "dawn_gap.h"
 #include "dawn_history.h"
@@ -229,6 +230,7 @@ void note_moved(const char* path)
     if (DAWN_BACKEND(app)->file_exists(old_chat))
         move_no_replace(old_chat, new_chat);
     hist_remove(app.session_path);
+    embed_note_renamed(app.session_path, path);
 #if HAS_LIBAI
     session_note_moved(app.session_path, path);
 #endif
@@ -278,6 +280,14 @@ bool save_session(void)
             return false;
         }
         app.dirty = false;
+
+        // The meaning index re-embeds the pieces that changed once the note has been still a while.
+        char* body = gap_to_str(&app.text);
+        if (body) {
+            embed_note_changed(app.session_path, fm_get_string(app.frontmatter, "title"), body,
+                gap_len(&app.text));
+            free(body);
+        }
     }
     app.save_failed = false;
 

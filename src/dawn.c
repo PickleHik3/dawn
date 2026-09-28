@@ -9,6 +9,7 @@
 #include "dawn_chat.h"
 #include "dawn_clipboard.h"
 #include "dawn_date.h"
+#include "dawn_embed.h"
 #include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_footnote.h"
@@ -2968,6 +2969,22 @@ skip_chat:
         out_str("↑ scroll for more");
     }
 
+    // "also in: <title>" (dawn_embed): another note that covers the same ground, dim, on the gap
+    // row between the messages and the input. Only when an index exists and a message row is left
+    // above it (the header's rows stay the header's), and never in focus mode.
+    EmbedHit rel[1];
+    if (!app.focus_mode && msg_area_end > msg_area_start && embed_ready() && app.session_path
+        && embed_related(app.session_path, EMBED_RELATED_MIN_SCORE, rel, 1) == 1) {
+        char line[EMBED_TITLE_MAX + 16];
+        snprintf(line, sizeof(line), "also in: %s", rel[0].note_title);
+        int32_t fit = chat_wrap_line(line, strlen(line), 0, content_width);
+        move_to(msg_area_end, content_start);
+        set_bg(get_ai_bg());
+        set_fg(get_dim());
+        for (int32_t c = 0; c < fit; c++)
+            out_char(line[c]);
+    }
+
     // Input area: one rung up the tonal ladder (surface_container_high) from the chat, which is
     // what sets it apart - no separator line. The row above the prompt is the band's own padding.
     int32_t band_col = L->ai_start_col + border_cols;
@@ -3752,6 +3769,67 @@ static void render_writing_plain(void)
     cursor_visible(true);
 }
 
+//! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
+static bool embed_news = false;
+
+//! Rank Ctrl+S's "by meaning" group for the current query: pieces of this note close in meaning,
+//! minus pieces the user has edited since they were indexed and pieces an exact match already
+//! covers. Asks again only when the query, the exact results or the index changed; a query still
+//! being embedded shows nothing until embed_poll() says it landed.
+static void refresh_meaning(SearchState* s, bool exact_changed)
+{
+    if (!embed_ready() || s->query_len < 3 || !app.session_path) {
+        s->meaning_count = 0;
+        s->meaning_query[0] = '\0';
+        return;
+    }
+    if (!embed_news && !exact_changed && strcmp(s->meaning_query, s->query) == 0)
+        return;
+    embed_news = false;
+    snprintf(s->meaning_query, sizeof(s->meaning_query), "%s", s->query);
+    EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE };
+    int32_t n = 0;
+    if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_MAX, &n) != EMBED_READY)
+        n = 0;
+    int32_t kept = 0;
+    size_t doc_len = gap_len(&app.text);
+    for (int32_t i = 0; i < n; i++) {
+        const EmbedHit* h = &s->meaning[i];
+        if ((size_t)h->start + h->len > doc_len)
+            continue;
+        char* slice = gap_substr(&app.text, h->start, h->start + h->len);
+        bool ok = slice && embed_hit_matches(h, slice, h->len);
+        for (int32_t k = 0; ok && k < s->count; k++)
+            if (s->results[k].pos >= h->start && s->results[k].pos < (size_t)h->start + h->len)
+                ok = false;
+        if (ok) {
+            // The row: the piece's heading, or its first non-blank line.
+            char* text = s->meaning_text[kept];
+            size_t cap = sizeof(s->meaning_text[kept]);
+            const char* from = h->heading;
+            size_t len = strlen(from);
+            if (len == 0) {
+                from = slice;
+                while (*from == '\n' || *from == ' ')
+                    from++;
+                len = strcspn(from, "\n");
+            }
+            if (len >= cap) {
+                len = cap - 1;
+                while (len > 0 && ((unsigned char)from[len] & 0xC0) == 0x80)
+                    len--; // not in the middle of a character
+            }
+            memcpy(text, from, len);
+            text[len] = '\0';
+            s->meaning[kept++] = *h;
+        }
+        free(slice);
+    }
+    s->meaning_count = kept;
+    if (s->selected >= s->count + kept)
+        s->selected = s->count + kept > 0 ? s->count + kept - 1 : 0;
+}
+
 //! Main render dispatch
 static void render(void)
 {
@@ -3803,11 +3881,13 @@ static void render(void)
         render_writing();
         render_toc();
         break;
-    case MODE_SEARCH:
-        search_find(&app.text, (SearchState*)app.search_state, DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS));
+    case MODE_SEARCH: {
+        SearchState* search = (SearchState*)app.search_state;
+        bool found = search_find(&app.text, search, DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS));
+        refresh_meaning(search, found);
         render_writing();
         render_search();
-        break;
+    } break;
     }
 
     scrollind_frame_end();
@@ -5306,10 +5386,17 @@ static void handle_input(void)
             handle_mouse_scroll(key);
             break;
         }
-        if (app.ai_open && app.ai_focused)
+        if (app.ai_open && app.ai_focused) {
             handle_ai_input(key);
-        else
+            // Warm the meaning index's query while the question is typed (sent once typing
+            // pauses, never waited on), so the snapshot's relevant passages are ready at Enter.
+            EmbedHit warm[1];
+            int32_t warm_n;
+            if (app.ai_input_len >= 3 && app.session_path && embed_ready())
+                embed_relevant(app.session_path, app.ai_input, app.ai_input_len, warm, 1, &warm_n);
+        } else {
             handle_writing(key);
+        }
         break;
 
     case MODE_FINISHED:
@@ -5912,8 +5999,14 @@ static void handle_input(void)
         case '\r':
         case '\n': {
             const SearchResult* r = search_get_selected(search);
+            int32_t m = search->selected - search->count;
             if (r) {
                 app.cursor = r->pos;
+                app.selecting = false;
+            } else if (m >= 0 && m < search->meaning_count) {
+                // A "by meaning" row: the piece's start, checked still current when ranked.
+                size_t at = search->meaning[m].start;
+                app.cursor = at <= gap_len(&app.text) ? at : gap_len(&app.text);
                 app.selecting = false;
             }
             clear_screen();
@@ -5926,7 +6019,7 @@ static void handle_input(void)
             break;
         case DAWN_KEY_DOWN:
         case 14: // Down or Ctrl+N
-            if (search->selected < search->count - 1)
+            if (search->selected < search->count + search->meaning_count - 1)
                 search->selected++;
             break;
         case DAWN_KEY_PGUP:
@@ -5936,8 +6029,8 @@ static void handle_input(void)
             break;
         case DAWN_KEY_PGDN:
             search->selected += 10;
-            if (search->selected >= search->count)
-                search->selected = search->count - 1;
+            if (search->selected >= search->count + search->meaning_count)
+                search->selected = search->count + search->meaning_count - 1;
             if (search->selected < 0)
                 search->selected = 0;
             break;
@@ -6021,11 +6114,21 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     }
 #endif
 
+    {
+        // Every note in the notes directory, plus notes opened from elsewhere (the history).
+        const char* extra[256];
+        int32_t n = 0;
+        for (int32_t i = 0; i < app.hist_count && n < 256; i++)
+            extra[n++] = app.history[i].path;
+        embed_start(history_dir(), extra, n);
+    }
+
     return true;
 }
 
 void dawn_engine_shutdown(void)
 {
+    embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
     DAWN_BACKEND(app)->set_title(NULL);
     scrollind_shutdown();
 
@@ -6099,6 +6202,8 @@ bool dawn_frame(void)
     ai_tick();
 #endif
     voice_tick();
+    if (embed_poll())
+        embed_news = true;
     handle_input();
     render();
 

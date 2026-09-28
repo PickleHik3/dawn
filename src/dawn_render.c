@@ -1015,20 +1015,50 @@ void render_search(void)
     for (int32_t i = 0; i < content_width; i++)
         platform_write_str("─");
 
-    // Search results with context
+    // Search results with context, then the dim "by meaning" group under a label row. Scrolling
+    // counts rows: the exact results, the label, the meaning rows.
     int32_t list_start = top + 6;
     int32_t visible = list_height;
+    int32_t total_rows = search->count + (search->meaning_count > 0 ? search->meaning_count + 1 : 0);
+    int32_t sel_row = search->selected < search->count ? search->selected : search->selected + 1;
 
     // Adjust scroll
-    if (search->selected < search->scroll)
-        search->scroll = search->selected;
-    if (search->selected >= search->scroll + visible)
-        search->scroll = search->selected - visible + 1;
+    if (sel_row < search->scroll)
+        search->scroll = sel_row;
+    if (sel_row >= search->scroll + visible)
+        search->scroll = sel_row - visible + 1;
 
     for (int32_t i = 0; i < visible; i++) {
         int32_t idx = search->scroll + i;
-        if (idx >= search->count)
+        if (idx >= total_rows)
             break;
+
+        if (idx == search->count) {
+            move_to(list_start + i, content_left + 2);
+            set_fg(get_dim());
+            platform_write_str("by meaning");
+            continue;
+        }
+        if (idx > search->count) {
+            int32_t m = idx - search->count - 1;
+            bool sel = search->selected == search->count + m;
+            if (sel) {
+                move_to(list_start + i, left + 1);
+                set_bg(get_row_select_bg());
+                for (int32_t j = 0; j < width - 2; j++)
+                    platform_write_char(' ');
+            }
+            move_to(list_start + i, content_left);
+            set_fg(get_accent());
+            platform_write_str(sel ? "▸       " : "        "); // under the line numbers
+            set_fg(sel ? get_fg() : get_dim());
+            const char* text = search->meaning_text[m];
+            int32_t max_ctx = content_width - 10;
+            for (int32_t j = 0; text[j] && j < max_ctx; j++)
+                platform_write_char(text[j]);
+            set_bg(get_modal_bg());
+            continue;
+        }
 
         SearchResult* r = &search->results[idx];
 
@@ -1085,7 +1115,7 @@ void render_search(void)
         set_fg(get_dim());
         platform_write_str("↑");
     }
-    if (search->scroll + visible < search->count) {
+    if (search->scroll + visible < total_rows) {
         move_to(list_start + visible - 1, content_right);
         set_fg(get_dim());
         platform_write_str("↓");

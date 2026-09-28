@@ -3,6 +3,7 @@
 #ifndef DAWN_AI_TOKENS_H
 #define DAWN_AI_TOKENS_H
 
+#include "dawn_embed.h"
 #include "dawn_types.h"
 
 #if HAS_LIBAI
@@ -36,6 +37,7 @@ typedef struct {
     bool has_selection; //!< The selection was included
     char section_heading[160]; //!< The section's heading text, or "" when the note has no headings
     bool has_outline; //!< The outline was included
+    bool has_relevant; //!< Passages picked by relevance to the question were included
     int32_t neighbours_before; //!< Whole paragraphs included before the section
     int32_t neighbours_after; //!< Whole paragraphs included after the section
 } AiSnapshotInfo;
@@ -43,12 +45,15 @@ typedef struct {
 //! Build the text of the note to attach to a question, filling a token budget in order:
 //! selection, then the section around the cursor (its heading to the next heading of the same or
 //! higher level), then the outline (every heading, in order), then neighbouring paragraphs
-//! alternating before/after the section until the budget is spent. gb is the document, bc its
+//! alternating before/after the section until the budget is spent. relevant (may be NULL) are
+//! pieces of the note ranked by relevance to the question (dawn_embed, best first, already checked
+//! against the current text): between the outline and the neighbours, each one not inside the
+//! selection or the section is added while the budget lasts. gb is the document, bc its
 //! parsed blocks (NULL is treated as "no headings"), cursor the cursor position, sel_start/
 //! sel_end the selection (equal when there is none). Returns a malloc'd string (never NULL,
 //! "" for an empty note) and fills *info; caller frees the string.
 char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, size_t sel_start,
-    size_t sel_end, int32_t budget_tokens, AiSnapshotInfo* info);
+    size_t sel_end, int32_t budget_tokens, const EmbedHit* relevant, int32_t relevant_count, AiSnapshotInfo* info);
 
 // #endregion
 

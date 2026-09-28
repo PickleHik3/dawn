@@ -174,8 +174,8 @@ bool search_find(const GapBuffer* gb, SearchState* state, int64_t now_ms)
 
 const SearchResult* search_get_selected(const SearchState* state)
 {
-    if (state->count == 0)
-        return NULL;
+    if (state->count == 0 || state->selected >= state->count)
+        return NULL; // nothing, or a row of the "by meaning" group
     return &state->results[state->selected];
 }
 

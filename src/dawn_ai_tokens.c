@@ -146,8 +146,17 @@ static void rtrim(char* s)
         s[--n] = '\0';
 }
 
+//! Whether [start, end) lies wholly inside one of the relevant passages the snapshot took.
+static bool in_taken(const EmbedHit* relevant, const bool* taken, int32_t count, size_t start, size_t end)
+{
+    for (int32_t i = 0; i < count; i++)
+        if (taken[i] && start >= relevant[i].start && end <= (size_t)relevant[i].start + relevant[i].len)
+            return true;
+    return false;
+}
+
 char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, size_t sel_start,
-    size_t sel_end, int32_t budget_tokens, AiSnapshotInfo* info)
+    size_t sel_end, int32_t budget_tokens, const EmbedHit* relevant, int32_t relevant_count, AiSnapshotInfo* info)
 {
     memset(info, 0, sizeof(*info));
     size_t doc_len = gap_len(gb);
@@ -274,7 +283,43 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
         free(outline.data);
     }
 
-    // 4) Neighbouring paragraphs, alternating before/after the section, until the budget runs
+    // 4) Passages relevant to the question (dawn_embed), best first, that the selection and the
+    // section don't already show.
+    bool taken[16] = { false };
+    if (relevant_count > 16)
+        relevant_count = 16;
+    if (!relevant)
+        relevant_count = 0;
+    buf_t passages = { 0 };
+    for (int32_t i = 0; i < relevant_count && budget > 0; i++) {
+        size_t rs = relevant[i].start, re = rs + relevant[i].len;
+        if (re > doc_len || re <= rs || (rs < sec_end_pos && re > sec_start_pos)
+            || (sel_start != sel_end && rs < sel_end && re > sel_start))
+            continue;
+        bool cut;
+        char* text = slice_within_budget(gb, rs, re, &budget, &cut);
+        rtrim(text);
+        if (text[0]) {
+            if (relevant[i].heading[0]) {
+                buf_append_str(&passages, "(under \"");
+                buf_append_str(&passages, relevant[i].heading);
+                buf_append_str(&passages, "\")\n");
+            }
+            buf_append_str(&passages, text);
+            buf_append_str(&passages, cut ? "\n(cut short)\n\n" : "\n\n");
+            taken[i] = true;
+        }
+        free(text);
+    }
+    if (passages.len > 0) {
+        buf_append_str(&out, "Passages from elsewhere in the note that bear on the question:\n<relevant>\n");
+        buf_append_str(&out, passages.data);
+        buf_append_str(&out, "</relevant>\n");
+        info->has_relevant = true;
+    }
+    free(passages.data);
+
+    // 5) Neighbouring paragraphs, alternating before/after the section, until the budget runs
     // out or there is nothing left to add.
     if (have_blocks && budget > 0) {
         int32_t before_idx = header_idx >= 0 ? header_idx - 1 : -1;
@@ -294,7 +339,10 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
         bool try_after = after_idx >= 0 && after_idx < (int32_t)bc->count;
         buf_t neighbours_before = { 0 }, neighbours_after = { 0 };
         while (budget > 0 && (try_before || try_after)) {
-            if (try_before) {
+            if (try_before && in_taken(relevant, taken, relevant_count, bc->blocks[before_idx].start, bc->blocks[before_idx].end)) {
+                before_idx--; // shown already, as a relevant passage
+                try_before = before_idx >= 0;
+            } else if (try_before) {
                 Block* b = &bc->blocks[before_idx];
                 char* text = gap_substr(gb, b->start, b->end);
                 rtrim(text);
@@ -316,7 +364,10 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
             }
             if (budget <= 0)
                 break;
-            if (try_after) {
+            if (try_after && in_taken(relevant, taken, relevant_count, bc->blocks[after_idx].start, bc->blocks[after_idx].end)) {
+                after_idx++;
+                try_after = after_idx < (int32_t)bc->count;
+            } else if (try_after) {
                 Block* b = &bc->blocks[after_idx];
                 char* text = gap_substr(gb, b->start, b->end);
                 rtrim(text);
