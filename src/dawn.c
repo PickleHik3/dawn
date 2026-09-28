@@ -3122,11 +3122,29 @@ static void render_status_bar(const Layout* L)
         DawnColor c = (notice_kind == NOTICE_ERROR)
             ? get_error_color() // stays at full strength until notice_ack(), no fade
             : color_lerp(get_bg(), get_dim(), notice_fresh);
-        int32_t notice_col = status_right - (int32_t)strlen(notice_text) + 1;
-        if (notice_col > status_left + 20) {
+        // A notice longer than the corner is cut at a character boundary and ends in "…",
+        // rather than not showing at all; the activity list keeps the whole text.
+        // What the left side actually used (words, timer, "not saved", selection) plus a gap.
+        int32_t left_end = status_left + (int32_t)strlen(words_buf) + 2
+            + (app.timer_mins > 0 && app.timer_on ? 10 : 0) + (app.save_failed ? 12 : 0)
+            + (has_selection() ? 12 : 0);
+        int32_t room = status_right - left_end;
+        size_t len = strlen(notice_text);
+        if (room > 1 && len > (size_t)room) {
+            len = (size_t)room - 1;
+            while (len > 0 && ((unsigned char)notice_text[len] & 0xC0) == 0x80)
+                len--;
+            while (len > 0 && notice_text[len - 1] == ' ')
+                len--;
+        }
+        bool cut = len < strlen(notice_text);
+        int32_t notice_col = status_right - (int32_t)len - (cut ? 1 : 0) + 1;
+        if (room > 1 && notice_col >= left_end) {
             move_to(app.rows, notice_col);
             set_fg(c);
-            out_str(notice_text);
+            out_str_n(notice_text, len);
+            if (cut)
+                out_str("…");
         }
         return;
     }

@@ -70,7 +70,8 @@ static void job_free(speak_job_t* job)
     free(job);
 }
 
-//! Copy a reason into the status, bounded, lower-casing the first letter to match notices.
+//! Copy a reason into the status, bounded, lower-casing the first letter to match notices
+//! (but not an acronym's: "AI is off" stays as it is).
 static void set_error_locked(const char* msg)
 {
     if (!msg || !msg[0])
@@ -80,7 +81,7 @@ static void set_error_locked(const char* msg)
         n = sizeof(g_st.error) - 1;
     memcpy(g_st.error, msg, n);
     g_st.error[n] = '\0';
-    if (g_st.error[0] >= 'A' && g_st.error[0] <= 'Z')
+    if (g_st.error[0] >= 'A' && g_st.error[0] <= 'Z' && !(g_st.error[1] >= 'A' && g_st.error[1] <= 'Z'))
         g_st.error[0] = (char)(g_st.error[0] - 'A' + 'a');
 }
 
@@ -221,10 +222,9 @@ static void* speak_thread(void* arg)
 
     if (!ai_bridge_endpoint(&base_url, &api_key, &cfg_error)) {
         end = AI_SPEAK_FAILED;
-        snprintf(reason, sizeof(reason), "%s", cfg_error ? cfg_error : "can't find the launcher");
-        // "Error: Can't find TAI. ..." reads better on the status line without the prefix
-        if (strncmp(reason, "Error: ", 7) == 0)
-            memmove(reason, reason + 7, strlen(reason + 7) + 1);
+        // The status line is narrow on a phone; the chat's longer explanation ("Can't find TAI.
+        // Turn on AI in ...") is for its own panel. Same words as the chat's "AI is off".
+        snprintf(reason, sizeof(reason), "%s", "AI is off");
         goto finish;
     }
 
