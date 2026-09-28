@@ -29,6 +29,7 @@
 #include "dawn_timer.h"
 #include "dawn_toc.h"
 #include "dawn_utils.h"
+#include "dawn_voice.h"
 #include "dawn_wrap.h"
 
 // Platform capability check macro
@@ -1930,6 +1931,13 @@ static bool render_header_element(const RenderCtx* ctx, RenderState* rs, const B
                 block_apply_style(line_style);
                 if (selecting && p >= sel_s && p < sel_e)
                     set_bg(get_select());
+                VoiceStyle voice;
+                if (voice_style_at(p, &voice)) {
+                    if (voice.has_fg)
+                        set_fg(voice.fg);
+                    if (voice.has_bg && !(selecting && p >= sel_s && p < sel_e))
+                        set_bg(voice.bg);
+                }
                 // Styled content - use active_style for inline formatting context
                 output_grapheme(&app.text, &p, rs->active_style);
             }
@@ -3102,6 +3110,19 @@ static void render_status_bar(const Layout* L)
             move_to(app.rows, notice_col);
             set_fg(c);
             out_str(notice_text);
+        }
+        return;
+    }
+
+    // The voice helpers' one word (dawn_voice): "listening" while the launcher's mic is open,
+    // "reading aloud" during Ctrl+Q. Dim, in the hints' corner. NULL in focus mode.
+    const char* voice_text = voice_status_text();
+    if (voice_text) {
+        int32_t voice_col = status_right - (int32_t)strlen(voice_text) + 1;
+        if (voice_col > status_left + 20) {
+            move_to(app.rows, voice_col);
+            set_fg(get_dim());
+            out_str(voice_text);
         }
         return;
     }
@@ -5103,8 +5124,9 @@ static void handle_input(void)
         return;
 
     // Any real input acknowledges a sticky NOTICE_ERROR (a key or a tap - MOUSE_RELEASE would
-    // double up with the MOUSE_CLICK that landed the tap, so it's excluded).
-    if (key != DAWN_KEY_MOUSE_RELEASE)
+    // double up with the MOUSE_CLICK that landed the tap, so it's excluded; so is a dictation
+    // event, which the user didn't type).
+    if (key != DAWN_KEY_MOUSE_RELEASE && key != DAWN_KEY_DICTATION)
         notice_ack();
 
     // The launcher's light/dark report (P1 #colors): only takes over app.theme from dawn's own
@@ -5122,6 +5144,10 @@ static void handle_input(void)
         }
         return;
     }
+
+    // Voice helpers (dawn_voice): dictation events, Ctrl+Q read-aloud, any key stopping it.
+    if (voice_handle_key(key))
+        return;
 
     switch (app.mode) {
     case MODE_WELCOME:
@@ -6072,6 +6098,7 @@ bool dawn_frame(void)
     ai_pump();
     ai_tick();
 #endif
+    voice_tick();
     handle_input();
     render();
 
@@ -6674,6 +6701,8 @@ static void render_writing(void)
         cursor_screen_row = max_row;
     if (rs.cursor_col < L.margin + 1)
         rs.cursor_col = L.margin + 1;
+    if (!app.view_detached)
+        voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
     cursor_visible(true);
 }
@@ -6888,6 +6917,16 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
                     set_bg(get_bg());
                 }
                 // If MD_MARK or MD_CODE, background was already set by block_apply_style
+
+                // Read-aloud highlight and dictation glow (dawn_voice): over the markdown style,
+                // under the selection.
+                VoiceStyle voice;
+                if (voice_style_at(rs->pos, &voice)) {
+                    if (voice.has_fg)
+                        set_fg(voice.fg);
+                    if (voice.has_bg && !in_sel)
+                        set_bg(voice.bg);
+                }
 
                 if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
                     // Use active_style to skip replacements inside inline code
