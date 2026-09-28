@@ -14,6 +14,7 @@
 #include "dawn_history.h"
 #include "dawn_image.h"
 #include "dawn_notice.h"
+#include "dawn_session.h"
 #include "dawn_utils.h"
 #include <ctype.h>
 #include <errno.h>
@@ -165,6 +166,74 @@ static bool path_in_dir(const char* path, const char* dir)
     }
 #endif
     return false;
+}
+
+bool note_in_history_dir(const char* path) { return path && path_in_dir(path, history_dir()); }
+
+//! Rename from to to, never over an existing file. rename(2) itself is atomic but replaces its
+//! target, so the target is checked first (renameat2's RENAME_NOREPLACE is not safe to call on
+//! every Android: a syscall outside an app's seccomp filter kills the process).
+static bool move_no_replace(const char* from, const char* to)
+{
+    if (DAWN_BACKEND(app)->file_exists(to))
+        return false;
+    return rename(from, to) == 0;
+}
+
+char* note_rename(const char* stem)
+{
+    if (!app.session_path || !stem || !stem[0])
+        return NULL;
+    const char* slash = strrchr(app.session_path, '/');
+    const char* bslash = strrchr(app.session_path, '\\');
+    if (bslash && (!slash || bslash > slash))
+        slash = bslash;
+    size_t dir_len = slash ? (size_t)(slash - app.session_path) : 0;
+    char path[PATH_MAX];
+    bool moved = false;
+    for (int32_t n = 1; n <= 99 && !moved; n++) {
+        int w;
+        if (n == 1)
+            w = snprintf(path, sizeof(path), "%.*s" DAWN_PATH_SEP "%s.md", (int)dir_len, app.session_path, stem);
+        else
+            w = snprintf(path, sizeof(path), "%.*s" DAWN_PATH_SEP "%s-%d.md", (int)dir_len, app.session_path, stem, (int)n);
+        if (w < 0 || (size_t)w >= sizeof(path))
+            return NULL;
+        if (strcmp(path, app.session_path) == 0)
+            return NULL; // already named so
+        moved = move_no_replace(app.session_path, path);
+        if (!moved && !DAWN_BACKEND(app)->file_exists(path))
+            return NULL; // not a clash: the rename itself failed
+    }
+    if (!moved)
+        return NULL;
+    note_moved(path);
+    return dawn_strdup(path);
+}
+
+bool note_rename_to(const char* path)
+{
+    if (!app.session_path || !path || !move_no_replace(app.session_path, path))
+        return false;
+    note_moved(path);
+    return true;
+}
+
+void note_moved(const char* path)
+{
+    // The chat that goes with the note moves too (best effort), and the history forgets the old
+    // name; the next save lists the new one.
+    char old_chat[520], new_chat[520];
+    get_chat_path(app.session_path, old_chat, sizeof(old_chat));
+    get_chat_path(path, new_chat, sizeof(new_chat));
+    if (DAWN_BACKEND(app)->file_exists(old_chat))
+        move_no_replace(old_chat, new_chat);
+    hist_remove(app.session_path);
+#if HAS_LIBAI
+    session_note_moved(app.session_path, path);
+#endif
+    free(app.session_path);
+    app.session_path = dawn_strdup(path);
 }
 
 bool save_session(void)

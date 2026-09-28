@@ -1323,6 +1323,14 @@ void session_reset(void)
     g_prime_wanted = false;
 }
 
+void session_note_moved(const char* old_path, const char* new_path)
+{
+    if (g_conv_path && old_path && strcmp(g_conv_path, old_path) == 0) {
+        free(g_conv_path);
+        g_conv_path = new_path ? dawn_strdup(new_path) : NULL;
+    }
+}
+
 void session_chat_opened(void)
 {
     if (!app.ai_ready || !app.ai_ctx)
@@ -1555,6 +1563,8 @@ bool session_chat_may_open(void)
     }
     return !off;
 }
+
+int64_t session_idle_ms(void) { return now_ms() - g_last_activity_ms; }
 
 int64_t session_waking_since(void)
 {

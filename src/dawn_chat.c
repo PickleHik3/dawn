@@ -11,6 +11,7 @@
 #include "dawn_ai_tokens.h"
 #include "dawn_notice.h"
 #include "dawn_session.h"
+#include "dawn_title.h"
 
 #include <ctype.h>
 #include <strings.h>
@@ -452,8 +453,7 @@ static void apply_edit(size_t start, size_t end, const char* text)
     notice_post(NOTICE_AI_CHANGE, "edited by AI · ctrl+z undoes");
 }
 
-//! title reduced to one clean line: no heading marks, "Title:" label, quotes or final period.
-static bool clean_title(const char* raw, char* out, size_t cap)
+bool ai_clean_title(const char* raw, char* out, size_t cap)
 {
     const char* s = raw;
     while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')
@@ -490,7 +490,7 @@ static bool clean_title(const char* raw, char* out, size_t cap)
 static bool set_note_title(const char* raw, bool asked)
 {
     char title[81];
-    if (!clean_title(raw, title, sizeof(title)))
+    if (!ai_clean_title(raw, title, sizeof(title)))
         return false;
     if (!app.frontmatter)
         app.frontmatter = fm_create();
@@ -571,6 +571,8 @@ static const char* edit_note(EditKind kind, const char* text)
     case EDIT_TITLE:
         if (!set_note_title(text, true))
             return "The title is empty.";
+        // Asked for in the chat, so it is the writer's choice: live titles leave it alone.
+        title_user_edited();
         {
             char msg[128];
             snprintf(msg, sizeof(msg), "renamed · %s", note_title() ? note_title() : "");
@@ -919,68 +921,7 @@ void ai_init_session(void)
     app.ai_session = ai_new_conversation();
 }
 
-// #region Automatic Title
-
-#define TITLE_MIN_CHARS 160
-#define TITLE_RETRY_SECS 60
-
-static char* g_title_path; //!< The note a title was asked for (or is being asked for)
-static bool g_title_busy;
-static int64_t g_title_retry_at;
-
-static bool note_is_untitled(void)
-{
-    const char* title = note_title();
-    return !title || !title[0] || strcmp(title, "Untitled") == 0;
-}
-
-//! The title job's reply, through the warm conversation (dawn_session.c). NULL: it failed or gave
-//! way to a question; try again in a while.
-static void title_done(const char* reply, void* user_data)
-{
-    (void)user_data;
-    g_title_busy = false;
-    if (!reply) {
-        free(g_title_path);
-        g_title_path = NULL;
-        g_title_retry_at = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) + TITLE_RETRY_SECS;
-        return;
-    }
-    if (app.session_path && g_title_path && strcmp(app.session_path, g_title_path) == 0
-        && note_is_untitled() && set_note_title(reply, false)) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "renamed · %s", note_title() ? note_title() : "");
-        notice_post(NOTICE_AI_CHANGE, msg);
-        save_session();
-    }
-}
-
-//! Name an untitled note once it has enough text, as a quiet job on the warm conversation.
-static void title_tick(void)
-{
-    if (g_title_busy || app.ai_thinking)
-        return;
-    if (app.mode != MODE_WRITING || app.preview_mode || !app.session_path || !note_is_untitled())
-        return;
-    if (g_title_path && strcmp(g_title_path, app.session_path) == 0)
-        return; // asked once for this note already
-    if (gap_len(&app.text) < TITLE_MIN_CHARS)
-        return;
-    if (DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) < g_title_retry_at)
-        return;
-    // Never trigger a model load for a quiet job: session_quiet() runs only when TAI already has
-    // the model resident and the conversation has read the note.
-    static const char* instruction = "(From dawn, not typed by the user.) Write a title for the note: "
-                                     "two to six words, in the note's language, with no quotes, no Markdown and no final period. "
-                                     "Reply with only the title.";
-    free(g_title_path);
-    g_title_path = dawn_strdup(app.session_path);
-    g_title_busy = session_quiet(instruction, 24, title_done, NULL);
-    if (!g_title_busy) {
-        free(g_title_path);
-        g_title_path = NULL;
-    }
-}
+// #region Per-frame work
 
 //! While the question waits on the session (the model loading, the note being read), the line
 //! beside the spinner says what it waits on, in the header's words; once the question's own

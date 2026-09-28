@@ -25,6 +25,7 @@
 #include "dawn_settings.h"
 #include "dawn_tex.h"
 #include "dawn_theme.h"
+#include "dawn_title.h"
 #include "dawn_timer.h"
 #include "dawn_toc.h"
 #include "dawn_utils.h"
@@ -611,6 +612,12 @@ static void restore_cursor_position(size_t pos)
 
 static void undo(void)
 {
+#if HAS_LIBAI
+    // A live title that just landed is the last change: Ctrl+Z puts the old title (and file
+    // name) back first.
+    if (title_undo())
+        return;
+#endif
     // Snapshots are taken before a change, so the latest text has none of its own yet: take it
     // now, so one Ctrl+Z undoes one change and Ctrl+Y can come back to this.
     if (app.undo_pos == app.undo_count - 1 && !undo_at_current())
@@ -1128,6 +1135,8 @@ static void fm_edit_save(void)
 {
     if (!app.frontmatter)
         app.frontmatter = fm_create();
+    const char* title_before = fm_get_string(app.frontmatter, "title");
+    char* old_title = title_before ? dawn_strdup(title_before) : NULL;
 
     for (int32_t i = 0; i < app.fm_edit.field_count; i++) {
         FmEditField* field = &app.fm_edit.fields[i];
@@ -1172,6 +1181,14 @@ static void fm_edit_save(void)
     char lastmod_buf[32];
     dawn_format_iso_time(&lt, lastmod_buf, sizeof(lastmod_buf));
     fm_set_string(app.frontmatter, "lastmod", lastmod_buf);
+
+#if HAS_LIBAI
+    // A title the writer typed is theirs: live titles never touch it again.
+    const char* title_after = fm_get_string(app.frontmatter, "title");
+    if ((old_title == NULL) != (title_after == NULL) || (old_title && title_after && strcmp(old_title, title_after) != 0))
+        title_user_edited();
+#endif
+    free(old_title);
 
     // The user asked for frontmatter in this note, plain file or not.
     app.write_fm = true;

@@ -38,12 +38,16 @@ void ai_send(const char* prompt);
 void ai_stop(void);
 
 //! The AI's per-frame work: the warm writing session (priming, the waiting question, the
-//! compaction, keep-warm) and the automatic title. Call once per frame.
+//! compaction, keep-warm) and live titles. Call once per frame.
 void ai_tick(void);
 
 //! A new, empty conversation with dawn's one system prompt and its tools, its history verbatim
 //! (ai_set_session_verbatim()). dawn_session.c builds every conversation with it. 0 on failure.
 ai_session_id_t ai_new_conversation(void);
+
+//! raw reduced to one clean title line: no heading marks, "Title:" label, quotes or final
+//! period, at most cap-1 bytes (never splitting a character). False when nothing is left.
+bool ai_clean_title(const char* raw, char* out, size_t cap);
 
 //! Dawn's one system prompt, and its tools as JSON, for the session's token budget.
 const char* ai_system_prompt(void);

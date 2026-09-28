@@ -37,6 +37,9 @@ void session_tick(void);
 //! whatever is in flight is cancelled and the next job starts a fresh conversation.
 void session_reset(void);
 
+//! The open note's file was renamed (a live title): the same note, so the conversation stays.
+void session_note_moved(const char* old_path, const char* new_path);
+
 //! The chat was opened: prime now if the conversation has not read the note yet, loading the
 //! model if it has to (the writer asked for the AI, so a load is expected here).
 void session_chat_opened(void);
@@ -76,6 +79,9 @@ bool session_quiet(const char* instruction, int32_t max_tokens, SessionQuietDone
 
 //! Whether a quiet job could start right now (see session_quiet()), without starting one.
 bool session_quiet_ready(void);
+
+//! How long since the writer last typed, moved the cursor or typed in the chat, in ms.
+int64_t session_idle_ms(void);
 
 // #endregion
 
