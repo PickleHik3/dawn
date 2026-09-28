@@ -662,3 +662,24 @@ void ai_reset_stats(ai_context_t *context) {
   context->failed_requests = 0;
   pthread_mutex_unlock(&context->mutex);
 }
+
+// #region TAI runtime status (P1 "AI foundations")
+
+ai_model_state_t ai_runtime_state(void) {
+  switch (ai_bridge_runtime_state()) {
+    case AI_BRIDGE_MODEL_LOADED:
+      return AI_MODEL_LOADED;
+    case AI_BRIDGE_MODEL_NOT_LOADED:
+      return AI_MODEL_NOT_LOADED;
+    default:
+      return AI_MODEL_UNKNOWN;
+  }
+}
+
+int32_t ai_context_window(void) { return ai_bridge_context_window(); }
+
+bool ai_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens) {
+  return ai_bridge_take_usage(prompt_tokens, completion_tokens);
+}
+
+// #endregion

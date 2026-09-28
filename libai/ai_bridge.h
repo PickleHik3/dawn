@@ -471,6 +471,50 @@ bool ai_bridge_set_progress_callback(ai_bridge_session_id_t session_id,
                                      ai_bridge_progress_callback_t callback,
                                      void *user_data);
 
+/**
+ * @file TAI runtime status, additions for the OpenAI-compatible bridge (P1 "AI foundations").
+ *
+ * @note ai_bridge_cancel_stream() now also fires a background POST to
+ * /v1/ai/runtime/cancel on the configured endpoint (best-effort, fire-and-forget), so stopping a
+ * stream also asks the server to stop generating, not only the local read.
+ */
+
+/**
+ * @brief Whether TAI currently has a chat model resident, last known.
+ *
+ * Backed by a background refresh of GET /v1/ai/runtime (falling back to /v1/ai/status) that is
+ * kicked off, at most every few seconds, by calling this function; the value returned is always
+ * the last completed check, never blocking on the network. The exact response shape is
+ * TAI-internal and undocumented here, so it is parsed defensively: any of a few likely field
+ * names/shapes is accepted, and anything else is AI_BRIDGE_MODEL_UNKNOWN.
+ */
+typedef enum {
+  AI_BRIDGE_MODEL_UNKNOWN = 0, /**< Not checked yet, or the response wasn't recognized */
+  AI_BRIDGE_MODEL_LOADED = 1,  /**< A chat model is resident */
+  AI_BRIDGE_MODEL_NOT_LOADED = 2 /**< No model resident; a request now would load one */
+} ai_bridge_model_state_t;
+
+ai_bridge_model_state_t ai_bridge_runtime_state(void);
+
+/**
+ * @brief The endpoint's context window in tokens.
+ *
+ * From GET /v1/models, field "_endpoint_context_window" (checked at the top level and on each
+ * entry of a "data" array, since it is unclear which the server uses). Fetched once per process
+ * on a background thread and cached from then on; returns 4096 (TAI's common default) until that
+ * first fetch lands.
+ */
+int32_t ai_bridge_context_window(void);
+
+/**
+ * @brief usage.prompt_tokens / usage.completion_tokens from the most recently completed turn.
+ *
+ * Sets *prompt_tokens and *completion_tokens and returns true when the last turn's response
+ * carried a "usage" object; returns false and leaves them untouched otherwise. Consuming: a
+ * second call before another turn completes returns false.
+ */
+bool ai_bridge_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens);
+
 #ifdef __cplusplus
 }
 #endif

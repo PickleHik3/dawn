@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #define MAX_SESSIONS 254
@@ -228,6 +229,332 @@ done:
     free(text);
     free(path);
     return c;
+}
+
+// #endregion
+
+// #region Runtime status, context window, usage (P1 "AI foundations")
+
+static pthread_mutex_t g_runtime_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static ai_bridge_model_state_t g_model_state = AI_BRIDGE_MODEL_UNKNOWN;
+static int64_t g_model_state_checked_at_ms; //!< 0 = never
+static bool g_model_state_fetching;
+
+static int32_t g_context_window; //!< 0 = not fetched yet
+static bool g_context_window_fetching;
+
+static int32_t g_usage_prompt_tokens = -1; //!< -1 = none waiting
+static int32_t g_usage_completion_tokens = -1;
+
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static size_t write_to_strbuf(char* data, size_t size, size_t count, void* userp)
+{
+    strbuf_t* sb = userp;
+    size_t n = size * count;
+    sb_append(sb, data, n);
+    return n;
+}
+
+//! One quick GET, reusing the configured endpoint. Body is returned malloc'd (caller frees), or
+//! NULL on any failure; *status_out gets the HTTP status when the request completed at all.
+static char* http_get(const config_t* cfg, const char* path, long* status_out)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl)
+        return NULL;
+    char* url = dup_printf("%s%s", cfg->base_url, path);
+    struct curl_slist* headers = NULL;
+    char* auth = cfg->api_key ? dup_printf("Authorization: Bearer %s", cfg->api_key) : NULL;
+    if (auth)
+        headers = curl_slist_append(headers, auth);
+    strbuf_t body = { 0 };
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    if (headers)
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_strbuf);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "dawn");
+    CURLcode rc = curl_easy_perform(curl);
+    if (status_out)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, status_out);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    free(auth);
+    free(url);
+    if (rc != CURLE_OK) {
+        sb_free(&body);
+        return NULL;
+    }
+    return body.data ? body.data : dup_str("");
+}
+
+//! A number that might be at the top level of root, or (the first one found) inside a "data"
+//! array of objects, since it is unclear which shape the endpoint uses for this field.
+static bool find_number_field(cJSON* root, const char* key, double* out)
+{
+    cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (cJSON_IsNumber(item)) {
+        *out = item->valuedouble;
+        return true;
+    }
+    cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    cJSON* entry;
+    cJSON_ArrayForEach(entry, data)
+    {
+        item = cJSON_GetObjectItemCaseSensitive(entry, key);
+        if (cJSON_IsNumber(item)) {
+            *out = item->valuedouble;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void* fetch_context_window_thread(void* arg)
+{
+    (void)arg;
+    config_t cfg = config_load();
+    if (!cfg.error) {
+        char* body = http_get(&cfg, "/models", NULL);
+        cJSON* root = body ? cJSON_Parse(body) : NULL;
+        double window;
+        if (root && find_number_field(root, "_endpoint_context_window", &window) && window > 0) {
+            pthread_mutex_lock(&g_runtime_lock);
+            g_context_window = (int32_t)window;
+            pthread_mutex_unlock(&g_runtime_lock);
+        }
+        cJSON_Delete(root);
+        free(body);
+    }
+    config_free(&cfg);
+    pthread_mutex_lock(&g_runtime_lock);
+    g_context_window_fetching = false;
+    pthread_mutex_unlock(&g_runtime_lock);
+    return NULL;
+}
+
+int32_t ai_bridge_context_window(void)
+{
+    pthread_mutex_lock(&g_runtime_lock);
+    int32_t window = g_context_window;
+    bool start = false;
+    if (window == 0 && !g_context_window_fetching) {
+        g_context_window_fetching = true;
+        start = true;
+    }
+    pthread_mutex_unlock(&g_runtime_lock);
+    if (start) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, fetch_context_window_thread, NULL) == 0)
+            pthread_detach(t);
+        else {
+            pthread_mutex_lock(&g_runtime_lock);
+            g_context_window_fetching = false;
+            pthread_mutex_unlock(&g_runtime_lock);
+        }
+    }
+    return window > 0 ? window : 4096; // TAI's common default until the real figure lands
+}
+
+//! Whatever field name and shape /v1/ai/runtime (or /v1/ai/status) turns out to use for "a model
+//! is resident", this looks for the likely ones. Anything not recognized stays UNKNOWN, which the
+//! caller treats the same as "not loaded" (never trigger a load for a QUIET job).
+static ai_bridge_model_state_t model_state_from(cJSON* root)
+{
+    if (!root)
+        return AI_BRIDGE_MODEL_UNKNOWN;
+    static const char* const bool_keys[] = { "loaded", "model_loaded", "is_loaded", "resident" };
+    for (size_t i = 0; i < sizeof(bool_keys) / sizeof(bool_keys[0]); i++) {
+        cJSON* v = cJSON_GetObjectItemCaseSensitive(root, bool_keys[i]);
+        if (cJSON_IsBool(v))
+            return cJSON_IsTrue(v) ? AI_BRIDGE_MODEL_LOADED : AI_BRIDGE_MODEL_NOT_LOADED;
+    }
+    cJSON* state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    if (!cJSON_IsString(state))
+        state = cJSON_GetObjectItemCaseSensitive(root, "status");
+    if (cJSON_IsString(state)) {
+        if (strcasestr(state->valuestring, "load") && !strcasestr(state->valuestring, "unload")
+            && !strcasestr(state->valuestring, "not"))
+            return AI_BRIDGE_MODEL_LOADED;
+        if (strcasestr(state->valuestring, "idle") || strcasestr(state->valuestring, "unload")
+            || strcasestr(state->valuestring, "none") || strcasestr(state->valuestring, "empty"))
+            return AI_BRIDGE_MODEL_NOT_LOADED;
+    }
+    cJSON* model = cJSON_GetObjectItemCaseSensitive(root, "model");
+    if (!model)
+        model = cJSON_GetObjectItemCaseSensitive(root, "current_model");
+    if (model)
+        return cJSON_IsString(model) && model->valuestring[0] ? AI_BRIDGE_MODEL_LOADED : AI_BRIDGE_MODEL_NOT_LOADED;
+    return AI_BRIDGE_MODEL_UNKNOWN;
+}
+
+static void* fetch_model_state_thread(void* arg)
+{
+    (void)arg;
+    config_t cfg = config_load();
+    ai_bridge_model_state_t found = AI_BRIDGE_MODEL_UNKNOWN;
+    if (!cfg.error) {
+        static const char* const paths[] = { "/ai/runtime", "/ai/status" };
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && found == AI_BRIDGE_MODEL_UNKNOWN; i++) {
+            long status = 0;
+            char* body = http_get(&cfg, paths[i], &status);
+            if (body && status >= 200 && status < 300) {
+                cJSON* root = cJSON_Parse(body);
+                found = model_state_from(root);
+                cJSON_Delete(root);
+            }
+            free(body);
+        }
+    }
+    config_free(&cfg);
+    pthread_mutex_lock(&g_runtime_lock);
+    g_model_state = found;
+    g_model_state_checked_at_ms = now_ms();
+    g_model_state_fetching = false;
+    pthread_mutex_unlock(&g_runtime_lock);
+    return NULL;
+}
+
+ai_bridge_model_state_t ai_bridge_runtime_state(void)
+{
+    pthread_mutex_lock(&g_runtime_lock);
+    ai_bridge_model_state_t state = g_model_state;
+    bool stale = now_ms() - g_model_state_checked_at_ms > 3000;
+    bool start = stale && !g_model_state_fetching;
+    if (start)
+        g_model_state_fetching = true;
+    pthread_mutex_unlock(&g_runtime_lock);
+    if (start) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, fetch_model_state_thread, NULL) == 0)
+            pthread_detach(t);
+        else {
+            pthread_mutex_lock(&g_runtime_lock);
+            g_model_state_fetching = false;
+            pthread_mutex_unlock(&g_runtime_lock);
+        }
+    }
+    return state;
+}
+
+static void* post_cancel_thread(void* arg)
+{
+    (void)arg;
+    config_t cfg = config_load();
+    if (!cfg.error) {
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            char* url = dup_printf("%s/ai/runtime/cancel", cfg.base_url);
+            struct curl_slist* headers = NULL;
+            headers = curl_slist_append(headers, "Content-Type: application/json");
+            char* auth = cfg.api_key ? dup_printf("Authorization: Bearer %s", cfg.api_key) : NULL;
+            if (auth)
+                headers = curl_slist_append(headers, auth);
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_perform(curl); // best-effort; nothing to do if this fails
+            curl_slist_free_all(headers);
+            curl_easy_cleanup(curl);
+            free(auth);
+            free(url);
+        }
+    }
+    config_free(&cfg);
+    return NULL;
+}
+
+//! Fire-and-forget POST /v1/ai/runtime/cancel. Stopping the local stream (the atomic flag and
+//! curl's abort) leaves the server still generating; TAI serves one generation at a time, so a
+//! reply the user stopped would otherwise still block the next request until it finishes.
+static void post_runtime_cancel_async(void)
+{
+    pthread_t t;
+    if (pthread_create(&t, NULL, post_cancel_thread, NULL) == 0)
+        pthread_detach(t);
+}
+
+bool ai_bridge_take_usage(int32_t* prompt_tokens, int32_t* completion_tokens)
+{
+    bool ok = false;
+    pthread_mutex_lock(&g_runtime_lock);
+    if (g_usage_prompt_tokens >= 0) {
+        if (prompt_tokens)
+            *prompt_tokens = g_usage_prompt_tokens;
+        if (completion_tokens)
+            *completion_tokens = g_usage_completion_tokens;
+        g_usage_prompt_tokens = -1;
+        g_usage_completion_tokens = -1;
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_runtime_lock);
+    return ok;
+}
+
+static void store_usage(int32_t prompt_tokens, int32_t completion_tokens)
+{
+    if (prompt_tokens < 0 && completion_tokens < 0)
+        return;
+    pthread_mutex_lock(&g_runtime_lock);
+    g_usage_prompt_tokens = prompt_tokens;
+    g_usage_completion_tokens = completion_tokens;
+    pthread_mutex_unlock(&g_runtime_lock);
+}
+
+//! chars/3.6 for mostly-Latin text, chars/2.5 when the text is mostly Arabic script. Kept in sync
+//! by hand with dawn_ai_tokens.c's copy (dawn's own estimator, used for the note-context budget):
+//! this one only needs to size the session history against the context window, a much smaller
+//! and purely internal use that does not warrant sharing a header across the src/libai split.
+static int32_t estimate_tokens_rough(const char* text)
+{
+    if (!text)
+        return 0;
+    size_t chars = 0, arabic = 0;
+    const unsigned char* p = (const unsigned char*)text;
+    while (*p) {
+        uint32_t cp;
+        int len;
+        if (*p < 0x80) {
+            cp = *p;
+            len = 1;
+        } else if ((*p & 0xE0) == 0xC0) {
+            cp = *p & 0x1F;
+            len = 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            cp = *p & 0x0F;
+            len = 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            cp = *p & 0x07;
+            len = 4;
+        } else {
+            p++;
+            continue;
+        }
+        for (int i = 1; i < len && p[i]; i++)
+            cp = (cp << 6) | (p[i] & 0x3F);
+        p += len;
+        chars++;
+        if ((cp >= 0x0600 && cp <= 0x06FF) || (cp >= 0x0750 && cp <= 0x077F) || (cp >= 0xFB50 && cp <= 0xFDFF))
+            arabic++;
+    }
+    if (chars == 0)
+        return 0;
+    double divisor = arabic * 2 > chars ? 2.5 : 3.6;
+    int32_t tokens = (int32_t)((double)chars / divisor + 0.5);
+    return tokens > 0 ? tokens : 1;
 }
 
 // #endregion
@@ -520,6 +847,8 @@ typedef struct {
     bool saw_event;
     bool told_writing; //!< Progress: the first reply text has arrived
     char* stream_error;
+    int32_t usage_prompt_tokens; //!< -1 when no "usage" object was seen this exchange
+    int32_t usage_completion_tokens;
 } exchange_t;
 
 static void exchange_free(exchange_t* x)
@@ -622,6 +951,16 @@ static void handle_sse_line(exchange_t* x, char* line)
     cJSON* delta = cJSON_GetObjectItemCaseSensitive(choice, "delta");
     if (cJSON_IsObject(delta))
         absorb_delta(x, delta, true);
+    // With "stream_options":{"include_usage":true} the final chunk (choices: []) carries usage.
+    cJSON* usage = cJSON_GetObjectItemCaseSensitive(root, "usage");
+    if (cJSON_IsObject(usage)) {
+        cJSON* pt = cJSON_GetObjectItemCaseSensitive(usage, "prompt_tokens");
+        cJSON* ct = cJSON_GetObjectItemCaseSensitive(usage, "completion_tokens");
+        if (cJSON_IsNumber(pt))
+            x->usage_prompt_tokens = pt->valueint;
+        if (cJSON_IsNumber(ct))
+            x->usage_completion_tokens = ct->valueint;
+    }
     cJSON_Delete(root);
 }
 
@@ -723,6 +1062,15 @@ static send_result_t send_request(const config_t* cfg, const char* body, exchang
         cJSON_Delete(root);
         return SEND_FAILED;
     }
+    // TAI serves one generation at a time; a second request while one runs gets this. The caller
+    // (dawn_ai_queue.c) matches this exact sentinel to retry (chat) or drop the turn (title)
+    // instead of showing it as an ordinary error.
+    if (status == 409) {
+        free(server_message);
+        cJSON_Delete(root);
+        *error_out = dup_str("Error: generation_active");
+        return SEND_FAILED;
+    }
     if (status >= 400 || x->stream_error) {
         bool refused = sent_tools && status == 400
             && (mentions_tools(server_message) || mentions_tools(x->raw.data));
@@ -743,6 +1091,15 @@ static send_result_t send_request(const config_t* cfg, const char* body, exchang
             absorb_delta(x, message, false);
             if (x->content.len > 0)
                 emit(x->stream, x->content.data);
+        }
+        cJSON* usage = cJSON_GetObjectItemCaseSensitive(root, "usage");
+        if (cJSON_IsObject(usage)) {
+            cJSON* pt = cJSON_GetObjectItemCaseSensitive(usage, "prompt_tokens");
+            cJSON* ct = cJSON_GetObjectItemCaseSensitive(usage, "completion_tokens");
+            if (cJSON_IsNumber(pt))
+                x->usage_prompt_tokens = pt->valueint;
+            if (cJSON_IsNumber(ct))
+                x->usage_completion_tokens = ct->valueint;
         }
     }
     cJSON_Delete(root);
@@ -845,6 +1202,38 @@ static cJSON* message_new(const char* role, const char* content)
     return m;
 }
 
+//! Never send a request whose estimated prompt plus max_tokens exceeds the context window: dawn
+//! trims the note context itself before it ever reaches here (dawn_ai_tokens.c), so what is left
+//! to trim on this side is the session's own history, oldest first. Called with g_lock held.
+static void trim_history_to_budget(session_t* s, const stream_t* st, const char* context)
+{
+    int32_t window = ai_bridge_context_window();
+    int32_t reserve = st->max_tokens > 0 ? st->max_tokens : 768;
+    int32_t budget = window - reserve - 256; // headroom for the system message and formatting
+    if (budget < 256)
+        budget = 256;
+
+    int32_t fixed = estimate_tokens_rough(s->instructions) + estimate_tokens_rough(context)
+        + estimate_tokens_rough(st->prompt);
+    while (cJSON_GetArraySize(s->history) > 0) {
+        int32_t total = fixed;
+        cJSON* m;
+        cJSON_ArrayForEach(m, s->history)
+        {
+            cJSON* content = cJSON_GetObjectItemCaseSensitive(m, "content");
+            if (cJSON_IsString(content))
+                total += estimate_tokens_rough(content->valuestring);
+        }
+        if (total <= budget)
+            break;
+        // History is stored as a flat run of user/assistant messages, oldest first: drop the
+        // oldest pair together so a lone assistant reply is never left without its question.
+        cJSON_DeleteItemFromArray(s->history, 0);
+        if (cJSON_GetArraySize(s->history) > 0)
+            cJSON_DeleteItemFromArray(s->history, 0);
+    }
+}
+
 static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, cJSON* turn,
     const char* context, bool with_tools)
 {
@@ -852,6 +1241,11 @@ static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, c
     if (cfg->model)
         cJSON_AddStringToObject(body, "model", cfg->model);
     cJSON_AddBoolToObject(body, "stream", true);
+    // Asks for a final usage-only chunk (choices: []) so prompt/completion token counts can
+    // calibrate the caller's own char-based estimate. Servers that don't understand the option
+    // just ignore it.
+    cJSON* stream_options = cJSON_AddObjectToObject(body, "stream_options");
+    cJSON_AddBoolToObject(stream_options, "include_usage", true);
     if (st->temperature > 0)
         cJSON_AddNumberToObject(body, "temperature", st->temperature);
     if (st->max_tokens > 0)
@@ -949,10 +1343,11 @@ static void run_turn(stream_t* st)
 
     for (int32_t round = 0; round <= MAX_TOOL_ROUNDS && !atomic_load(&st->cancel); round++) {
         pthread_mutex_lock(&g_lock);
+        trim_history_to_budget(s, st, context);
         char* body = build_body(&cfg, s, st, turn, context, use_tools);
         pthread_mutex_unlock(&g_lock);
 
-        exchange_t x = { .stream = st };
+        exchange_t x = { .stream = st, .usage_prompt_tokens = -1, .usage_completion_tokens = -1 };
         char* error = NULL;
         progress(st, AI_BRIDGE_PROGRESS_WAITING, NULL, 0, 0);
         send_result_t result = send_request(&cfg, body ? body : "{}", &x, use_tools, &error);
@@ -996,6 +1391,7 @@ static void run_turn(stream_t* st)
             cJSON_AddItemToArray(s->history, message_new("assistant", kept ? kept : ""));
             free(kept);
             pthread_mutex_unlock(&g_lock);
+            store_usage(x.usage_prompt_tokens, x.usage_completion_tokens);
             exchange_free(&x);
             break;
         }
@@ -1272,6 +1668,8 @@ bool ai_bridge_cancel_stream(ai_bridge_stream_id_t stream_id)
         found = true;
     }
     pthread_mutex_unlock(&g_lock);
+    if (found)
+        post_runtime_cancel_async();
     return found;
 }
 
