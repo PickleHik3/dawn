@@ -8,9 +8,33 @@
 #include "dawn_nav.h"
 #include "dawn_block.h"
 #include "dawn_fm.h"
+#include "dawn_ai_queue.h"
+#include "dawn_ai_tokens.h"
+#include "dawn_notice.h"
 
 #include <ctype.h>
 #include <strings.h>
+
+#if HAS_LIBAI
+// #region USER-lane retry state (also touched by chat_clear() below; see dawn_ai_queue.h)
+
+//! Set while a USER-lane request waits out TAI's 409 backoff (1s/2s/4s) to retry the same prompt;
+//! NULL means no retry is pending. Driven from ai_title_tick(), the only per-frame hook into this
+//! file, since a new one in dawn.c is not needed for it.
+static char* g_user_retry_prompt;
+static int32_t g_turn_max_tokens;
+static int64_t g_user_retry_at_ms;
+
+//! The title feature's own stream id, so a USER job arriving while it runs can cancel it (see
+//! ai_send() and the Automatic Title region below, where it is actually started/cleared).
+static ai_stream_id_t g_title_stream;
+
+//! Set right before ai_send() cancels a running title job to make room for a USER one: its
+//! failure (the cancel) must not be scored against the title's normal 60s retry backoff.
+static bool g_title_cancelled_by_queue;
+
+// #endregion
+#endif
 
 // #region Message Management
 
@@ -25,6 +49,15 @@ void chat_add(const char* text, bool is_user)
 
 void chat_clear(void)
 {
+#if HAS_LIBAI
+    // A retry wait has no chat messages to end into any more (they are about to be freed below).
+    if (g_user_retry_prompt) {
+        free(g_user_retry_prompt);
+        g_user_retry_prompt = NULL;
+        app.ai_thinking = false;
+        ai_queue_set_lane(AI_LANE_NONE);
+    }
+#endif
     for (int32_t i = 0; i < app.chat_count; i++) {
         free(app.chat_msgs[i].text);
     }
@@ -61,6 +94,23 @@ static void ai_set_status(const char* text)
 //! paragraph of its own instead of continuing that line.
 static bool g_after_step;
 
+// #region The "waking the model" status and usage calibration
+
+//! Whether TAI looked like it had no chat model resident when this turn began, so the status
+//! reads "waking the model · Ns" instead of "thinking…" until the first real activity arrives.
+static bool g_turn_waking;
+static int64_t g_turn_waiting_since_ms;
+
+//! This turn's own estimate of its prompt size, to calibrate against usage.prompt_tokens once the
+//! reply lands (ai_calibrate_estimate(), dawn_ai_tokens.c).
+static int32_t g_turn_estimated_prompt_tokens;
+
+//! The exact text of the user's question, kept for a possible retry (g_turn_prompt below is
+//! lower-cased, for prompt_asks_to_shorten() only).
+static char* g_turn_original_prompt;
+
+// #endregion
+
 //! Put a line of its own at the end of the reply that is streaming: what a tool did, or that the
 //! user stopped it. The panel draws these dim, by their first character.
 static void chat_step(const char* line)
@@ -95,6 +145,27 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
 
         // Check for error responses
         if (strncmp(chunk, "Error:", 6) == 0) {
+            // TAI serves one generation at a time: back off and retry the same question rather
+            // than showing this as a real error. The NULL chunk that follows is intercepted too
+            // (below), so the turn does not end here.
+            if (strcmp(chunk, "Error: generation_active") == 0) {
+                int32_t delay_ms = ai_queue_user_busy();
+                if (delay_ms >= 0) {
+                    g_user_retry_at_ms = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) + delay_ms;
+                    free(g_user_retry_prompt);
+                    g_user_retry_prompt = g_turn_original_prompt ? dawn_strdup(g_turn_original_prompt) : NULL;
+                    ai_set_status("waiting for the model…");
+                    return;
+                }
+                if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
+                    ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
+                    free(m->text);
+                    m->text = dawn_strdup("the model is busy, try again");
+                    m->len = strlen(m->text);
+                }
+                g_after_step = false;
+                return;
+            }
             // Replace AI message with error. The end of the reply follows and clears ai_thinking.
             if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
                 ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
@@ -123,10 +194,20 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
             app.chat_scroll = 0;
         }
     } else {
+        // A retry was scheduled instead of really ending the turn (see the "Error:" branch
+        // above): the lane stays USER and app.ai_thinking stays true across the wait.
+        if (g_user_retry_prompt) {
+            app.ai_stream = AI_INVALID_ID;
+            return;
+        }
         // Stream complete
         app.ai_thinking = false;
         app.ai_stream = AI_INVALID_ID;
         app.ai_status[0] = '\0';
+        ai_queue_set_lane(AI_LANE_NONE);
+        int32_t prompt_tokens, completion_tokens;
+        if (ai_take_usage(&prompt_tokens, &completion_tokens))
+            ai_calibrate_estimate(g_turn_estimated_prompt_tokens, prompt_tokens);
         if (app.ai_stopping) {
             app.ai_stopping = false;
             mark_stopped();
@@ -138,9 +219,21 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
 
 void ai_stop(void)
 {
+    // Waiting out a 409 backoff: there is no live stream to cancel, just the wait itself.
+    if (g_user_retry_prompt) {
+        free(g_user_retry_prompt);
+        g_user_retry_prompt = NULL;
+        app.ai_thinking = false;
+        app.ai_status[0] = '\0';
+        ai_queue_set_lane(AI_LANE_NONE);
+        mark_stopped();
+        return;
+    }
     if (!app.ai_thinking || app.ai_stopping || !app.ai_ctx || app.ai_stream == AI_INVALID_ID)
         return;
     // Not found means the reply already ended and its last chunk is on its way: nothing to stop.
+    // ai_cancel_stream() also posts /v1/ai/runtime/cancel to TAI (ai_bridge_openai.c), so the
+    // server stops generating too, not only this local read of it.
     if (ai_cancel_stream(app.ai_ctx, app.ai_stream) != AI_SUCCESS)
         return;
     app.ai_stopping = true;
@@ -191,13 +284,16 @@ static void ai_progress_cb(ai_context_t* context, ai_progress_t phase, const cha
     char text[sizeof(app.ai_status)] = "";
     switch (phase) {
     case AI_PROGRESS_WAITING:
-        ai_set_status("thinking…");
+        g_turn_waiting_since_ms = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        ai_set_status(g_turn_waking ? "waking the model · 0s" : "thinking…");
         break;
     case AI_PROGRESS_WRITING:
+        g_turn_waking = false; // real output arrived; the model plainly isn't "waking" any more
         ai_set_status("writing…");
         break;
     case AI_PROGRESS_TOOL_ARGS:
     case AI_PROGRESS_TOOL_START:
+        g_turn_waking = false;
         if (steps > 1)
             snprintf(text, sizeof(text), "%s (%d of %d)…", doing, step, steps);
         else
@@ -227,14 +323,20 @@ static void ai_progress_cb(ai_context_t* context, ai_progress_t phase, const cha
 
 // #region Note Context
 
-#define NOTE_CONTEXT_LIMIT 8000
-#define SELECTION_CONTEXT_LIMIT 4000
+#define TITLE_NOTE_LIMIT 3000
 
 //! Whether the note went to the model cut short this turn. A model that saw only the beginning
 //! cannot rewrite the whole: its replace_note would drop the part it never read.
 static bool g_turn_note_cut;
 
-//! [start, start + limit) of the note, shortened to end on a UTF-8 character boundary.
+//! The note context built once at the start of the turn (see note_context()); every read_document
+//! "context" call this turn, across however many tool rounds, answers with this same snapshot, so
+//! what the model was told it sees ("the section \"X\"") never quietly changes mid-turn.
+static char* g_turn_context;
+
+//! [start, start + limit) of the note, shortened to end on a UTF-8 character boundary. Only the
+//! auto-title feature still uses this simple char-count slice; the chat's own note context is
+//! built by ai_note_snapshot() (dawn_ai_tokens.c), token-budgeted and section-aware.
 static char* note_slice(size_t start, size_t end, size_t limit, bool* cut)
 {
     *cut = end - start > limit;
@@ -251,38 +353,51 @@ static const char* note_title(void)
     return app.frontmatter ? fm_get_string(app.frontmatter, "title") : NULL;
 }
 
-//! What rides along with every question: the note's title, the note and the selection. Without
-//! it a model that cannot call read_document (TAI drops tools for most on-device models without
-//! saying so) has no idea what "this" is.
+//! What rides along with every question: the note's title, and a token-budgeted snapshot of the
+//! note (selection, then the section around the cursor, then the outline, then neighbouring
+//! paragraphs — see ai_note_snapshot()) sized to about 55% of the endpoint's context window.
+//! Without it a model that cannot call read_document (TAI drops tools for most on-device models
+//! without saying so) has no idea what "this" is.
 static char* note_context(void)
 {
-    size_t len = gap_len(&app.text);
     const char* title = note_title();
     char title_line[320] = "";
     if (title && title[0] && strcmp(title, "Untitled") != 0)
         snprintf(title_line, sizeof(title_line), "Its title is \"%s\".\n", title);
-    if (len == 0)
-        return dawn_strdup("The user's note is empty.");
 
-    bool note_cut, sel_cut = false;
-    char* note = note_slice(0, len, NOTE_CONTEXT_LIMIT, &note_cut);
-    g_turn_note_cut = note_cut;
+    if (gap_len(&app.text) == 0) {
+        g_turn_note_cut = false;
+        return dawn_strdup("The user's note is empty.");
+    }
+
     size_t s, e;
     get_selection(&s, &e);
-    char* sel = s != e ? note_slice(s, e, SELECTION_CONTEXT_LIMIT, &sel_cut) : NULL;
+    int32_t window = ai_ctx_window();
+    int32_t note_budget = (int32_t)(window * 0.55);
+    if (note_budget < 256)
+        note_budget = 256;
 
-    const char* fmt = "The user's open note is below. \"This\", \"the note\" and \"the document\" mean it.\n"
-                      "%s<note>\n%s\n</note>\n%s%s%s%s";
-    const char* cut_line = note_cut ? "(The note is longer; only its beginning is shown.)\n" : "";
-    const char* sel_open = sel ? "The user has selected this part of it:\n<selection>\n" : "";
-    const char* sel_close = sel ? (sel_cut ? "\n</selection>\n(The selection is longer; only its beginning is shown.)" : "\n</selection>") : "";
-    size_t n = strlen(fmt) + strlen(title_line) + strlen(note) + strlen(cut_line) + strlen(sel_open)
-        + (sel ? strlen(sel) : 0) + strlen(sel_close) + 1;
+    AiSnapshotInfo info;
+    char* snapshot = ai_note_snapshot(&app.text, app.block_cache, app.cursor, s, e, note_budget, &info);
+    g_turn_note_cut = !info.whole_note;
+
+    char explainer[256] = "";
+    if (!info.whole_note) {
+        if (info.section_heading[0])
+            snprintf(explainer, sizeof(explainer),
+                "You see the outline and the section \"%s\"; the rest of the note is not shown.\n",
+                info.section_heading);
+        else
+            snprintf(explainer, sizeof(explainer),
+                "You see the outline and the beginning of the note; the rest is not shown.\n");
+    }
+
+    const char* fmt = "The user's open note is below. \"This\", \"the note\" and \"the document\" mean it.\n%s%s%s";
+    size_t n = strlen(fmt) + strlen(title_line) + strlen(explainer) + strlen(snapshot) + 1;
     char* out = malloc(n);
     if (out)
-        snprintf(out, n, fmt, title_line, note, cut_line, sel_open, sel ? sel : "", sel_close);
-    free(note);
-    free(sel);
+        snprintf(out, n, fmt, title_line, explainer, snapshot);
+    free(snapshot);
     return out;
 }
 
@@ -333,9 +448,9 @@ char* document_tool_callback(const char* params_json, void* user_data)
         cJSON_AddNumberToObject(response, "cursor_position", (double)app.cursor);
 
     } else if (strcmp(action, "context") == 0) {
-        char* context = note_context();
-        cJSON_AddStringToObject(response, "text", context ? context : "");
-        free(context);
+        // The same snapshot for every tool round of this turn (see g_turn_context): computed once
+        // in ai_send()/ai_title_tick(), not recomputed per call.
+        cJSON_AddStringToObject(response, "text", g_turn_context ? g_turn_context : "");
 
     } else if (strcmp(action, "selection") == 0) {
         // Return selected text
@@ -483,6 +598,7 @@ static void apply_edit(size_t start, size_t end, const char* text)
     save_undo_state();
     if (app.block_cache)
         block_cache_invalidate((BlockCache*)app.block_cache);
+    notice_post(NOTICE_AI_CHANGE, "edited by AI · ctrl+z undoes");
 }
 
 //! title reduced to one clean line: no heading marks, "Title:" label, quotes or final period.
@@ -562,8 +678,8 @@ static const char* edit_note(EditKind kind, const char* text)
     case EDIT_REPLACE_NOTE: {
         // The whole note may be replaced only by a model that read the whole note, with a note
         // of its own, and not one that lost most of the text unless that is what was asked for.
-        if (g_turn_note_cut || len > NOTE_CONTEXT_LIMIT)
-            return "The note is too long to replace whole: only its beginning was shown. Ask the user to select the part to change and use replace_selection.";
+        if (g_turn_note_cut)
+            return "The note is too long to replace whole: only part of it was shown. Ask the user to select the part to change and use replace_selection.";
         if (!text[0])
             return "The new note is empty. To empty the note, ask the user to select all and delete.";
         size_t new_len = strlen(text);
@@ -604,6 +720,11 @@ static const char* edit_note(EditKind kind, const char* text)
     case EDIT_TITLE:
         if (!set_note_title(text, true))
             return "The title is empty.";
+        {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "renamed · %s", note_title() ? note_title() : "");
+            notice_post(NOTICE_AI_CHANGE, msg);
+        }
         break;
     default:
         return "Unknown edit.";
@@ -789,30 +910,49 @@ void ai_send(const char* prompt)
     if (!app.ai_ready || !app.ai_ctx)
         return;
 
+    // A USER job (this one) displaces a running QUIET one (the title): cancel it and let
+    // ai_title_tick() retry it once the USER lane frees up again, instead of waiting out its
+    // normal delay.
+    if (ai_queue_quiet_is_running() && g_title_stream != AI_INVALID_ID) {
+        g_title_cancelled_by_queue = true;
+        ai_cancel_stream(app.ai_ctx, g_title_stream);
+    }
+    ai_queue_user_reset();
+
     chat_add(prompt, true);
     chat_add("", false);
 
     app.ai_thinking = true;
     app.ai_stopping = false;
     app.ai_turn_started = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
-    ai_set_status("thinking…");
+    g_turn_waking = ai_runtime_state() != AI_MODEL_LOADED;
+    g_turn_waiting_since_ms = app.ai_turn_started;
+    ai_set_status(g_turn_waking ? "waking the model · 0s" : "thinking…");
     g_after_step = false;
     free(g_turn_path);
     g_turn_path = app.session_path ? dawn_strdup(app.session_path) : NULL;
-    // What the model gets to see of the note (note_context() states it exactly when asked for
-    // it; a bridge that never asks gets the same answer from the length).
-    g_turn_note_cut = gap_len(&app.text) > NOTE_CONTEXT_LIMIT;
     free(g_turn_prompt);
     g_turn_prompt = dawn_strdup(prompt);
     if (g_turn_prompt)
         for (char* p = g_turn_prompt; *p; p++)
             *p = (char)tolower((unsigned char)*p);
+    free(g_turn_original_prompt);
+    g_turn_original_prompt = dawn_strdup(prompt);
 
-    // The bridge attaches the note to the question itself (read_document's "context" action),
-    // so this is only the user's own words, and the session history stays small.
+    // A selection turns this into a rewrite (a smaller, more focused reply than free-form chat).
+    size_t sel_s, sel_e;
+    get_selection(&sel_s, &sel_e);
+    g_turn_max_tokens = sel_s != sel_e ? 384 : 768;
+
+    // The note context is built once here, not per read_document call (see g_turn_context): what
+    // the model was told it sees must not change mid-turn across tool rounds.
+    free(g_turn_context);
+    g_turn_context = note_context();
+    g_turn_estimated_prompt_tokens = ai_estimate_tokens(prompt) + ai_estimate_tokens(g_turn_context);
+
     ai_generation_params_t params = {
         .temperature = 0.7,
-        .max_tokens = 4096,
+        .max_tokens = g_turn_max_tokens,
         .include_reasoning = false,
         .seed = 0
     };
@@ -827,6 +967,8 @@ void ai_send(const char* prompt)
         free(m->text);
         m->text = dawn_strdup("Error: Couldn't start the request.");
         m->len = strlen(m->text);
+    } else {
+        ai_queue_set_lane(AI_LANE_USER);
     }
 }
 
@@ -982,13 +1124,26 @@ static void title_stream_cb(ai_context_t* context, const char* chunk, void* user
     }
 
     g_title_busy = false;
+    g_title_stream = AI_INVALID_ID;
+    ai_queue_set_lane(AI_LANE_NONE);
     if (g_title_failed || !g_title_reply) {
-        // TAI off or busy: try this note again in a while.
         free(g_title_path);
         g_title_path = NULL;
-        g_title_retry_at = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) + TITLE_RETRY_SECS;
+        if (g_title_cancelled_by_queue) {
+            // Displaced for a USER job, not really failed: ai_title_tick() retries as soon as
+            // ai_queue_quiet_may_start() says so again, not after the normal 60s wait.
+            g_title_cancelled_by_queue = false;
+            g_title_retry_at = 0;
+        } else {
+            // TAI off, dropped this turn (409, "one generation at a time"), or genuinely busy:
+            // try this note again in a while.
+            g_title_retry_at = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) + TITLE_RETRY_SECS;
+        }
     } else if (app.session_path && g_title_path && strcmp(app.session_path, g_title_path) == 0
         && note_is_untitled() && set_note_title(g_title_reply, false)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "renamed · %s", note_title() ? note_title() : "");
+        notice_post(NOTICE_AI_CHANGE, msg);
         save_session();
     }
     free(g_title_reply);
@@ -996,8 +1151,52 @@ static void title_stream_cb(ai_context_t* context, const char* chunk, void* user
     g_title_reply_len = 0;
 }
 
+//! Retry a USER-lane request that backed off after TAI's 409, once its wait is over, and keep the
+//! "waking the model · Ns" status ticking while a cold-start reply is still pending. This is the
+//! AI job queue's only per-frame work; folded into ai_title_tick() since dawn.c already calls it
+//! every frame and a second hook is not needed for it.
+static void ai_queue_tick(void)
+{
+    if (app.ai_thinking && g_turn_waking && !app.ai_stopping) {
+        int64_t elapsed_s = (DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - g_turn_waiting_since_ms) / 1000;
+        char text[64];
+        snprintf(text, sizeof(text), "waking the model · %llds", (long long)elapsed_s);
+        ai_set_status(text);
+    }
+
+    if (!g_user_retry_prompt)
+        return;
+    if (DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) < g_user_retry_at_ms)
+        return;
+
+    char* prompt = g_user_retry_prompt;
+    g_user_retry_prompt = NULL;
+    ai_set_status("thinking…");
+    ai_generation_params_t params = {
+        .temperature = 0.7,
+        .max_tokens = g_turn_max_tokens,
+        .include_reasoning = false,
+        .seed = 0
+    };
+    app.ai_stream = ai_generate_response_stream(app.ai_ctx, app.ai_session, prompt, &params, ai_stream_cb, NULL);
+    if (app.ai_stream == AI_INVALID_ID) {
+        app.ai_thinking = false;
+        app.ai_status[0] = '\0';
+        ai_queue_set_lane(AI_LANE_NONE);
+        if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
+            ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
+            free(m->text);
+            m->text = dawn_strdup("Error: Couldn't start the request.");
+            m->len = strlen(m->text);
+        }
+    }
+    free(prompt);
+}
+
 void ai_title_tick(void)
 {
+    ai_queue_tick();
+
     if (!app.ai_ready || !app.ai_ctx || g_title_busy || app.ai_thinking)
         return;
     if (app.mode != MODE_WRITING || app.preview_mode || !app.session_path || !note_is_untitled())
@@ -1007,6 +1206,9 @@ void ai_title_tick(void)
     if (gap_len(&app.text) < TITLE_MIN_CHARS)
         return;
     if (DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) < g_title_retry_at)
+        return;
+    // Never trigger a model load for a QUIET job: only run when TAI already has one resident.
+    if (!ai_queue_quiet_may_start())
         return;
 
     if (!g_title_session) {
@@ -1045,11 +1247,14 @@ void ai_title_tick(void)
     g_title_path = dawn_strdup(app.session_path);
     g_title_failed = false;
     g_title_busy = true;
-    if (!ai_generate_response_stream(app.ai_ctx, g_title_session, prompt, &params, title_stream_cb, NULL)) {
+    g_title_stream = ai_generate_response_stream(app.ai_ctx, g_title_session, prompt, &params, title_stream_cb, NULL);
+    if (g_title_stream == AI_INVALID_ID) {
         g_title_busy = false;
         g_title_retry_at = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) + TITLE_RETRY_SECS;
         free(g_title_path);
         g_title_path = NULL;
+    } else {
+        ai_queue_set_lane(AI_LANE_QUIET);
     }
     free(prompt);
 }

@@ -899,6 +899,39 @@ void ai_reset_stats(ai_context_t *context);
 
 /** @} */
 
+/**
+ * @defgroup runtime TAI runtime status (P1 "AI foundations")
+ * @{
+ */
+
+/**
+ * @brief Last known state of whether TAI has a chat model resident.
+ *
+ * A thin pass-through to ai_bridge_runtime_state(); see that function for the refresh policy.
+ * The FoundationModels bridge always answers AI_UNKNOWN (it has no such notion).
+ */
+typedef enum {
+  AI_MODEL_UNKNOWN = 0,
+  AI_MODEL_LOADED = 1,
+  AI_MODEL_NOT_LOADED = 2
+} ai_model_state_t;
+
+ai_model_state_t ai_runtime_state(void);
+
+/**
+ * @brief The endpoint's context window in tokens, cached after the first fetch. See
+ * ai_bridge_context_window().
+ */
+int32_t ai_context_window(void);
+
+/**
+ * @brief usage.prompt_tokens / usage.completion_tokens from the most recently completed turn, if
+ * the server reported them. See ai_bridge_take_usage().
+ */
+bool ai_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens);
+
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif
