@@ -76,14 +76,10 @@ void md_apply(MdStyle s)
 
     // Marked/highlighted text
     if (s & MD_MARK) {
-        extern App app;
-        set_bg((DawnColor) { 0xFF, 0xFF, 0x66 }); // Yellow background
-        // Use theme-appropriate text color (black for light, dark for dark theme)
-        if (app.theme == THEME_LIGHT) {
-            set_fg((DawnColor) { 0x00, 0x00, 0x00 }); // Black text
-        } else {
-            set_fg((DawnColor) { 0x30, 0x30, 0x30 }); // Dark gray text
-        }
+        // The palette's highlight pair (tertiary_container under the launcher), not a fixed yellow
+        // that clashes with the wallpaper colours.
+        set_bg(get_highlight_bg());
+        set_fg(get_highlight_fg());
         return;
     }
 
@@ -102,12 +98,10 @@ void md_apply(MdStyle s)
     // Inline code - distinct color with subtle background
     if (s & MD_CODE) {
         extern App app;
-        // Slightly different background for code
+        set_bg(get_code_bg());
         if (app.theme == THEME_DARK) {
-            set_bg((DawnColor) { 0x3A, 0x3A, 0x3A }); // Slightly lighter than dark bg
             set_fg((DawnColor) { 0xE0, 0x6C, 0x75 }); // Reddish/pink for inline code
         } else {
-            set_bg((DawnColor) { 0xE8, 0xE8, 0xE8 }); // Slightly darker than light bg
             set_fg((DawnColor) { 0xC0, 0x3C, 0x45 }); // Darker red for light theme
         }
         return;
@@ -115,20 +109,18 @@ void md_apply(MdStyle s)
 
     // Combinable styles
     if (s & MD_BOLD) {
+        // Weight carries bold; the ink stays the page's own, so it reads as typesetting.
         DAWN_BACKEND(app)->set_bold(true);
-        // Make bold text brighter for better visibility
-        extern App app;
-        if (app.theme == THEME_DARK) {
-            set_fg((DawnColor) { 0xFF, 0xFF, 0xFF }); // Pure white for bold in dark mode
-        } else {
-            set_fg((DawnColor) { 0x00, 0x00, 0x00 }); // Pure black for bold in light mode
-        }
     }
     if (s & MD_ITALIC) {
         DAWN_BACKEND(app)->set_italic(true);
+        // A quiet hue keeps italics readable where the font has no true italic face.
+        if (!(s & MD_BOLD))
+            set_fg(get_italic_color());
     }
     if (s & MD_UNDERLINE) {
         DAWN_BACKEND(app)->set_underline(DAWN_UNDERLINE_SINGLE);
+        set_underline_color(get_underline_color_token());
     }
     if (s & MD_STRIKE) {
         DAWN_BACKEND(app)->set_strike(true);
