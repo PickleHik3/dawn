@@ -158,8 +158,8 @@ static bool parse_fence(const char* text, size_t ls, size_t le, char* ch, size_t
 //! Whether a line closes a fence opened with n of ch: at least as many, then only blank space.
 static bool closes_fence(const char* text, size_t ls, size_t le, char ch, size_t n)
 {
-    char c;
-    size_t k;
+    char c = 0;
+    size_t k = 0;
     if (!parse_fence(text, ls, le, &c, &k) || c != ch || k < n)
         return false;
     size_t p = ls;
@@ -217,8 +217,8 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
     while (pos < len) {
         const char* nl = memchr(text + pos, '\n', len - pos);
         size_t le = nl ? (size_t)(nl - text) : len;
-        char c;
-        size_t k;
+        char c = 0;
+        size_t k = 0;
         if (in_fence) {
             if (closes_fence(text, pos, le, fch, fn))
                 in_fence = false;
@@ -227,8 +227,8 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
             fch = c;
             fn = k;
         } else {
-            int32_t level;
-            size_t ts, te;
+            int32_t level = 0;
+            size_t ts = 0, te = 0;
             if (parse_heading(text, pos, le, &level, &ts, &te) && level == 1 && te > ts) {
                 copy_utf8(out, out_size, text + ts, te - ts);
                 return;
@@ -484,8 +484,8 @@ static Blk* split_blocks(const char* t, size_t len, int32_t* count)
         const char* nl = memchr(t + pos, '\n', len - pos);
         size_t le = nl ? (size_t)(nl - t) : len;
         size_t next = nl ? le + 1 : len;
-        char c;
-        size_t k, ts, te;
+        char c = 0;
+        size_t k = 0, ts = 0, te = 0;
 
         if (in_fence) {
             cur.end = le;
@@ -550,7 +550,7 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
         const Blk* b = &blocks[i];
         if (b->kind == BLK_HEADING) {
             chunk_flush(&c);
-            size_t ts, te;
+            size_t ts = 0, te = 0;
             if (parse_heading(body, b->start, b->end, NULL, &ts, &te))
                 copy_utf8(c.heading, sizeof(c.heading), body + ts, te - ts);
             c.open = true;

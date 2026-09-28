@@ -753,13 +753,15 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     }
 
     // Embed the rest, in batches of consecutive pieces that share one heading (a request carries
-    // one `title`).
+    // one `title`). Pieces above the first heading go under the note's title, unless it is dawn's
+    // placeholder, which would only add noise ("none" is what the model was trained with).
+    const char* note_heading = strcmp(title, "Untitled") == 0 ? "" : title;
     for (int32_t i = 0; i < idx.count && result == JOB_DONE;) {
         if (have[i]) {
             i++;
             continue;
         }
-        const char* heading = idx.chunks[i].heading[0] ? idx.chunks[i].heading : title;
+        const char* heading = idx.chunks[i].heading[0] ? idx.chunks[i].heading : note_heading;
         const char* texts[EMBED_BATCH];
         size_t lens[EMBED_BATCH];
         int32_t slots[EMBED_BATCH];
@@ -772,7 +774,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
         for (; j < idx.count && n < limit; j++) {
             if (have[j])
                 continue;
-            const char* h = idx.chunks[j].heading[0] ? idx.chunks[j].heading : title;
+            const char* h = idx.chunks[j].heading[0] ? idx.chunks[j].heading : note_heading;
             if (strcmp(h, heading) != 0)
                 break;
             texts[n] = body + idx.chunks[j].start;
@@ -783,7 +785,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
         }
 
         ai_embed_result_t res;
-        result = embed_batch(w, texts, lens, n, heading, &res);
+        result = embed_batch(w, texts, lens, n, heading[0] ? heading : NULL, &res);
         if (result != JOB_DONE)
             break;
         if (w->dims == 0)
