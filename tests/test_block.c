@@ -18,6 +18,12 @@ int get_fg(void) { return 7; }
 int get_bg(void) { return 0; }
 void set_fg(int c) { (void)c; }
 void set_bg(int c) { (void)c; }
+DawnColor get_code_bg(void) { return (DawnColor){0}; }
+DawnColor get_italic_color(void) { return (DawnColor){0}; }
+DawnColor get_highlight_bg(void) { return (DawnColor){0}; }
+DawnColor get_highlight_fg(void) { return (DawnColor){0}; }
+DawnColor get_underline_color_token(void) { return (DawnColor){0}; }
+void set_underline_color(DawnColor c) { (void)c; }
 
 bool image_is_supported(void) { return false; }
 bool image_get_size(const char *path, int *w, int *h) { (void)path; *w = 0; *h = 0; return false; }
