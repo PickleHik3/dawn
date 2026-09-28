@@ -366,6 +366,19 @@ int32_t ai_bridge_context_window(void)
     return window > 0 ? window : 4096; // TAI's common default until the real figure lands
 }
 
+//! A case-insensitive strstr(): plain strcasestr() is not on every platform this file builds for
+//! (mingw/MSVC included), so a small one of our own avoids depending on it.
+static bool contains_ci(const char* haystack, const char* needle)
+{
+    if (!haystack || !needle || !needle[0])
+        return false;
+    size_t hn = strlen(haystack), nn = strlen(needle);
+    for (size_t i = 0; i + nn <= hn; i++)
+        if (strncasecmp(haystack + i, needle, nn) == 0)
+            return true;
+    return false;
+}
+
 //! Whatever field name and shape /v1/ai/runtime (or /v1/ai/status) turns out to use for "a model
 //! is resident", this looks for the likely ones. Anything not recognized stays UNKNOWN, which the
 //! caller treats the same as "not loaded" (never trigger a load for a QUIET job).
@@ -383,11 +396,11 @@ static ai_bridge_model_state_t model_state_from(cJSON* root)
     if (!cJSON_IsString(state))
         state = cJSON_GetObjectItemCaseSensitive(root, "status");
     if (cJSON_IsString(state)) {
-        if (strcasestr(state->valuestring, "load") && !strcasestr(state->valuestring, "unload")
-            && !strcasestr(state->valuestring, "not"))
+        if (contains_ci(state->valuestring, "load") && !contains_ci(state->valuestring, "unload")
+            && !contains_ci(state->valuestring, "not"))
             return AI_BRIDGE_MODEL_LOADED;
-        if (strcasestr(state->valuestring, "idle") || strcasestr(state->valuestring, "unload")
-            || strcasestr(state->valuestring, "none") || strcasestr(state->valuestring, "empty"))
+        if (contains_ci(state->valuestring, "idle") || contains_ci(state->valuestring, "unload")
+            || contains_ci(state->valuestring, "none") || contains_ci(state->valuestring, "empty"))
             return AI_BRIDGE_MODEL_NOT_LOADED;
     }
     cJSON* model = cJSON_GetObjectItemCaseSensitive(root, "model");
