@@ -119,7 +119,7 @@ if(NOT EMSCRIPTEN)
     # TAI by default) through libai/ai_bridge_openai.c, built into the same libai front end.
     if(USE_LIBAI AND NOT APPLE)
         find_package(Threads REQUIRED)
-        add_library(libai_openai STATIC libai/ai.c libai/ai_bridge_openai.c)
+        add_library(libai_openai STATIC libai/ai.c libai/ai_bridge_openai.c libai/ai_embed.c)
         target_include_directories(libai_openai PRIVATE libai third-party)
         target_compile_definitions(libai_openai PRIVATE AI_VERSION_STRING="openai-compatible")
         target_link_libraries(libai_openai PRIVATE CURL::libcurl Threads::Threads)

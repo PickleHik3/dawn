@@ -24,6 +24,7 @@
  */
 
 #include "ai_bridge.h"
+#include "ai_embed.h"
 
 #include "cJSON.h"
 
@@ -229,6 +230,24 @@ done:
     free(text);
     free(path);
     return c;
+}
+
+//! The same endpoint and key, for libai's other clients of it (ai_embed.c); see ai_embed.h.
+bool ai_openai_endpoint(char** base_url, char** api_key)
+{
+    *base_url = NULL;
+    *api_key = NULL;
+    config_t c = config_load();
+    if (c.error || !c.base_url) {
+        config_free(&c);
+        return false;
+    }
+    *base_url = c.base_url;
+    *api_key = c.api_key;
+    c.base_url = NULL;
+    c.api_key = NULL;
+    config_free(&c);
+    return true;
 }
 
 // #endregion
