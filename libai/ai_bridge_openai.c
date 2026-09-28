@@ -24,6 +24,7 @@
  */
 
 #include "ai_bridge.h"
+#include "ai_speak.h"
 
 #include "cJSON.h"
 
@@ -229,6 +230,32 @@ done:
     free(text);
     free(path);
     return c;
+}
+
+bool ai_bridge_endpoint(char** base_url, char** api_key, char** error)
+{
+    config_t c = config_load();
+    bool ok = !c.error && c.tai && c.base_url;
+    if (error) {
+        if (c.error)
+            *error = dup_str(c.error);
+        else if (!c.tai)
+            *error = dup_str("Error: Read aloud needs Termux Launcher's TAI.");
+        else
+            *error = NULL;
+    }
+    if (ok) {
+        if (base_url) {
+            *base_url = c.base_url;
+            c.base_url = NULL;
+        }
+        if (api_key) {
+            *api_key = c.api_key;
+            c.api_key = NULL;
+        }
+    }
+    config_free(&c);
+    return ok;
 }
 
 // #endregion

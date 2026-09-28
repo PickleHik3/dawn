@@ -656,8 +656,9 @@ static bool posix_init(DawnMode mode)
         posix_state.kitty_keyboard_enabled = true;
     }
 
-    // Enable mouse and bracketed paste
-    printf(MOUSE_ON BRACKETED_PASTE_ON);
+    // Enable mouse, bracketed paste and dictation marks (mode 7727: the launcher tags dictated
+    // pastes so dawn can tell them from typing; see parse_osc() below)
+    printf(MOUSE_ON BRACKETED_PASTE_ON DICTATION_MARKS_ON);
     // Light/dark mode reporting (P1 #colors): ?2031h arms the launcher's unsolicited CSI
     // ?997;1n/?997;2n reports on every mode change, and ?996n asks for the current mode once so
     // dawn doesn't start out guessing. Harmless if the host doesn't understand either sequence.
@@ -712,7 +713,7 @@ static void posix_shutdown(void)
         printf(KITTY_KBD_POP);
     }
 
-    printf(SYNC_START CURSOR_SHOW MOUSE_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
+    printf(SYNC_START CURSOR_SHOW MOUSE_OFF DICTATION_MARKS_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
     fflush(stdout);
 
     if (posix_state.raw_mode) {
@@ -1080,14 +1081,245 @@ static void drain_escape_sequence(void)
     tcsetattr(STDIN_FILENO, TCSANOW, &t);
 }
 
+// #region Dictation marks (OSC 7727)
+// The launcher's dictation, once dawn sets private mode 7727, sends OSC 7727 marks: `listen`,
+// `end[;reason=cancel]`, and `phrase;id=N` / `replace;id=N`, each of the last two tagging the
+// very next bracketed paste (see dawn-dictation-marks.md). Marks and tagged pastes become
+// DawnDictEvents in a small queue that DAWN_KEY_DICTATION tells dawn to drain; an untagged paste
+// still arrives as typed keys, exactly as before. The parser trusts nothing: OSC bodies and paste
+// text are length-capped, and a sequence that stops arriving is abandoned after ~2 s.
+
+#define DICT_QUEUE 8 //!< Pending events; a full queue drops its oldest
+#define DICT_OSC_MAX 256 //!< A mark is a few dozen bytes; a longer OSC is read and dropped
+#define DICT_OSC_DISCARD 4096 //!< An OSC still unterminated after this many bytes is abandoned
+#define DICT_PASTE_MAX (64u * 1024u) //!< Dictated text kept per phrase; the rest is read and dropped
+#define DICT_PASTE_SCAN (4u * 1024u * 1024u) //!< Give up looking for the paste's end after this much
+#define DICT_READ_IDLE 20 //!< 100 ms tty reads that may come back empty before a sequence is dropped
+
+static struct {
+    DawnDictEvent q[DICT_QUEUE];
+    int32_t head; //!< Oldest event
+    int32_t count;
+    bool pending; //!< A phrase/replace mark waits for the very next bracketed paste
+    DawnDictVerb pending_verb;
+    uint32_t pending_id;
+} dict;
+
+static void dict_push(DawnDictVerb verb, uint32_t id, char* text, size_t len)
+{
+    if (dict.count == DICT_QUEUE) {
+        free(dict.q[dict.head].text);
+        dict.head = (dict.head + 1) % DICT_QUEUE;
+        dict.count--;
+    }
+    DawnDictEvent* e = &dict.q[(dict.head + dict.count) % DICT_QUEUE];
+    e->verb = verb;
+    e->id = id;
+    e->text = text;
+    e->len = text ? len : 0;
+    dict.count++;
+}
+
+static bool posix_take_dictation(DawnDictEvent* out)
+{
+    if (dict.count == 0 || !out)
+        return false;
+    *out = dict.q[dict.head];
+    dict.q[dict.head].text = NULL;
+    dict.head = (dict.head + 1) % DICT_QUEUE;
+    dict.count--;
+    return true;
+}
+
+//! One byte of an escape sequence already under way. The tty returns from read() after 100 ms
+//! (VTIME=1) with nothing; a sequence's bytes arrive together, so ~2 s of silence means it was cut.
+static bool read_seq_byte(char* c)
+{
+    for (int32_t idle = 0; idle < DICT_READ_IDLE; idle++) {
+        ssize_t n = read(STDIN_FILENO, c, 1);
+        if (n == 1)
+            return true;
+        if (n < 0 && errno != EINTR && errno != EAGAIN)
+            return false;
+    }
+    return false;
+}
+
+//! A decimal id: 1..10 digits, nonzero, fits in 32 bits.
+static bool dict_parse_id(const char* s, size_t n, uint32_t* out)
+{
+    if (n == 0 || n > 10)
+        return false;
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + (uint64_t)(s[i] - '0');
+    }
+    if (v == 0 || v > UINT32_MAX)
+        return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
+//! Act on one complete OSC body ("7727;verb;key=value..."). Anything that isn't a well-formed
+//! 7727 mark with a known verb is ignored, as the protocol asks.
+static int32_t dict_mark(const char* body, size_t n)
+{
+    if (n < 5 || memcmp(body, "7727;", 5) != 0)
+        return DAWN_KEY_NONE;
+
+    const char* verb = NULL;
+    size_t verb_len = 0;
+    uint32_t id = 0;
+    bool have_id = false;
+    bool cancel = false;
+    size_t i = 5;
+    while (i <= n) {
+        size_t start = i;
+        while (i < n && body[i] != ';')
+            i++;
+        const char* tok = body + start;
+        size_t len = i - start;
+        if (!verb) {
+            verb = tok;
+            verb_len = len;
+        } else if (len > 3 && memcmp(tok, "id=", 3) == 0) {
+            have_id = dict_parse_id(tok + 3, len - 3, &id);
+        } else if (len == 13 && memcmp(tok, "reason=cancel", 13) == 0) {
+            cancel = true;
+        } // unknown fields are ignored
+        i++;
+    }
+
+#define VERB_IS(lit) (verb_len == sizeof(lit) - 1 && memcmp(verb, lit, sizeof(lit) - 1) == 0)
+    if (!verb)
+        return DAWN_KEY_NONE;
+    if (VERB_IS("listen")) {
+        dict.pending = false;
+        dict_push(DAWN_DICT_LISTEN, 0, NULL, 0);
+        return DAWN_KEY_DICTATION;
+    }
+    if (VERB_IS("end")) {
+        dict.pending = false;
+        dict_push(cancel ? DAWN_DICT_CANCEL : DAWN_DICT_END, 0, NULL, 0);
+        return DAWN_KEY_DICTATION;
+    }
+    if ((VERB_IS("phrase") || VERB_IS("replace")) && have_id) {
+        dict.pending = true;
+        dict.pending_verb = VERB_IS("phrase") ? DAWN_DICT_PHRASE : DAWN_DICT_REPLACE;
+        dict.pending_id = id;
+    }
+#undef VERB_IS
+    return DAWN_KEY_NONE; // a tagged mark waits for its paste; an unknown verb is dropped
+}
+
+//! Read an OSC to its terminator (BEL or ST) after ESC ] and its first byte, which the caller
+//! has already read. Garbage and truncation are read off the wire and dropped.
+static int32_t read_osc(char first)
+{
+    char body[DICT_OSC_MAX];
+    size_t n = 0;
+    size_t total = 0;
+    bool overflow = false;
+    bool terminated = false;
+    char c = first;
+    for (;;) {
+        if (c == '\x07') {
+            terminated = true;
+            break;
+        }
+        if (c == '\x1b') {
+            char next;
+            terminated = read_seq_byte(&next) && next == '\\';
+            break; // ESC followed by anything else: a broken sequence, dropped
+        }
+        if (n < sizeof(body) - 1)
+            body[n++] = c;
+        else
+            overflow = true;
+        if (++total >= DICT_OSC_DISCARD || !read_seq_byte(&c))
+            break;
+    }
+    body[n] = '\0';
+    if (!terminated || overflow)
+        return DAWN_KEY_NONE;
+    return dict_mark(body, n);
+}
+
+//! After CSI 200~: a paste tagged by a phrase/replace mark is read whole, up to CSI 201~, and
+//! queued as one event. An untagged paste is left alone: its bytes follow as typed keys.
+static int32_t read_marked_paste(void)
+{
+    if (!dict.pending)
+        return DAWN_KEY_NONE;
+    dict.pending = false;
+
+    static const char end_seq[] = "\x1b[201~";
+    const size_t end_len = sizeof(end_seq) - 1;
+    size_t cap = 256;
+    char* buf = malloc(cap);
+    size_t len = 0;
+    size_t matched = 0;
+    size_t scanned = 0;
+    char c;
+
+#define PASTE_KEEP(ch)                                                                        \
+    do {                                                                                      \
+        if (buf && len < DICT_PASTE_MAX) {                                                    \
+            if (len == cap) {                                                                 \
+                size_t grown_cap = cap * 2 > DICT_PASTE_MAX ? DICT_PASTE_MAX : cap * 2;       \
+                char* grown = realloc(buf, grown_cap);                                        \
+                if (!grown) {                                                                 \
+                    free(buf);                                                                \
+                    buf = NULL;                                                               \
+                    break;                                                                    \
+                }                                                                             \
+                buf = grown;                                                                  \
+                cap = grown_cap;                                                              \
+            }                                                                                 \
+            buf[len++] = (ch);                                                                \
+        }                                                                                     \
+    } while (0)
+
+    while (scanned < DICT_PASTE_SCAN && read_seq_byte(&c)) {
+        scanned++;
+        if (c == end_seq[matched]) {
+            if (++matched == end_len)
+                break;
+            continue;
+        }
+        for (size_t i = 0; i < matched; i++)
+            PASTE_KEEP(end_seq[i]);
+        matched = (c == '\x1b') ? 1 : 0;
+        if (!matched)
+            PASTE_KEEP(c);
+    }
+#undef PASTE_KEEP
+
+    // A paste cut short still carries what was said; deliver what arrived.
+    if (!buf || len == 0) {
+        free(buf);
+        return DAWN_KEY_NONE;
+    }
+    dict_push(dict.pending_verb, dict.pending_id, buf, len);
+    return DAWN_KEY_DICTATION;
+}
+
+// #endregion
+
 static int32_t posix_read_key_raw(void);
 
 //! Any real input forces the next frame out, so a redraw request repaints even an unchanged screen.
 static int32_t posix_read_key(void)
 {
     int32_t key = posix_read_key_raw();
-    if (key != DAWN_KEY_NONE)
+    if (key != DAWN_KEY_NONE) {
         frame_forced = true;
+        // A phrase/replace mark applies to the very next paste only; other input voids it.
+        if (key != DAWN_KEY_DICTATION)
+            dict.pending = false;
+    }
     return key;
 }
 
@@ -1306,6 +1538,8 @@ static int32_t posix_read_key_raw(void)
                     int32_t num = 0;
                     sscanf(peek, "%d", &num);
                     switch (num) {
+                    case 200: // bracketed paste start: a dictated phrase when a mark tagged it
+                        return read_marked_paste();
                     case 1:
                         return DAWN_KEY_HOME;
                     case 3:
@@ -1391,6 +1625,10 @@ static int32_t posix_read_key_raw(void)
             }
             drain_escape_sequence();
             return DAWN_KEY_NONE;
+        } else if (seq[0] == ']') {
+            // OSC from the host: a dictation mark, or anything else read off and dropped so its
+            // body can't leak into the note as typed text.
+            return read_osc(seq[1]);
         } else if (seq[0] == 'O') {
             switch (seq[1]) {
             case 'H':
@@ -2738,4 +2976,7 @@ const DawnBackend dawn_backend_posix = {
     .img_invalidate = posix_image_invalidate,
     .img_cell_px = posix_image_cell_px,
     .img_keep_overlays = posix_image_keep_overlays,
+
+    // Dictation marks
+    .take_dictation = posix_take_dictation,
 };
