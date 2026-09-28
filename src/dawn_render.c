@@ -492,6 +492,13 @@ void render_history(void)
         int32_t idx = start + i;
         HistoryEntry* entry = &app.history[idx];
 
+        if (idx == app.hist_sel) {
+            // The selected row sits one rung above the page (surface_container_highest)
+            move_to(4 + i, 2);
+            set_bg(get_row_select_bg());
+            for (int32_t c = 2; c < app.cols; c++)
+                platform_write_char(' ');
+        }
         move_to(4 + i, 4);
         if (idx == app.hist_sel) {
             set_fg(get_accent());
@@ -508,6 +515,7 @@ void render_history(void)
         platform_write_str(title_buf);
         set_fg(get_dim());
         platform_write_str(entry->date_str);
+        set_bg(get_bg());
     }
 
     move_to(app.rows - 1, 4);
@@ -880,6 +888,13 @@ void render_toc(void)
         int32_t entry_idx = toc->filtered[idx];
         TocEntry* entry = &toc->entries[entry_idx];
 
+        // The selected row sits one rung above the modal (surface_container_highest)
+        if (idx == toc->selected) {
+            move_to(list_start + i, left + 1);
+            set_bg(get_row_select_bg());
+            for (int32_t j = 0; j < width - 2; j++)
+                platform_write_char(' ');
+        }
         move_to(list_start + i, content_left);
 
         // Selection indicator
@@ -1017,6 +1032,13 @@ void render_search(void)
 
         SearchResult* r = &search->results[idx];
 
+        DawnColor row_bg = idx == search->selected ? get_row_select_bg() : get_modal_bg();
+        if (idx == search->selected) {
+            move_to(list_start + i, left + 1);
+            set_bg(row_bg);
+            for (int32_t j = 0; j < width - 2; j++)
+                platform_write_char(' ');
+        }
         move_to(list_start + i, content_left);
 
         // Selection indicator
@@ -1047,13 +1069,14 @@ void render_search(void)
             }
             platform_write_char(r->context[j]);
             platform_reset_attrs();
-            set_bg(get_modal_bg());
+            set_bg(row_bg);
         }
 
         if (r->context_len > max_ctx) {
             set_fg(get_dim());
             platform_write_str("...");
         }
+        set_bg(get_modal_bg());
     }
 
     // Scroll indicators

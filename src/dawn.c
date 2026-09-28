@@ -2704,16 +2704,16 @@ skip_chat:
         out_str("↑ scroll for more");
     }
 
-    // Input separator
-    move_to(input_start_row - 1, content_start);
-    set_bg(get_ai_bg());
-    set_fg(get_border());
-    for (int32_t ic = 0; ic < content_width; ic++)
-        out_str("─");
-
-    // Input area
+    // Input area: one rung up the tonal ladder (surface_container_high) from the chat, which is
+    // what sets it apart - no separator line. The row above the prompt is the band's own padding.
+    int32_t band_col = L->ai_start_col + border_cols;
+    int32_t band_cols = L->ai_cols - border_cols;
+    set_bg(get_input_bg());
+    for (int32_t row = input_start_row - 1; row <= app.rows; row++) {
+        move_to(row, band_col);
+        out_spaces(band_cols);
+    }
     move_to(input_start_row, content_start);
-    set_bg(get_ai_bg());
     set_fg(get_accent());
     out_str("> ");
     set_fg(get_fg());
@@ -2733,7 +2733,7 @@ skip_chat:
             cur_col = 0;
             if (cur_row <= app.rows) {
                 move_to(cur_row, content_start);
-                set_bg(get_ai_bg());
+                set_bg(get_input_bg());
             }
             continue;
         }
@@ -2744,7 +2744,7 @@ skip_chat:
             if (cur_row > app.rows)
                 break;
             move_to(cur_row, content_start);
-            set_bg(get_ai_bg());
+            set_bg(get_input_bg());
         }
 
         out_char(c);
@@ -6381,6 +6381,14 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
         rs->run_count = block->inline_run_count;
         rs->current_run_idx = 0;
 
+        // A block quote sits on its own rung (surface_container_low): each of its rows is filled
+        // across the text column below, and every return to "the page" inside it returns here.
+        bool quote_surface = block->type == BLOCK_BLOCKQUOTE && !ctx->is_print_mode;
+        if (quote_surface) {
+            theme_surface_begin(get_quote_bg());
+            set_bg(get_bg());
+        }
+
         while (rs->pos < block->end && rs->pos < len) {
             int32_t screen_row = VROW_TO_SCREEN(&ctx->L, rs->virtual_row, app.scroll_y);
             char c = gap_at(&app.text, rs->pos);
@@ -6430,8 +6438,14 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
 
             // Render line prefixes (blockquote bars, list bullets, etc.)
             if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
-                if (rs->col_width == 0)
+                if (rs->col_width == 0) {
+                    if (quote_surface) {
+                        move_to(screen_row, ctx->L.margin + 1);
+                        set_bg(get_bg());
+                        out_spaces(ctx->L.text_width);
+                    }
                     move_to(screen_row, ctx->L.margin + 1);
+                }
                 render_line_prefixes(ctx, rs, block, line_end, &seg_end, &seg_width);
             }
 
@@ -6547,6 +6561,10 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
                 rs->col_width = 0;
                 rs->pos = skip_leading_space(&app.text, rs->pos, line_end);
             }
+        }
+        if (quote_surface) {
+            theme_surface_end();
+            set_bg(get_bg());
         }
         break;
     }
