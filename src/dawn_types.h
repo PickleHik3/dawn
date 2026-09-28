@@ -292,6 +292,7 @@ typedef struct {
     bool focus_mode; //!< Focus mode enabled
     bool plain_mode; //!< Plain text mode (no WYSIWYG rendering)
     bool preview_mode; //!< Read-only preview mode
+    int32_t help_page; //!< MODE_HELP's page: 0 = shortcuts, 1 = activity list (notice_history)
 
     // Display
     int32_t rows, cols; //!< Display dimensions

@@ -5,6 +5,7 @@
 #include "dawn_gap.h"
 #include "dawn_image.h"
 #include "dawn_modal.h"
+#include "dawn_notice.h"
 #include "dawn_search.h"
 #include "dawn_theme.h"
 #include "dawn_timer.h"
@@ -276,12 +277,90 @@ void render_style_select(void)
     render_center_text(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
 }
 
+//! "2 min ago" / "3 hr ago" / "just now" for the activity list. then_sec/now_sec are both
+//! DAWN_CLOCK_SEC wall-clock values (notice_history()'s posted_sec came from the same clock).
+static void format_relative_time(int64_t then_sec, int64_t now_sec, char* buf, size_t n)
+{
+    int64_t d = now_sec - then_sec;
+    if (d < 0)
+        d = 0;
+    if (d < 60) {
+        snprintf(buf, n, "just now");
+    } else if (d < 3600) {
+        int64_t mins = d / 60;
+        snprintf(buf, n, "%lld min ago", (long long)mins);
+    } else if (d < 86400) {
+        int64_t hrs = d / 3600;
+        snprintf(buf, n, "%lld hr ago", (long long)hrs);
+    } else {
+        int64_t days = d / 86400;
+        snprintf(buf, n, "%lld d ago", (long long)days);
+    }
+}
+
+//! MODE_HELP's second page: the activity list (notice_history()), newest first, with relative
+//! times - where a notice can be found again after it has faded off the status line.
+static void render_help_activity(int32_t top, int32_t left, int32_t width, int32_t height)
+{
+    int32_t col1 = left + 4;
+
+    set_bg(get_modal_bg());
+
+    move_to(top + 2, left + width / 2 - 7);
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str("ACTIVITY");
+    platform_reset_attrs();
+    set_bg(get_modal_bg());
+
+    #define NOTICE_HELP_MAX 18
+    const char* texts[NOTICE_HELP_MAX];
+    int64_t times[NOTICE_HELP_MAX];
+    int32_t n = notice_history(texts, times, NOTICE_HELP_MAX);
+    int64_t now_sec = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC);
+
+    int32_t cy = top + 4;
+    int32_t max_rows = height - 6;
+    if (n == 0) {
+        move_to(cy, col1);
+        set_fg(get_dim());
+        platform_write_str("nothing yet");
+    } else {
+        for (int32_t i = 0; i < n && i < max_rows; i++) {
+            char when[24];
+            format_relative_time(times[i], now_sec, when, sizeof(when));
+
+            move_to(cy + i, col1);
+            set_fg(get_dim());
+            char line[64];
+            snprintf(line, sizeof(line), "%s", texts[i]);
+            platform_write_str(line);
+
+            int32_t when_col = left + width - 4 - (int32_t)strlen(when);
+            if (when_col > col1 + (int32_t)strlen(line) + 1) {
+                move_to(cy + i, when_col);
+                platform_write_str(when);
+            }
+        }
+    }
+    #undef NOTICE_HELP_MAX
+
+    move_to(top + height - 2, left + (width - 26) / 2);
+    set_fg(get_dim());
+    platform_write_str("[<-] shortcuts   [esc] close");
+}
+
 void render_help(void)
 {
     int32_t width = 44;
     int32_t height = 26;
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
+
+    if (app.help_page == 1) {
+        render_help_activity(top, left, width, height);
+        return;
+    }
 
     int32_t col1 = left + 4;
     int32_t col2 = left + 20;
@@ -385,9 +464,9 @@ void render_help(void)
 #endif
 
     // Footer
-    move_to(top + height - 2, left + (width - 22) / 2);
+    move_to(top + height - 2, left + (width - 30) / 2);
     set_fg(get_dim());
-    platform_write_str("press any key to close");
+    platform_write_str("[tab] activity   [esc] close");
 }
 
 void render_history(void)

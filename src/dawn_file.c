@@ -13,8 +13,10 @@
 #include "dawn_gap.h"
 #include "dawn_history.h"
 #include "dawn_image.h"
+#include "dawn_notice.h"
 #include "dawn_utils.h"
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -198,6 +200,11 @@ bool save_session(void)
         bool ok = content && DAWN_BACKEND(app)->write_file(app.session_path, content, len);
         free(content);
         if (!ok) {
+            // errno is best-effort here (write_file crosses several syscalls), but it's usually
+            // still set by whichever one actually failed, and a rough reason beats none.
+            char msg[96];
+            snprintf(msg, sizeof(msg), "couldn't save · %s", strerror(errno));
+            notice_post(NOTICE_ERROR, msg);
             app.save_failed = true;
             return false;
         }

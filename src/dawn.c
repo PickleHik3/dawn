@@ -17,6 +17,7 @@
 #include "dawn_image.h"
 #include "dawn_input.h"
 #include "dawn_nav.h"
+#include "dawn_notice.h"
 #include "dawn_render.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
@@ -2826,6 +2827,26 @@ static void render_status_bar(const Layout* L)
         out_str(sel_buf);
     }
 
+    // Right-aligned notice (dawn_notice), in place of the usual hints: both live in the same
+    // corner and a notice is meant to be seen, so it takes priority while it's showing. Nothing in
+    // focus mode - focus mode already hides everything else here.
+    const char* notice_text;
+    NoticeKind notice_kind;
+    float notice_fresh;
+    if (!app.focus_mode && notice_current(&notice_text, &notice_kind, &notice_fresh)) {
+        DawnColor c = (notice_kind == NOTICE_ERROR)
+            ? get_accent() // stays at full strength until notice_ack(); a dedicated error token
+                           // arrives with the material palette (P1 #colors), not yet in dawn_theme
+            : color_lerp(get_bg(), get_dim(), notice_fresh);
+        int32_t notice_col = status_right - (int32_t)strlen(notice_text) + 1;
+        if (notice_col > status_left + 20) {
+            move_to(app.rows, notice_col);
+            set_fg(c);
+            out_str(notice_text);
+        }
+        return;
+    }
+
     // Right side hints
     char hints[64] = "";
     int32_t hints_len = 0;
@@ -4094,6 +4115,7 @@ static void handle_writing(int32_t key)
         footnote_jump(&app.text, &app.cursor);
         break;
     case 15:
+        app.help_page = 0;
         MODE_PUSH(MODE_HELP);
         break;
 
@@ -4737,6 +4759,11 @@ static void handle_input(void)
     if (key == DAWN_KEY_NONE)
         return;
 
+    // Any real input acknowledges a sticky NOTICE_ERROR (a key or a tap - MOUSE_RELEASE would
+    // double up with the MOUSE_CLICK that landed the tap, so it's excluded).
+    if (key != DAWN_KEY_MOUSE_RELEASE)
+        notice_ack();
+
     switch (app.mode) {
     case MODE_WELCOME:
         switch (key) {
@@ -4762,6 +4789,7 @@ static void handle_input(void)
             settings_save();
             break;
         case '?':
+            app.help_page = 0;
             MODE_PUSH(MODE_HELP);
             break;
         }
@@ -5407,7 +5435,14 @@ static void handle_input(void)
         break;
 
     case MODE_HELP:
-        MODE_POP();
+        // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
+        // failed save or an AI edit can be found again without adding anything to the page itself.
+        if (key == '\t' || key == DAWN_KEY_RIGHT)
+            app.help_page = 1;
+        else if (key == DAWN_KEY_LEFT)
+            app.help_page = 0;
+        else
+            MODE_POP();
         break;
 
     case MODE_TOC: {
