@@ -33,6 +33,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -138,6 +139,7 @@ typedef struct {
     char* base_url; //!< Ends in /v1 (or wherever chat/completions lives), no trailing slash
     char* api_key; //!< NULL when none is configured
     char* model; //!< NULL to let the server choose
+    bool model_pinned; //!< The model came from ai.json (set by hand), not from dawn's state.json
     char* error; //!< Set instead of the rest when the configuration cannot be used
 } config_t;
 
@@ -157,6 +159,16 @@ static char* config_path(void)
         return dup_printf("%s/dawn/ai.json", xdg);
     const char* home = getenv("HOME");
     return dup_printf("%s/.config/dawn/ai.json", home ? home : ".");
+}
+
+//! dawn's own writable state file next to ai.json: the model picked in the chat lives there.
+static char* state_path(void)
+{
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && xdg[0] == '/')
+        return dup_printf("%s/dawn/state.json", xdg);
+    const char* home = getenv("HOME");
+    return dup_printf("%s/.config/dawn/state.json", home ? home : ".");
 }
 
 static char* json_string(cJSON* obj, const char* key)
@@ -190,6 +202,19 @@ static config_t config_load(void)
         }
         provider = json_string(root, "provider");
         c.model = json_string(root, "model");
+        c.model_pinned = c.model != NULL;
+    }
+
+    // A model set by hand in ai.json wins; otherwise the one picked in the chat (state.json).
+    if (!c.model) {
+        char* spath = state_path();
+        char* stext = spath ? read_text_file(spath) : NULL;
+        cJSON* sroot = stext ? cJSON_Parse(stext) : NULL;
+        if (cJSON_IsObject(sroot))
+            c.model = json_string(sroot, "model");
+        cJSON_Delete(sroot);
+        free(stext);
+        free(spath);
     }
 
     if (!provider || strcmp(provider, "tai") == 0) {
@@ -283,15 +308,38 @@ bool ai_openai_endpoint(char** base_url, char** api_key)
 
 static pthread_mutex_t g_runtime_lock = PTHREAD_MUTEX_INITIALIZER;
 
+//! What /v1/ai/runtime says beyond "a model is resident": which one, whether one is loading, and
+//! whether a generation is running (anyone's: another app's included).
+typedef struct {
+    char loaded_model[128];
+    bool loading;
+    bool generating;
+} runtime_extra_t;
+
 static ai_bridge_model_state_t g_model_state = AI_BRIDGE_MODEL_UNKNOWN;
 static int64_t g_model_state_checked_at_ms; //!< 0 = never
 static bool g_model_state_fetching;
+static int32_t g_reachable = -1; //!< -1 not asked yet, 0 TAI did not answer (or is not set up), 1 it did
+static runtime_extra_t g_runtime_extra;
 
-static int32_t g_context_window; //!< 0 = not fetched yet
-static bool g_context_window_fetching;
+static ai_bridge_model_info_t g_models[AI_BRIDGE_MAX_MODELS];
+static int32_t g_model_count = -1; //!< -1 = never fetched
+static int64_t g_models_fetched_at_ms; //!< 0 = never
+static bool g_models_fetching;
+
+//! The model requests name, as the last config_load() on any thread found it ("" = none).
+static char g_active_model[128];
 
 static int32_t g_usage_prompt_tokens = -1; //!< -1 = none waiting
 static int32_t g_usage_completion_tokens = -1;
+
+//! Remember which model the configuration names, for the context-window lookup.
+static void config_remember_model(const config_t* cfg)
+{
+    pthread_mutex_lock(&g_runtime_lock);
+    snprintf(g_active_model, sizeof(g_active_model), "%s", cfg->model ? cfg->model : "");
+    pthread_mutex_unlock(&g_runtime_lock);
+}
 
 static int64_t now_ms(void)
 {
@@ -366,52 +414,6 @@ static bool find_number_field(cJSON* root, const char* key, double* out)
     return false;
 }
 
-static void* fetch_context_window_thread(void* arg)
-{
-    (void)arg;
-    config_t cfg = config_load();
-    if (!cfg.error) {
-        char* body = http_get(&cfg, "/models", NULL);
-        cJSON* root = body ? cJSON_Parse(body) : NULL;
-        double window;
-        if (root && find_number_field(root, "_endpoint_context_window", &window) && window > 0) {
-            pthread_mutex_lock(&g_runtime_lock);
-            g_context_window = (int32_t)window;
-            pthread_mutex_unlock(&g_runtime_lock);
-        }
-        cJSON_Delete(root);
-        free(body);
-    }
-    config_free(&cfg);
-    pthread_mutex_lock(&g_runtime_lock);
-    g_context_window_fetching = false;
-    pthread_mutex_unlock(&g_runtime_lock);
-    return NULL;
-}
-
-int32_t ai_bridge_context_window(void)
-{
-    pthread_mutex_lock(&g_runtime_lock);
-    int32_t window = g_context_window;
-    bool start = false;
-    if (window == 0 && !g_context_window_fetching) {
-        g_context_window_fetching = true;
-        start = true;
-    }
-    pthread_mutex_unlock(&g_runtime_lock);
-    if (start) {
-        pthread_t t;
-        if (pthread_create(&t, NULL, fetch_context_window_thread, NULL) == 0)
-            pthread_detach(t);
-        else {
-            pthread_mutex_lock(&g_runtime_lock);
-            g_context_window_fetching = false;
-            pthread_mutex_unlock(&g_runtime_lock);
-        }
-    }
-    return window > 0 ? window : 4096; // TAI's common default until the real figure lands
-}
-
 //! A case-insensitive strstr(): plain strcasestr() is not on every platform this file builds for
 //! (mingw/MSVC included), so a small one of our own avoids depending on it.
 static bool contains_ci(const char* haystack, const char* needle)
@@ -462,39 +464,69 @@ static ai_bridge_model_state_t model_state_from(cJSON* root)
     return AI_BRIDGE_MODEL_UNKNOWN;
 }
 
+//! The loaded model's id, "loading" and "a generation runs" from a /v1/ai/runtime answer
+//! (TaiRuntimeState.toJson: loadedModelId, state, activeGeneration), one level down under
+//! "runtime" when nested. Fields that are missing stay zero.
+static void runtime_extra_from(cJSON* root, runtime_extra_t* out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!root)
+        return;
+    cJSON* nested = cJSON_GetObjectItemCaseSensitive(root, "runtime");
+    if (cJSON_IsObject(nested))
+        root = nested;
+    cJSON* id = cJSON_GetObjectItemCaseSensitive(root, "loadedModelId");
+    if (cJSON_IsString(id))
+        snprintf(out->loaded_model, sizeof(out->loaded_model), "%s", id->valuestring);
+    cJSON* state = cJSON_GetObjectItemCaseSensitive(root, "state");
+    if (cJSON_IsString(state))
+        out->loading = strcmp(state->valuestring, "loading") == 0;
+    cJSON* active = cJSON_GetObjectItemCaseSensitive(root, "activeGeneration");
+    out->generating = cJSON_IsTrue(active);
+}
+
+
 static void* fetch_model_state_thread(void* arg)
 {
     (void)arg;
     config_t cfg = config_load();
     ai_bridge_model_state_t found = AI_BRIDGE_MODEL_UNKNOWN;
+    runtime_extra_t extra = { 0 };
+    int reachable = 0;
     if (!cfg.error) {
         static const char* const paths[] = { "/ai/runtime", "/ai/status" };
         for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]) && found == AI_BRIDGE_MODEL_UNKNOWN; i++) {
             long status = 0;
             char* body = http_get(&cfg, paths[i], &status);
             if (body && status >= 200 && status < 300) {
+                reachable = 1;
                 cJSON* root = cJSON_Parse(body);
                 found = model_state_from(root);
+                runtime_extra_from(root, &extra);
                 cJSON_Delete(root);
+            } else if (body) {
+                reachable = 1; // it answered, just not this path
             }
             free(body);
         }
     }
+    config_remember_model(&cfg);
     config_free(&cfg);
     pthread_mutex_lock(&g_runtime_lock);
     g_model_state = found;
+    g_reachable = reachable;
+    g_runtime_extra = extra;
     g_model_state_checked_at_ms = now_ms();
     g_model_state_fetching = false;
     pthread_mutex_unlock(&g_runtime_lock);
     return NULL;
 }
 
-ai_bridge_model_state_t ai_bridge_runtime_state(void)
+//! Start a background refresh of the runtime state when the last one is older than max_age_ms.
+static void runtime_refresh_if_stale(int64_t max_age_ms)
 {
     pthread_mutex_lock(&g_runtime_lock);
-    ai_bridge_model_state_t state = g_model_state;
-    bool stale = now_ms() - g_model_state_checked_at_ms > 3000;
-    bool start = stale && !g_model_state_fetching;
+    bool start = now_ms() - g_model_state_checked_at_ms > max_age_ms && !g_model_state_fetching;
     if (start)
         g_model_state_fetching = true;
     pthread_mutex_unlock(&g_runtime_lock);
@@ -508,8 +540,267 @@ ai_bridge_model_state_t ai_bridge_runtime_state(void)
             pthread_mutex_unlock(&g_runtime_lock);
         }
     }
+}
+
+ai_bridge_model_state_t ai_bridge_runtime_state(void)
+{
+    runtime_refresh_if_stale(3000);
+    pthread_mutex_lock(&g_runtime_lock);
+    ai_bridge_model_state_t state = g_model_state;
+    pthread_mutex_unlock(&g_runtime_lock);
     return state;
 }
+
+void ai_bridge_runtime_info(ai_bridge_runtime_info_t* out)
+{
+    if (!out)
+        return;
+    runtime_refresh_if_stale(3000);
+    pthread_mutex_lock(&g_runtime_lock);
+    memset(out, 0, sizeof(*out));
+    out->state = g_model_state;
+    out->reachable = g_reachable;
+    out->loading = g_runtime_extra.loading;
+    out->generating = g_runtime_extra.generating;
+    snprintf(out->loaded_model, sizeof(out->loaded_model), "%s", g_runtime_extra.loaded_model);
+    out->checked_at_ms = g_model_state_checked_at_ms;
+    pthread_mutex_unlock(&g_runtime_lock);
+}
+
+// Models, the active model and keep-warm (P2 "the warm writing session")
+
+//! Whether id is a modality-scoped variant of another model (TaiModelVariants: "-vision" and
+//! "-audio"; "-text" when its base id is listed too). Dawn only writes text, so the picker and the
+//! context-window lookup skip them.
+static bool is_variant_id(const char* id, cJSON* data)
+{
+    size_t n = strlen(id);
+    static const char* const suffixes[] = { "-vision", "-audio" };
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        size_t sn = strlen(suffixes[i]);
+        if (n > sn && strcmp(id + n - sn, suffixes[i]) == 0)
+            return true;
+    }
+    if (n > 5 && strcmp(id + n - 5, "-text") == 0) {
+        cJSON* entry;
+        cJSON_ArrayForEach(entry, data)
+        {
+            cJSON* other = cJSON_GetObjectItemCaseSensitive(entry, "id");
+            if (cJSON_IsString(other) && strlen(other->valuestring) == n - 5
+                && strncmp(other->valuestring, id, n - 5) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static void* fetch_models_thread(void* arg)
+{
+    (void)arg;
+    config_t cfg = config_load();
+    ai_bridge_model_info_t found[AI_BRIDGE_MAX_MODELS];
+    int32_t count = -1;
+    if (!cfg.error) {
+        long status = 0;
+        char* body = http_get(&cfg, "/models", &status);
+        cJSON* root = body && status >= 200 && status < 300 ? cJSON_Parse(body) : NULL;
+        cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
+        if (cJSON_IsArray(data)) {
+            count = 0;
+            cJSON* entry;
+            cJSON_ArrayForEach(entry, data)
+            {
+                if (count >= AI_BRIDGE_MAX_MODELS)
+                    break;
+                cJSON* id = cJSON_GetObjectItemCaseSensitive(entry, "id");
+                if (!cJSON_IsString(id) || !id->valuestring[0] || is_variant_id(id->valuestring, data))
+                    continue;
+                ai_bridge_model_info_t* m = &found[count++];
+                memset(m, 0, sizeof(*m));
+                snprintf(m->id, sizeof(m->id), "%s", id->valuestring);
+                cJSON* name = cJSON_GetObjectItemCaseSensitive(entry, "_display_name");
+                snprintf(m->name, sizeof(m->name), "%s",
+                    cJSON_IsString(name) && name->valuestring[0] ? name->valuestring : id->valuestring);
+                cJSON* window = cJSON_GetObjectItemCaseSensitive(entry, "_endpoint_context_window");
+                m->context_window = cJSON_IsNumber(window) && window->valuedouble > 0 ? (int32_t)window->valuedouble : 0;
+                cJSON* size = cJSON_GetObjectItemCaseSensitive(entry, "_size");
+                m->size_bytes = cJSON_IsNumber(size) ? (int64_t)size->valuedouble : 0;
+            }
+        } else if (root) {
+            // Not TAI's shape: a single top-level window is still worth keeping.
+            double window;
+            if (find_number_field(root, "_endpoint_context_window", &window) && window > 0) {
+                count = 1;
+                memset(&found[0], 0, sizeof(found[0]));
+                snprintf(found[0].id, sizeof(found[0].id), "%s", cfg.model ? cfg.model : "");
+                snprintf(found[0].name, sizeof(found[0].name), "%s", cfg.model ? cfg.model : "model");
+                found[0].context_window = (int32_t)window;
+            }
+        }
+        cJSON_Delete(root);
+        free(body);
+    }
+    config_remember_model(&cfg);
+    config_free(&cfg);
+    pthread_mutex_lock(&g_runtime_lock);
+    if (count >= 0) {
+        memcpy(g_models, found, sizeof(found[0]) * (size_t)count);
+        g_model_count = count;
+    }
+    g_models_fetched_at_ms = now_ms();
+    g_models_fetching = false;
+    pthread_mutex_unlock(&g_runtime_lock);
+    return NULL;
+}
+
+static void models_refresh_if_stale(int64_t max_age_ms)
+{
+    pthread_mutex_lock(&g_runtime_lock);
+    bool start = !g_models_fetching && (g_models_fetched_at_ms == 0 || now_ms() - g_models_fetched_at_ms > max_age_ms);
+    if (start)
+        g_models_fetching = true;
+    pthread_mutex_unlock(&g_runtime_lock);
+    if (start) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, fetch_models_thread, NULL) == 0)
+            pthread_detach(t);
+        else {
+            pthread_mutex_lock(&g_runtime_lock);
+            g_models_fetching = false;
+            pthread_mutex_unlock(&g_runtime_lock);
+        }
+    }
+}
+
+int32_t ai_bridge_models(ai_bridge_model_info_t* out, int32_t max)
+{
+    models_refresh_if_stale(60000);
+    pthread_mutex_lock(&g_runtime_lock);
+    int32_t count = g_model_count;
+    if (out && count > 0) {
+        int32_t n = count < max ? count : max;
+        memcpy(out, g_models, sizeof(g_models[0]) * (size_t)(n > 0 ? n : 0));
+    }
+    pthread_mutex_unlock(&g_runtime_lock);
+    return count;
+}
+
+void ai_bridge_models_refresh(void) { models_refresh_if_stale(0); }
+
+bool ai_bridge_active_model(char* out, size_t cap, bool* pinned)
+{
+    config_t cfg = config_load();
+    config_remember_model(&cfg);
+    bool have = cfg.model && cfg.model[0];
+    if (out && cap > 0)
+        snprintf(out, cap, "%s", have ? cfg.model : "");
+    if (pinned)
+        *pinned = cfg.model_pinned;
+    config_free(&cfg);
+    return have;
+}
+
+int32_t ai_bridge_context_window(void)
+{
+    // Asked often (every budget decision): the list only needs fetching once in a while here;
+    // the picker and a model switch refresh it sooner.
+    models_refresh_if_stale(5 * 60000);
+    int32_t window = 0;
+    pthread_mutex_lock(&g_runtime_lock);
+    // The window of the model requests go to: the one configured, else the one TAI has loaded
+    // (a request without "model" goes to it, or loads TAI's default), else the first listed.
+    const char* want = g_active_model[0] ? g_active_model : g_runtime_extra.loaded_model;
+    for (int32_t i = 0; i < g_model_count && want[0]; i++) {
+        if (strcmp(g_models[i].id, want) == 0) {
+            window = g_models[i].context_window;
+            break;
+        }
+    }
+    if (window <= 0 && g_model_count > 0)
+        window = g_models[0].context_window;
+    pthread_mutex_unlock(&g_runtime_lock);
+    return window > 0 ? window : 4096; // TAI's common default until the real figure lands
+}
+
+//! One POST with a JSON body to the configured endpoint, best-effort. Returns the HTTP status, or
+//! 0 when the request did not complete.
+static long http_post_json(const config_t* cfg, const char* path, const char* body)
+{
+    CURL* curl = curl_easy_init();
+    if (!curl)
+        return 0;
+    char* url = dup_printf("%s%s", cfg->base_url, path);
+    struct curl_slist* headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    char* auth = cfg->api_key ? dup_printf("Authorization: Bearer %s", cfg->api_key) : NULL;
+    if (auth)
+        headers = curl_slist_append(headers, auth);
+    strbuf_t sink = { 0 };
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_strbuf);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "dawn");
+    long status = 0;
+    if (curl_easy_perform(curl) == CURLE_OK)
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    sb_free(&sink);
+    free(auth);
+    free(url);
+    return status;
+}
+
+static atomic_bool g_keep_warm_running;
+
+static void* keep_warm_thread(void* arg)
+{
+    int32_t minutes = (int32_t)(intptr_t)arg;
+    config_t cfg = config_load();
+    if (!cfg.error && cfg.tai) {
+        // Asked fresh, not from the cache: keep-warm with a model that is not resident would load
+        // it, and dawn never causes a load for housekeeping.
+        long status = 0;
+        char* body = http_get(&cfg, "/ai/runtime", &status);
+        cJSON* root = body && status >= 200 && status < 300 ? cJSON_Parse(body) : NULL;
+        runtime_extra_t extra = { 0 };
+        bool loaded = model_state_from(root) == AI_BRIDGE_MODEL_LOADED;
+        runtime_extra_from(root, &extra);
+        if (loaded && extra.loaded_model[0] && !extra.loading
+            && (!cfg.model || strcmp(cfg.model, extra.loaded_model) == 0)) {
+            cJSON* req = cJSON_CreateObject();
+            cJSON_AddStringToObject(req, "model", extra.loaded_model);
+            cJSON_AddNumberToObject(req, "minutes", minutes);
+            char* json = cJSON_PrintUnformatted(req);
+            cJSON_Delete(req);
+            if (json)
+                http_post_json(&cfg, "/ai/runtime/keep-warm", json);
+            free(json);
+        }
+        cJSON_Delete(root);
+        free(body);
+    }
+    config_free(&cfg);
+    atomic_store(&g_keep_warm_running, false);
+    return NULL;
+}
+
+void ai_bridge_keep_warm(int32_t minutes)
+{
+    if (minutes <= 0 || atomic_exchange(&g_keep_warm_running, true))
+        return;
+    pthread_t t;
+    if (pthread_create(&t, NULL, keep_warm_thread, (void*)(intptr_t)minutes) == 0)
+        pthread_detach(t);
+    else
+        atomic_store(&g_keep_warm_running, false);
+}
+
 
 static void* post_cancel_thread(void* arg)
 {
@@ -640,6 +931,7 @@ typedef struct {
     tool_t registered[16];
     int32_t registered_count;
     cJSON* history; //!< user / assistant messages, without the system message
+    bool verbatim; //!< History is exactly what was sent and received (see ai_bridge_set_session_verbatim)
     bool tools_refused; //!< The endpoint refused tools once; ask without them from then on
     bool told_tools_refused;
     ai_bridge_progress_callback_t progress; //!< NULL when the caller does not want reports
@@ -1126,13 +1418,31 @@ static send_result_t send_request(const config_t* cfg, const char* body, exchang
         cJSON_Delete(root);
         return SEND_FAILED;
     }
-    // TAI serves one generation at a time; a second request while one runs gets this. The caller
-    // (dawn_ai_queue.c) matches this exact sentinel to retry (chat) or drop the turn (title)
-    // instead of showing it as an ordinary error.
-    if (status == 409) {
+    // TAI's error code (LauncherCtlApiServer.withOpenAiErrorEnvelope: error.code, and code at the
+    // top level too). A few are sentinels dawn matches exactly instead of showing them as errors:
+    // "generation_active" (one generation at a time: retry the chat, drop the quiet job),
+    // "insufficient_memory" (the model can't load: the chat header says so and names a smaller
+    // one) and "model_not_loaded" (TAI's auto-load is off).
+    const char* code = NULL;
+    cJSON* err_obj = cJSON_GetObjectItemCaseSensitive(root, "error");
+    cJSON* code_item = cJSON_IsObject(err_obj) ? cJSON_GetObjectItemCaseSensitive(err_obj, "code") : NULL;
+    if (!cJSON_IsString(code_item))
+        code_item = cJSON_GetObjectItemCaseSensitive(root, "code");
+    if (!cJSON_IsString(code_item) && cJSON_IsString(err_obj))
+        code_item = err_obj;
+    if (cJSON_IsString(code_item))
+        code = code_item->valuestring;
+    const char* sentinel = NULL;
+    if (code && (strcmp(code, "insufficient_memory") == 0 || strcmp(code, "low_available_memory") == 0))
+        sentinel = "Error: insufficient_memory";
+    else if (code && strcmp(code, "model_not_loaded") == 0)
+        sentinel = "Error: model_not_loaded";
+    else if (status == 409 && (!code || strcmp(code, "generation_active") == 0))
+        sentinel = "Error: generation_active";
+    if (sentinel) {
         free(server_message);
         cJSON_Delete(root);
-        *error_out = dup_str("Error: generation_active");
+        *error_out = dup_str(sentinel);
         return SEND_FAILED;
     }
     if (status >= 400 || x->stream_error) {
@@ -1298,6 +1608,26 @@ static void trim_history_to_budget(session_t* s, const stream_t* st, const char*
     }
 }
 
+//! A verbatim session is never trimmed (that would break TAI's reuse), so this is only the last
+//! line of defence: false when the prompt alone clearly exceeds the context window. The caller
+//! (dawn_session.c) budgets with usage-calibrated counts and max_tokens long before this.
+//! Called with g_lock held.
+static bool verbatim_fits(session_t* s, cJSON* turn)
+{
+    int32_t total = estimate_tokens_rough(s->instructions);
+    cJSON* lists[2] = { s->history, turn };
+    for (int32_t l = 0; l < 2; l++) {
+        cJSON* m;
+        cJSON_ArrayForEach(m, lists[l])
+        {
+            cJSON* content = cJSON_GetObjectItemCaseSensitive(m, "content");
+            if (cJSON_IsString(content))
+                total += estimate_tokens_rough(content->valuestring) + 4;
+        }
+    }
+    return total <= ai_bridge_context_window();
+}
+
 static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, cJSON* turn,
     const char* context, bool with_tools)
 {
@@ -1396,20 +1726,31 @@ static void run_turn(stream_t* st)
     pthread_mutex_lock(&g_lock);
     session_t* s = &g_sessions[st->session];
     bool use_tools = s->tools && !s->tools_refused;
+    bool verbatim = s->verbatim;
     pthread_mutex_unlock(&g_lock);
 
     cJSON* turn = cJSON_CreateArray();
     cJSON_AddItemToArray(turn, message_new("user", st->prompt));
     // The note rides on every question, tools or not. TAI takes the tools away from most
     // on-device models without an error, and a model that was never shown the note cannot call
-    // read_document to find it: it would ask what "this" is.
-    char* context = document_context(st, s);
+    // read_document to find it: it would ask what "this" is. A verbatim session's caller puts
+    // the note (or what changed in it) into the prompt itself.
+    char* context = verbatim ? NULL : document_context(st, s);
 
     for (int32_t round = 0; round <= MAX_TOOL_ROUNDS && !atomic_load(&st->cancel); round++) {
         pthread_mutex_lock(&g_lock);
-        trim_history_to_budget(s, st, context);
-        char* body = build_body(&cfg, s, st, turn, context, use_tools);
+        bool overflow = false;
+        if (verbatim)
+            overflow = !verbatim_fits(s, turn);
+        else
+            trim_history_to_budget(s, st, context);
+        char* body = overflow ? NULL : build_body(&cfg, s, st, turn, context, use_tools);
         pthread_mutex_unlock(&g_lock);
+        if (overflow) {
+            // Overflow is a hard error on TAI, so it is never sent; the caller plans around it.
+            emit(st, "Error: context_full");
+            break;
+        }
 
         exchange_t x = { .stream = st, .usage_prompt_tokens = -1, .usage_completion_tokens = -1 };
         char* error = NULL;
@@ -1427,7 +1768,7 @@ static void run_turn(stream_t* st)
                 emit(st, NO_TOOLS_NOTICE);
             use_tools = false;
             free(context);
-            context = document_context(st, s);
+            context = verbatim ? NULL : document_context(st, s);
             // Keep only the question: tool rounds already taken cannot be sent without tools.
             while (cJSON_GetArraySize(turn) > 1)
                 cJSON_DeleteItemFromArray(turn, 1);
@@ -1450,10 +1791,20 @@ static void run_turn(stream_t* st)
                 sb_append(&x.content, stopped, strlen(stopped));
             }
             pthread_mutex_lock(&g_lock);
-            cJSON_AddItemToArray(s->history, cJSON_Duplicate(cJSON_GetArrayItem(turn, 0), true));
-            char* kept = compact_edit_blocks(x.content.data ? x.content.data : "");
-            cJSON_AddItemToArray(s->history, message_new("assistant", kept ? kept : ""));
-            free(kept);
+            if (verbatim) {
+                // Exactly what went over the wire, tool rounds included, and the reply as the
+                // model wrote it: TAI keeps its KV cache only when the next request is this
+                // transcript plus one message (TaiConversationTranscript.continuesFrom).
+                int32_t turn_count = cJSON_GetArraySize(turn);
+                for (int32_t i = 0; i < turn_count; i++)
+                    cJSON_AddItemToArray(s->history, cJSON_Duplicate(cJSON_GetArrayItem(turn, i), true));
+                cJSON_AddItemToArray(s->history, message_new("assistant", x.content.data ? x.content.data : ""));
+            } else {
+                cJSON_AddItemToArray(s->history, cJSON_Duplicate(cJSON_GetArrayItem(turn, 0), true));
+                char* kept = compact_edit_blocks(x.content.data ? x.content.data : "");
+                cJSON_AddItemToArray(s->history, message_new("assistant", kept ? kept : ""));
+                free(kept);
+            }
             pthread_mutex_unlock(&g_lock);
             store_usage(x.usage_prompt_tokens, x.usage_completion_tokens);
             exchange_free(&x);
@@ -1705,6 +2056,19 @@ ai_bridge_stream_id_t ai_bridge_generate_structured_response_stream(
     (void)callback;
     (void)user_data;
     return AI_BRIDGE_INVALID_ID;
+}
+
+bool ai_bridge_set_session_verbatim(ai_bridge_session_id_t session_id, bool verbatim)
+{
+    bool ok = false;
+    pthread_mutex_lock(&g_lock);
+    session_t* s = &g_sessions[session_id];
+    if (session_id != AI_BRIDGE_INVALID_ID && s->used && !s->closing) {
+        s->verbatim = verbatim;
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ok;
 }
 
 bool ai_bridge_set_progress_callback(ai_bridge_session_id_t session_id,

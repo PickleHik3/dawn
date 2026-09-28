@@ -70,6 +70,23 @@ bool load_file_for_editing(const char* path);
 //! @param size size of content buffer
 void load_buffer_for_editing(const char* content, size_t size);
 
+//! Whether path is inside dawn's own notes directory (history_dir()).
+bool note_in_history_dir(const char* path);
+
+//! Rename the open note's file to <its directory>/<stem>.md, or <stem>-2.md, -3.md… when that name
+//! is taken: never over an existing file. Its .chat.json moves with it, the history forgets the old
+//! name and app.session_path becomes the new one.
+//! @return the new path (caller frees), or NULL when it was not renamed
+char* note_rename(const char* stem);
+
+//! Rename the open note's file back to exactly path (an undo), unless something is there now.
+//! @return false when it was not renamed
+bool note_rename_to(const char* path);
+
+//! The open note's file was just renamed to path: move its .chat.json, drop the old history
+//! entry, and make path app.session_path.
+void note_moved(const char* path);
+
 //! Reveal a file in system file manager
 //! @param path path to the file to reveal
 void open_in_finder(const char* path);

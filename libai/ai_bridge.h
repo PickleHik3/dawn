@@ -27,6 +27,7 @@
 #define AI_BRIDGE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -514,6 +515,83 @@ int32_t ai_bridge_context_window(void);
  * second call before another turn completes returns false.
  */
 bool ai_bridge_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens);
+
+/**
+ * @file The warm writing session, additions for the OpenAI-compatible bridge (P2).
+ *
+ * Errors a stream reports as exact sentinels, besides "Error: generation_active":
+ * "Error: insufficient_memory" (TAI can't load the model: insufficient_memory or
+ * low_available_memory), "Error: model_not_loaded" (TAI's auto-load is off) and
+ * "Error: context_full" (a verbatim session's prompt would overflow the window; never sent).
+ */
+
+/**
+ * @brief Make a session's history verbatim: exactly what was sent and received.
+ *
+ * TAI keeps one live conversation's KV cache and reuses it only when the next request is the
+ * held transcript plus exactly one message, with the same system prompt, options and tools
+ * (LiteRtTaiRuntime.ensureConversationLocked). A verbatim session therefore never attaches the
+ * note itself (the caller writes it into the prompt), never trims or rewrites its history, keeps
+ * tool rounds, and stores each reply as the model wrote it. A stopped or failed turn leaves the
+ * history as it was. A prompt that clearly exceeds the context window is refused with
+ * "Error: context_full" instead of being sent.
+ *
+ * @return true if the session was found
+ */
+bool ai_bridge_set_session_verbatim(ai_bridge_session_id_t session_id, bool verbatim);
+
+/** @brief What GET /v1/ai/runtime said last, beyond whether a model is resident. */
+typedef struct {
+  ai_bridge_model_state_t state; /**< As ai_bridge_runtime_state() */
+  int32_t reachable; /**< -1 not asked yet, 0 TAI is not set up or did not answer, 1 it answered */
+  bool loading; /**< A model is loading right now */
+  bool generating; /**< A generation runs (anyone's, another app's included) */
+  char loaded_model[128]; /**< The resident model's id, "" when none or unknown */
+  int64_t checked_at_ms; /**< When the answer came back (wall clock ms), 0 = never */
+} ai_bridge_runtime_info_t;
+
+/**
+ * @brief The last runtime answer, never blocking; refreshes in the background like
+ * ai_bridge_runtime_state().
+ */
+void ai_bridge_runtime_info(ai_bridge_runtime_info_t *out);
+
+#define AI_BRIDGE_MAX_MODELS 16
+
+/** @brief One chat model from GET /v1/models (modality variants such as "-vision" left out). */
+typedef struct {
+  char id[128];
+  char name[96]; /**< "_display_name", or the id */
+  int32_t context_window; /**< "_endpoint_context_window", 0 when not given */
+  int64_t size_bytes; /**< "_size", 0 when not given */
+} ai_bridge_model_info_t;
+
+/**
+ * @brief The models TAI can serve, last fetched; fetched in the background when stale.
+ *
+ * Copies up to max entries into out and returns how many there are, or -1 when the list has
+ * never been fetched successfully.
+ */
+int32_t ai_bridge_models(ai_bridge_model_info_t *out, int32_t max);
+
+/** @brief Fetch the model list again now, in the background. */
+void ai_bridge_models_refresh(void);
+
+/**
+ * @brief The model requests name: ai.json's "model" (then *pinned is true), else the one the
+ * user picked in dawn's chat (~/.config/dawn/state.json, "model"). Returns false, and "" in out,
+ * when neither names one (TAI then serves its loaded or default model). Reads both files.
+ */
+bool ai_bridge_active_model(char *out, size_t cap, bool *pinned);
+
+/**
+ * @brief Ask TAI to keep the resident model loaded for another `minutes`, in the background.
+ *
+ * POST /v1/ai/runtime/keep-warm, only when a model is resident right now and it is the one this
+ * configuration names (or none is named): it never causes a load and never touches the
+ * conversation TAI holds. One request at a time; a call while one runs is dropped.
+ */
+void ai_bridge_keep_warm(int32_t minutes);
 
 #ifdef __cplusplus
 }
