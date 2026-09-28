@@ -9,6 +9,7 @@
 #include "dawn_ai_tokens.h"
 #include "cJSON.h"
 #include "dawn_chat.h"
+#include "dawn_embed.h"
 #include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_gap.h"
@@ -466,10 +467,33 @@ static char* build_diff(const Baseline* base, int32_t budget_tokens, Baseline* n
 
 // #region Snapshot
 
+//! The pieces of the open note most relevant to question (dawn_embed), best first, that still
+//! hold the text they were indexed with. 0 when there is no index, the question is still being
+//! embedded (warmed while the user typed, it usually is not), or question is NULL.
+static int32_t relevant_pieces(const char* question, EmbedHit* rel, int32_t max)
+{
+    int32_t n = 0;
+    if (!question || !question[0] || !app.session_path
+        || embed_relevant(app.session_path, question, strlen(question), rel, max, &n) != EMBED_READY)
+        return 0;
+    int32_t kept = 0;
+    size_t doc_len = gap_len(&app.text);
+    for (int32_t i = 0; i < n; i++) {
+        if ((size_t)rel[i].start + rel[i].len > doc_len)
+            continue;
+        char* slice = gap_substr(&app.text, rel[i].start, rel[i].start + rel[i].len);
+        if (slice && embed_hit_matches(&rel[i], slice, rel[i].len))
+            rel[kept++] = rel[i];
+        free(slice);
+    }
+    return kept;
+}
+
 //! The note as it is now for a whole snapshot, sized to budget_tokens: its title, what is and
-//! isn't shown, and ai_note_snapshot()'s selection → section → outline → neighbours. *whole says
-//! whether nothing was left out; *base (when given) becomes the matching baseline.
-static char* note_context_budget(int32_t budget_tokens, bool* whole, Baseline* base)
+//! isn't shown, and ai_note_snapshot()'s selection → section → outline → passages relevant to
+//! question (NULL: none) → neighbours. *whole says whether nothing was left out; *base (when
+//! given) becomes the matching baseline.
+static char* note_context_budget(int32_t budget_tokens, const char* question, bool* whole, Baseline* base)
 {
     const char* title = app.frontmatter ? fm_get_string(app.frontmatter, "title") : NULL;
     char title_line[320] = "";
@@ -493,16 +517,27 @@ static char* note_context_budget(int32_t budget_tokens, bool* whole, Baseline* b
     size_t s, e;
     get_selection(&s, &e);
     AiSnapshotInfo info;
-    char* snapshot = ai_note_snapshot(&app.text, app.block_cache, app.cursor, s, e, budget_tokens, &info);
+    EmbedHit rel[8];
+    int32_t rel_n = relevant_pieces(question, rel, 8);
+    char* snapshot = ai_note_snapshot(&app.text, app.block_cache, app.cursor, s, e, budget_tokens, rel, rel_n, &info);
     if (whole)
         *whole = info.whole_note;
     if (base)
         baseline_from_snapshot(base, secs, n, info.whole_note);
     free(secs);
 
-    char explainer[256] = "";
+    char explainer[384] = "";
     if (!info.whole_note) {
-        if (info.section_heading[0])
+        if (info.has_relevant && info.section_heading[0])
+            snprintf(explainer, sizeof(explainer),
+                "You see the outline, the section \"%s\" and passages relevant to the question; the rest "
+                "of the note is not shown.\n",
+                info.section_heading);
+        else if (info.has_relevant)
+            snprintf(explainer, sizeof(explainer),
+                "You see the outline, the part around the cursor and passages relevant to the question; "
+                "the rest is not shown.\n");
+        else if (info.section_heading[0])
             snprintf(explainer, sizeof(explainer),
                 "You see the outline and the section \"%s\"; the rest of the note is not shown.\n",
                 info.section_heading);
@@ -522,7 +557,7 @@ static char* note_context_budget(int32_t budget_tokens, bool* whole, Baseline* b
 
 char* session_note_context(void)
 {
-    return note_context_budget((int32_t)(ai_ctx_window() * 0.55), NULL, NULL);
+    return note_context_budget((int32_t)(ai_ctx_window() * 0.55), NULL, NULL, NULL);
 }
 
 // #endregion
@@ -1065,7 +1100,7 @@ static void user_start(void)
         int32_t room = window - system_tokens() - q_tokens - g_user.max_tokens - REQUEST_MARGIN - 32;
         int32_t budget = room < (int32_t)(window * 0.55) ? room : (int32_t)(window * 0.55);
         bool whole = false;
-        char* context = note_context_budget(budget, &whole, &g_job.pending);
+        char* context = note_context_budget(budget, g_user.question, &whole, &g_job.pending);
         sb_str(&msg, g_user.question);
         sb_str(&msg, "\n\n---\n");
         sb_str(&msg, context);
@@ -1115,7 +1150,7 @@ static bool prime_start(void)
     int32_t budget = room < (int32_t)(window * 0.55) ? room : (int32_t)(window * 0.55);
     bool whole = false;
     baseline_free(&g_job.pending);
-    char* context = note_context_budget(budget, &whole, &g_job.pending);
+    char* context = note_context_budget(budget, NULL, &whole, &g_job.pending);
     sbuf_t msg = { 0 };
     sb_str(&msg, "(From dawn, not typed by the user.) This is the note I'm writing; read it now, "
                  "I'll ask about it later. Reply with only: ok\n\n");
@@ -1163,7 +1198,7 @@ static bool rebuild_start(void)
     int32_t budget = room < (int32_t)(window * 0.55) ? room : (int32_t)(window * 0.55);
     bool whole = false;
     baseline_free(&g_job.pending);
-    char* context = note_context_budget(budget, &whole, &g_job.pending);
+    char* context = note_context_budget(budget, NULL, &whole, &g_job.pending);
     sbuf_t msg = { 0 };
     sb_str(&msg, "(From dawn, not typed by the user.) ");
     if (g_summary && g_summary[0] && g_exchanges_total > g_log_count) {

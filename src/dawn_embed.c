@@ -110,6 +110,8 @@ static struct {
 
     LiveText live[EMBED_LIVE_MAX];
     int32_t live_count;
+    char* renames[EMBED_LIVE_MAX][2]; //!< embed_note_renamed() pairs (old, new) for the worker
+    int32_t rename_count;
 
     char q_text[EMBED_QUERY_MAX];
     size_t q_len;
@@ -289,6 +291,46 @@ static void store_remove(const char* path)
             remove(file);
         store_note_free(old);
         atomic_store(&g.news, true);
+    }
+}
+
+//! Carry renamed notes over (embed_note_renamed()): a note keeps its pieces under its new path and
+//! its cache file is written again under the new name, so nothing is embedded twice and the old
+//! path is never offered as a hit. Worker thread only.
+static void apply_renames(void)
+{
+    char* pairs[EMBED_LIVE_MAX][2];
+    pthread_mutex_lock(&g_lock);
+    int32_t count = g.rename_count;
+    memcpy(pairs, g.renames, sizeof(pairs[0]) * (size_t)count);
+    g.rename_count = 0;
+    pthread_mutex_unlock(&g_lock);
+    for (int32_t r = 0; r < count; r++) {
+        const char* from = pairs[r][0];
+        const char* to = pairs[r][1];
+        pthread_mutex_lock(&g_lock);
+        int32_t i = store_find(from);
+        bool moved = i >= 0 && store_find(to) < 0;
+        if (moved) {
+            snprintf(g.notes[i]->idx.path, sizeof(g.notes[i]->idx.path), "%s", to);
+            g.generation++;
+        }
+        pthread_mutex_unlock(&g_lock);
+        if (moved) {
+            // Only the worker changes the store, so g.notes[i] stays put without the lock.
+            char name[32], file[EMBED_PATH_MAX];
+            embed_index_file_name(to, name, sizeof(name));
+            if (join_path(file, sizeof(file), g.cache_dir, name))
+                embed_index_write(file, &g.notes[i]->idx);
+            embed_index_file_name(from, name, sizeof(name));
+            if (join_path(file, sizeof(file), g.cache_dir, name))
+                remove(file);
+            atomic_store(&g.news, true);
+        } else {
+            store_remove(from); // nothing to carry, or the new path is indexed already
+        }
+        free(pairs[r][0]);
+        free(pairs[r][1]);
     }
 }
 
@@ -894,6 +936,7 @@ static void* worker_main(void* arg)
     ScanList scan = { 0 };
 
     while (!atomic_load(&g.stop)) {
+        apply_renames();
         int64_t now = now_ms();
         if (now >= next_discover) {
             ai_embedder_t found;
@@ -1125,6 +1168,11 @@ void embed_shutdown(void)
         free(g.live[i].body);
     }
     g.live_count = 0;
+    for (int32_t i = 0; i < g.rename_count; i++) {
+        free(g.renames[i][0]);
+        free(g.renames[i][1]);
+    }
+    g.rename_count = 0;
     for (int32_t i = 0; i < EMBED_QUERY_CACHE; i++) {
         free(g.qcache[i].vec);
         memset(&g.qcache[i], 0, sizeof(g.qcache[i]));
@@ -1178,6 +1226,34 @@ void embed_note_changed(const char* path, const char* title, const char* body, s
     free(dropped.path);
     free(dropped.title);
     free(dropped.body);
+}
+
+void embed_note_renamed(const char* old_path, const char* new_path)
+{
+    if (!g.started || !old_path || !new_path || !new_path[0] || strlen(new_path) >= EMBED_PATH_MAX
+        || strcmp(old_path, new_path) == 0)
+        return;
+    char* from = dup_n(old_path, strlen(old_path));
+    char* to = dup_n(new_path, strlen(new_path));
+    pthread_mutex_lock(&g_lock);
+    // Text still waiting under the old name goes in under the new one.
+    for (int32_t i = 0; i < g.live_count; i++) {
+        char* renamed = strcmp(g.live[i].path, old_path) == 0 ? dup_n(new_path, strlen(new_path)) : NULL;
+        if (renamed) {
+            free(g.live[i].path);
+            g.live[i].path = renamed;
+        }
+    }
+    if (from && to && g.rename_count < EMBED_LIVE_MAX) {
+        g.renames[g.rename_count][0] = from;
+        g.renames[g.rename_count][1] = to;
+        g.rename_count++;
+        from = to = NULL;
+    }
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    free(from); // queue full: the next rescan drops the old path instead
+    free(to);
 }
 
 bool embed_ready(void)
@@ -1420,6 +1496,12 @@ void embed_note_changed(const char* path, const char* title, const char* body, s
     (void)title;
     (void)body;
     (void)len;
+}
+
+void embed_note_renamed(const char* old_path, const char* new_path)
+{
+    (void)old_path;
+    (void)new_path;
 }
 
 bool embed_ready(void) { return false; }
