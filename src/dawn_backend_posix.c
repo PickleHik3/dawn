@@ -1119,11 +1119,13 @@ static int32_t posix_read_key_raw(void)
             if (seq[1] == '<') {
                 char mouse_buf[32];
                 int32_t mi = 0;
+                char terminator = 0;
 
                 while (mi < 30) {
                     if (read(STDIN_FILENO, &mouse_buf[mi], 1) != 1)
                         break;
                     if (mouse_buf[mi] == 'M' || mouse_buf[mi] == 'm') {
+                        terminator = mouse_buf[mi];
                         mouse_buf[mi + 1] = '\0';
                         break;
                     }
@@ -1137,9 +1139,14 @@ static int32_t posix_read_key_raw(void)
                         return DAWN_KEY_MOUSE_SCROLL_UP;
                     if (btn == 65)
                         return DAWN_KEY_MOUSE_SCROLL_DOWN;
-                    // Left button click (btn 0 = press, check for 'M' terminator)
+                    // Button 0: 'M' is the press (the click), 'm' the release.
+                    // Without this split, one tap fired MOUSE_CLICK twice.
                     if (btn == 0)
-                        return DAWN_KEY_MOUSE_CLICK;
+                        return (terminator == 'M') ? DAWN_KEY_MOUSE_CLICK : DAWN_KEY_MOUSE_RELEASE;
+                    // Button 32 = motion (mode 1002) with button 0 held: a drag,
+                    // reported after a long-press so touch selection can extend.
+                    if (btn == 32)
+                        return DAWN_KEY_MOUSE_DRAG;
                 }
                 return DAWN_KEY_NONE;
             }
