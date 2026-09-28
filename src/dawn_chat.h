@@ -33,6 +33,9 @@ void ai_init_session(void);
 //! @param prompt user's input message
 void ai_send(const char* prompt);
 
+//! Name an untitled note once it has enough text, in the background. Call once per frame.
+void ai_title_tick(void);
+
 // #endregion
 
 #endif // HAS_LIBAI

@@ -698,8 +698,8 @@ static send_result_t send_request(const config_t* cfg, const char* body, exchang
 // #region Conversation
 
 static const char* NO_TOOLS_NOTICE
-    = "This model can't use tools, so it answers from your note's text and can't search the web "
-      "or edit.\n\n";
+    = "This model can't use tools, so it can't search the web. It still reads your note and can "
+      "edit it.\n\n";
 
 static const tool_t* find_tool(session_t* s, const char* name)
 {
@@ -709,13 +709,23 @@ static const tool_t* find_tool(session_t* s, const char* name)
     return NULL;
 }
 
-//! The selection, or the start of the note when nothing is selected, read through dawn's own
-//! read_document tool so the document is only touched on dawn's thread.
+//! The note to attach to the question, read through dawn's own read_document tool so the
+//! document is only touched on dawn's thread. Its "context" action gives the title, the note and
+//! the selection ready to send; a reader without it gives the selection or the note.
 static char* document_context(stream_t* st, session_t* s)
 {
     const tool_t* reader = find_tool(s, "read_document");
     if (!reader)
         return NULL;
+    char* prepared = call_tool(st, reader, "{\"action\":\"context\"}");
+    cJSON* prepared_root = prepared ? cJSON_Parse(prepared) : NULL;
+    free(prepared);
+    cJSON* prepared_text = cJSON_GetObjectItemCaseSensitive(prepared_root, "text");
+    char* ready = cJSON_IsString(prepared_text) && prepared_text->valuestring[0]
+        ? dup_str(prepared_text->valuestring) : NULL;
+    cJSON_Delete(prepared_root);
+    if (ready)
+        return ready;
     const char* actions[] = { "{\"action\":\"selection\"}", "{\"action\":\"full\"}" };
     for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); i++) {
         char* result = call_tool(st, reader, actions[i]);
@@ -734,6 +744,38 @@ static char* document_context(stream_t* st, session_t* s)
             return out;
     }
     return NULL;
+}
+
+//! content with the body of every edit block dawn made (<replace_note>…</replace_note> and the
+//! like) cut out. The next question brings the note as it now is, so a copy of a rewrite in the
+//! history would only spend a small context window twice.
+static char* compact_edit_blocks(const char* content)
+{
+    static const char* const tags[] = { "replace_note", "replace_selection", "insert_at_cursor", "append_to_note" };
+    char* out = dup_str(content);
+    for (size_t t = 0; out && t < sizeof(tags) / sizeof(tags[0]); t++) {
+        char open[40], close[40];
+        snprintf(open, sizeof(open), "<%s>", tags[t]);
+        snprintf(close, sizeof(close), "</%s>", tags[t]);
+        char* from = out;
+        char* at;
+        while ((at = strstr(from, open))) {
+            char* body = at + strlen(open);
+            char* end = strstr(body, close);
+            if (!end)
+                break;
+            const char* stub = "(made in the note)";
+            size_t stub_len = strlen(stub);
+            if ((size_t)(end - body) <= stub_len) {
+                from = end + strlen(close);
+                continue;
+            }
+            memcpy(body, stub, stub_len);
+            memmove(body + stub_len, end, strlen(end) + 1);
+            from = body + stub_len + strlen(close);
+        }
+    }
+    return out;
 }
 
 static cJSON* message_new(const char* role, const char* content)
@@ -763,8 +805,8 @@ static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, c
     const char* instructions = s->instructions ? s->instructions : "";
     char* system = with_tools
         ? dup_str(instructions)
-        : dup_printf("%s\n\nNo tools are available in this chat. When the user's message includes "
-                     "their note or selected text, answer from it.",
+        : dup_printf("%s\n\nNo tools can be called in this chat. Answer from the note that comes with "
+                     "the user's message, and make any change to it with the tagged blocks described above.",
               instructions);
     if (system && system[0])
         cJSON_AddItemToArray(messages, message_new("system", system));
@@ -833,7 +875,10 @@ static void run_turn(stream_t* st)
 
     cJSON* turn = cJSON_CreateArray();
     cJSON_AddItemToArray(turn, message_new("user", st->prompt));
-    char* context = use_tools ? NULL : document_context(st, s);
+    // The note rides on every question, tools or not. TAI takes the tools away from most
+    // on-device models without an error, and a model that was never shown the note cannot call
+    // read_document to find it: it would ask what "this" is.
+    char* context = document_context(st, s);
 
     for (int32_t round = 0; round <= MAX_TOOL_ROUNDS && !atomic_load(&st->cancel); round++) {
         pthread_mutex_lock(&g_lock);
@@ -879,7 +924,9 @@ static void run_turn(stream_t* st)
             }
             pthread_mutex_lock(&g_lock);
             cJSON_AddItemToArray(s->history, cJSON_Duplicate(cJSON_GetArrayItem(turn, 0), true));
-            cJSON_AddItemToArray(s->history, message_new("assistant", x.content.data ? x.content.data : ""));
+            char* kept = compact_edit_blocks(x.content.data ? x.content.data : "");
+            cJSON_AddItemToArray(s->history, message_new("assistant", kept ? kept : ""));
+            free(kept);
             pthread_mutex_unlock(&g_lock);
             exchange_free(&x);
             break;

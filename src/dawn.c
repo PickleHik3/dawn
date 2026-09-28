@@ -4972,6 +4972,7 @@ bool dawn_frame(void)
     }
 #if HAS_LIBAI
     ai_pump();
+    ai_title_tick();
 #endif
     handle_input();
     render();
