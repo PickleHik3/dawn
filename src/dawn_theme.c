@@ -14,6 +14,8 @@ static const DawnColor LIGHT_AI_BG = { 245, 243, 238 }; //!< Subtle AI panel
 static const DawnColor LIGHT_BORDER = { 220, 215, 205 }; //!< Soft borders
 static const DawnColor LIGHT_CODE_BG = { 240, 238, 233 }; //!< Code block background
 static const DawnColor LIGHT_MODAL_BG = { 255, 253, 250 }; //!< Modal popup background
+static const DawnColor LIGHT_INPUT_BG = { 238, 235, 228 }; //!< Chat input line, one step past the panel
+static const DawnColor LIGHT_ROW_SELECT = { 232, 228, 219 }; //!< Selected row in a list or modal
 
 //! Dark theme - deep focus aesthetic
 static const DawnColor DARK_BG = { 22, 22, 26 }; //!< Deep charcoal background
@@ -25,6 +27,8 @@ static const DawnColor DARK_AI_BG = { 28, 28, 32 }; //!< Slightly lighter panel
 static const DawnColor DARK_BORDER = { 50, 48, 45 }; //!< Soft borders
 static const DawnColor DARK_CODE_BG = { 30, 30, 34 }; //!< Code block background
 static const DawnColor DARK_MODAL_BG = { 35, 35, 40 }; //!< Modal popup background
+static const DawnColor DARK_INPUT_BG = { 35, 35, 40 }; //!< Chat input line, one step past the panel
+static const DawnColor DARK_ROW_SELECT = { 46, 45, 52 }; //!< Selected row in a list or modal
 
 //! Emphasis tokens with no material palette loaded: sensible values derived from the built-in
 //! cream/charcoal look rather than reusing get_accent() for everything.
@@ -46,10 +50,21 @@ static const DawnColor DARK_HIGHLIGHT_FG = { 235, 220, 170 };
 // Loaded roles map onto dawn's own tokens (see dawn-first-party-spec.html #colors); anything the
 // file doesn't define falls back to the built-in constants above, and if neither properties file
 // exists at all, dawn keeps its own cream/charcoal look exactly as before.
+//
+// The surfaces follow Material's tonal ladder, one rung per layer, the same in light and dark:
+//   page                      surface
+//   code blocks, block quotes surface_container_low
+//   chat pane                 surface_container
+//   chat input, help, modals  surface_container_high
+//   selected row              surface_container_highest
+// The page is deliberately not terminal_background (surface_container_lowest): the launcher never
+// paints a cell whose colour equals its default background, so a page in that colour would let
+// the wallpaper through.
 
 typedef struct {
     bool loaded;
     DawnColor bg, fg, dim, accent, select, ai_bg, code_bg, modal_bg, border;
+    DawnColor quote_bg, input_bg, row_select;
     DawnColor italic, link, underline, highlight_bg, highlight_fg, error;
 } MaterialPalette;
 
@@ -118,7 +133,21 @@ static bool material_find_color(const char* buf, size_t len, const char* key, Da
     return false;
 }
 
-static void material_load_one(const char* path, MaterialPalette* mp, const MaterialPalette* fallback)
+//! One RGB step lighter (dark palette) or darker (light palette), each channel held in 0..255.
+//! A channel already at the limit steps the other way, so the result always differs.
+static DawnColor nudge_one_step(DawnColor c, bool lighter)
+{
+    uint8_t* ch[3] = { &c.r, &c.g, &c.b };
+    for (int32_t i = 0; i < 3; i++) {
+        if (lighter)
+            *ch[i] = *ch[i] < 255 ? (uint8_t)(*ch[i] + 1) : 254;
+        else
+            *ch[i] = *ch[i] > 0 ? (uint8_t)(*ch[i] - 1) : 1;
+    }
+    return c;
+}
+
+static void material_load_one(const char* path, MaterialPalette* mp, const MaterialPalette* fallback, bool dark)
 {
     size_t len = 0;
     char* buf = DAWN_BACKEND(app)->read_file(path, &len);
@@ -129,11 +158,17 @@ static void material_load_one(const char* path, MaterialPalette* mp, const Mater
 
     // Each role falls back to the built-in palette passed in, one key at a time, so a partial
     // file (a role Termux:Styling hasn't started writing yet) still gets a coherent theme.
-    DawnColor surface_container = fallback->ai_bg;
-    material_find_color(buf, len, "surface_container", &surface_container);
+    DawnColor term_bg = fallback->bg;
+    bool have_term_bg = material_find_color(buf, len, "terminal_background", &term_bg);
 
-    mp->bg = fallback->bg;
-    material_find_color(buf, len, "terminal_background", &mp->bg);
+    // Older files carry no "surface": the terminal background is the next best page, nudged below.
+    mp->bg = term_bg;
+    material_find_color(buf, len, "surface", &mp->bg);
+    if (have_term_bg && mp->bg.r == term_bg.r && mp->bg.g == term_bg.g && mp->bg.b == term_bg.b) {
+        // One RGB step off the terminal's own background, away from the ink, is invisible to the
+        // eye but enough for the launcher to paint the cell.
+        mp->bg = nudge_one_step(mp->bg, dark);
+    }
     mp->fg = fallback->fg;
     material_find_color(buf, len, "terminal_foreground", &mp->fg);
     mp->dim = fallback->dim;
@@ -142,10 +177,17 @@ static void material_load_one(const char* path, MaterialPalette* mp, const Mater
     material_find_color(buf, len, "primary", &mp->accent);
     mp->select = fallback->select;
     material_find_color(buf, len, "terminal_selection_bg", &mp->select);
-    mp->ai_bg = surface_container;
-    mp->code_bg = surface_container;
+    mp->code_bg = fallback->code_bg;
+    material_find_color(buf, len, "surface_container_low", &mp->code_bg);
+    mp->quote_bg = mp->code_bg; // same rung, "surface_container_low"
+    mp->ai_bg = fallback->ai_bg;
+    material_find_color(buf, len, "surface_container", &mp->ai_bg);
     mp->modal_bg = fallback->modal_bg;
     material_find_color(buf, len, "surface_container_high", &mp->modal_bg);
+    mp->input_bg = fallback->input_bg;
+    material_find_color(buf, len, "surface_container_high", &mp->input_bg);
+    mp->row_select = fallback->row_select;
+    material_find_color(buf, len, "surface_container_highest", &mp->row_select);
     mp->border = fallback->border;
     material_find_color(buf, len, "outline_variant", &mp->border);
     mp->italic = fallback->italic;
@@ -194,9 +236,10 @@ static void material_refresh(void)
         } else {
             MaterialPalette fallback = { .bg = DARK_BG, .fg = DARK_FG, .dim = DARK_DIM, .accent = DARK_ACCENT,
                 .select = DARK_SELECT, .ai_bg = DARK_AI_BG, .code_bg = DARK_CODE_BG, .modal_bg = DARK_MODAL_BG,
-                .border = DARK_BORDER, .italic = DARK_ITALIC, .link = DARK_LINK,
+                .border = DARK_BORDER, .quote_bg = DARK_CODE_BG, .input_bg = DARK_INPUT_BG,
+                .row_select = DARK_ROW_SELECT, .italic = DARK_ITALIC, .link = DARK_LINK,
                 .highlight_bg = DARK_HIGHLIGHT_BG, .highlight_fg = DARK_HIGHLIGHT_FG };
-            material_load_one(material.dark_path, &material.dark, &fallback);
+            material_load_one(material.dark_path, &material.dark, &fallback, true);
         }
     }
 
@@ -208,9 +251,10 @@ static void material_refresh(void)
         } else {
             MaterialPalette fallback = { .bg = LIGHT_BG, .fg = LIGHT_FG, .dim = LIGHT_DIM, .accent = LIGHT_ACCENT,
                 .select = LIGHT_SELECT, .ai_bg = LIGHT_AI_BG, .code_bg = LIGHT_CODE_BG, .modal_bg = LIGHT_MODAL_BG,
-                .border = LIGHT_BORDER, .italic = LIGHT_ITALIC, .link = LIGHT_LINK,
+                .border = LIGHT_BORDER, .quote_bg = LIGHT_CODE_BG, .input_bg = LIGHT_INPUT_BG,
+                .row_select = LIGHT_ROW_SELECT, .italic = LIGHT_ITALIC, .link = LIGHT_LINK,
                 .highlight_bg = LIGHT_HIGHLIGHT_BG, .highlight_fg = LIGHT_HIGHLIGHT_FG };
-            material_load_one(material.light_path, &material.light, &fallback);
+            material_load_one(material.light_path, &material.light, &fallback, false);
         }
     }
 }
@@ -333,11 +377,31 @@ void fill_line_end(DawnColor bg)
 
 // #region Theme Colors
 
+//! The surface get_bg() hands out while a block quote renders (theme_surface_begin); every
+//! "back to the page" set_bg(get_bg()) inside the quote then lands on the quote's rung instead.
+static struct {
+    bool active;
+    DawnColor color;
+} surface_override = { 0 };
+
+void theme_surface_begin(DawnColor c)
+{
+    surface_override.active = true;
+    surface_override.color = c;
+}
+
+void theme_surface_end(void)
+{
+    surface_override.active = false;
+}
+
 DawnColor get_bg(void)
 {
     if (app.ctx.mode == DAWN_MODE_PRINT && app.ctx.host_bg) {
         return *app.ctx.host_bg;
     }
+    if (surface_override.active)
+        return surface_override.color;
     material_refresh();
     const MaterialPalette* m = material_for(app.theme);
     if (m->loaded)
@@ -399,6 +463,27 @@ DawnColor get_modal_bg(void)
     if (m->loaded)
         return m->modal_bg;
     return app.theme == THEME_DARK ? DARK_MODAL_BG : LIGHT_MODAL_BG;
+}
+DawnColor get_quote_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->quote_bg;
+    return app.theme == THEME_DARK ? DARK_CODE_BG : LIGHT_CODE_BG;
+}
+DawnColor get_input_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->input_bg;
+    return app.theme == THEME_DARK ? DARK_INPUT_BG : LIGHT_INPUT_BG;
+}
+DawnColor get_row_select_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->row_select;
+    return app.theme == THEME_DARK ? DARK_ROW_SELECT : LIGHT_ROW_SELECT;
 }
 DawnColor get_italic_color(void)
 {

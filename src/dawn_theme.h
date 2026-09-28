@@ -96,6 +96,24 @@ DawnColor get_code_bg(void);
 //! Get current theme's modal popup background color
 DawnColor get_modal_bg(void);
 
+//! Get current theme's block quote background (material palette: surface_container_low, the same
+//! rung as code blocks; built-in: the code block background)
+DawnColor get_quote_bg(void);
+
+//! Get current theme's chat input line background (material palette: surface_container_high)
+DawnColor get_input_bg(void);
+
+//! Get current theme's selected-row background in lists and modals (material palette:
+//! surface_container_highest)
+DawnColor get_row_select_bg(void);
+
+//! Make get_bg() return c until theme_surface_end(): a block quote renders on its own rung, and
+//! everything inside it that "returns to the page" background returns to the quote's instead.
+void theme_surface_begin(DawnColor c);
+
+//! End theme_surface_begin(); get_bg() is the page again.
+void theme_surface_end(void);
+
 //! Get current theme's italic-text color (material palette: tertiary; built-in: a muted plum)
 DawnColor get_italic_color(void);
 

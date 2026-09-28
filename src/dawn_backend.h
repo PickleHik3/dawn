@@ -201,6 +201,12 @@ typedef struct DawnBackend {
     bool (*img_resolve)(const char* raw, const char* base_dir, char* out, size_t out_size);
     int32_t (*img_calc_rows)(int32_t pw, int32_t ph, int32_t max_cols, int32_t max_rows);
     void (*img_invalidate)(const char* path);
+    //! Cell size in pixels, for placing an image at a pixel offset inside a cell (optional: NULL,
+    //! or false when the terminal doesn't say, means no pixel-exact overlays)
+    bool (*img_cell_px)(int32_t* w, int32_t* h);
+    //! Keep placements above the text (z > 0) alive across frames: img_frame_start then clears
+    //! only dawn's own document images and masks instead of every placement (optional)
+    void (*img_keep_overlays)(bool keep);
 
 } DawnBackend;
 

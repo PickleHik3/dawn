@@ -19,6 +19,7 @@
 #include "dawn_nav.h"
 #include "dawn_notice.h"
 #include "dawn_render.h"
+#include "dawn_scrollind.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
 #include "dawn_tex.h"
@@ -41,7 +42,11 @@ typedef struct {
     int32_t text_area_cols;
     int32_t ai_cols;
     int32_t ai_start_col;
-    bool ai_overlay; //!< The chat covers the whole screen (narrow terminals) instead of a side panel
+    bool ai_overlay; //!< The chat covers the whole screen (narrow and short) instead of a side panel
+    bool ai_sheet; //!< The chat is a bottom sheet under the note (narrow terminals)
+    int32_t ai_top; //!< First screen row of the chat (1 unless it is a sheet)
+    int32_t ai_rows; //!< Rows the chat occupies (all of them unless it is a sheet)
+    int32_t note_rows; //!< Rows left to the note, status line included (all unless a sheet is up)
     int32_t margin;
     int32_t text_width;
     int32_t top_margin;
@@ -110,13 +115,31 @@ static inline Layout calc_layout(void)
     l.text_area_cols = app.cols;
     l.ai_cols = 0;
     l.ai_start_col = app.cols + 1;
+    l.ai_top = 1;
+    l.ai_rows = app.rows;
+    l.note_rows = app.rows;
 
     if (app.ai_open && app.cols < AI_PANEL_MIN_COLS) {
-        // A phone-width terminal has no room beside the note: the chat takes the whole screen,
-        // and the note keeps its full-width layout underneath for when the chat closes.
-        l.ai_overlay = true;
+        // A phone-width terminal has no room beside the note: the chat rises from the bottom as a
+        // sheet, full width, and the note keeps the rows above it. Recomputed every frame, so the
+        // keyboard showing or hiding (which changes app.rows) resizes both.
         l.ai_cols = app.cols;
         l.ai_start_col = 1;
+        int32_t sheet_rows = app.rows * AI_SHEET_HEIGHT / 100;
+        if (sheet_rows < AI_SHEET_MIN_ROWS)
+            sheet_rows = AI_SHEET_MIN_ROWS;
+        if (app.rows - sheet_rows < AI_SHEET_MIN_NOTE_ROWS)
+            sheet_rows = app.rows - AI_SHEET_MIN_NOTE_ROWS;
+        if (sheet_rows >= AI_SHEET_MIN_ROWS) {
+            l.ai_sheet = true;
+            l.ai_rows = sheet_rows;
+            l.ai_top = app.rows - sheet_rows + 1;
+            l.note_rows = app.rows - sheet_rows;
+        } else {
+            // Too short for both: the chat takes the whole screen, and the note keeps its
+            // full-width layout underneath for when the chat closes.
+            l.ai_overlay = true;
+        }
     } else if (app.ai_open) {
         l.ai_cols = app.cols * AI_PANEL_WIDTH / 100;
         if (l.ai_cols < 30)
@@ -138,7 +161,9 @@ static inline Layout calc_layout(void)
         l.text_width = l.text_area_cols;
     }
     l.top_margin = 2;
-    l.text_height = app.rows - l.top_margin - 2;
+    // Under a sheet there is no status line (the chat has its own input line); one blank row
+    // still separates the note's last line from the sheet's edge.
+    l.text_height = l.ai_sheet ? l.note_rows - l.top_margin - 1 : app.rows - l.top_margin - 2;
     if (l.text_height < 1)
         l.text_height = 1;
     return l;
@@ -2433,13 +2458,17 @@ static bool render_table_element(const RenderCtx* ctx, RenderState* rs, const Bl
 
 // #region AI Panel Rendering
 
+//! The chat's largest scroll offset as of its last render (0 when everything fits): the offset
+//! at which it shows its oldest message, which is where a swipe down closes a sheet.
+static int32_t chat_max_scroll = 0;
+
 //! Render AI panel
 static void render_ai_panel(const Layout* L)
 {
     int32_t padding = 1;
     int32_t prefix_len = 4;
-    // As an overlay there is no border column: the panel starts at the screen's edge.
-    int32_t border_cols = L->ai_overlay ? 0 : 1;
+    // As an overlay or a sheet there is no border column: the panel starts at the screen's edge.
+    int32_t border_cols = (L->ai_overlay || L->ai_sheet) ? 0 : 1;
     int32_t content_start = L->ai_start_col + border_cols + padding;
     int32_t content_width = L->ai_cols - border_cols - (padding * 2);
     if (content_width < 1)
@@ -2451,49 +2480,73 @@ static void render_ai_panel(const Layout* L)
     if (cont_line_width < 1)
         cont_line_width = 1;
 
+    // The chat's own rows: the whole height beside the note or as an overlay, the lower part of
+    // the screen as a sheet.
+    int32_t top = L->ai_top;
+    int32_t bottom = L->ai_top + L->ai_rows - 1;
+    bool sheet = L->ai_sheet;
+
     if (!app.ai_focused)
         set_dim(true);
 
     // Draw border and clear
-    for (int32_t row = 1; row <= app.rows; row++) {
+    for (int32_t row = top; row <= bottom; row++) {
         move_to(row, L->ai_start_col);
         set_bg(get_ai_bg());
         set_fg(get_border());
-        if (!L->ai_overlay)
+        if (!L->ai_overlay && !sheet)
             out_str("│");
         clear_range(L->ai_cols - border_cols);
     }
 
-    // Header
-    move_to(1, L->ai_start_col + border_cols);
-    set_bg(get_ai_bg());
-    out_spaces(padding);
-    set_fg(get_fg());
-    set_bold(true);
-    out_str("chat");
-    reset_attrs();
-    set_bg(get_ai_bg());
-
-    // Header separator
-    move_to(2, L->ai_start_col);
-    set_bg(get_ai_bg());
-    set_fg(get_border());
-    if (!L->ai_overlay)
-        out_str("├");
-    int32_t dashes = L->ai_overlay ? L->ai_cols : L->ai_cols - 2;
-    for (int32_t ic = 0; ic < dashes; ic++)
-        out_str("─");
-
-    // Hint
     const char* hint = app.ai_thinking && app.ai_focused && !app.ai_stopping ? "esc stop" : "esc close";
-    int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding;
-    if (hint_col < content_start + 5)
-        hint_col = content_start + 5;
-    if (hint_col + (int32_t)strlen(hint) <= L->ai_start_col + L->ai_cols) {
-        move_to(1, hint_col);
+    int32_t handle_col = L->ai_start_col + (L->ai_cols - 2) / 2;
+    if (sheet) {
+        // A sheet's edge is only the change of surface (page to surface_container) and a short
+        // drag handle; no title, no rule. The stop hint is the one thing worth a word here, and
+        // only while a reply is running.
+        move_to(top, handle_col);
         set_bg(get_ai_bg());
         set_fg(get_dim());
-        out_str(hint);
+        out_str("──");
+        if (app.ai_thinking && app.ai_focused && !app.ai_stopping) {
+            int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding;
+            if (hint_col > handle_col + 3) {
+                move_to(top, hint_col);
+                out_str(hint);
+            }
+        }
+    } else {
+        // Header
+        move_to(1, L->ai_start_col + border_cols);
+        set_bg(get_ai_bg());
+        out_spaces(padding);
+        set_fg(get_fg());
+        set_bold(true);
+        out_str("chat");
+        reset_attrs();
+        set_bg(get_ai_bg());
+
+        // Header separator
+        move_to(2, L->ai_start_col);
+        set_bg(get_ai_bg());
+        set_fg(get_border());
+        if (!L->ai_overlay)
+            out_str("├");
+        int32_t dashes = L->ai_overlay ? L->ai_cols : L->ai_cols - 2;
+        for (int32_t ic = 0; ic < dashes; ic++)
+            out_str("─");
+
+        // Hint
+        int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding;
+        if (hint_col < content_start + 5)
+            hint_col = content_start + 5;
+        if (hint_col + (int32_t)strlen(hint) <= L->ai_start_col + L->ai_cols) {
+            move_to(1, hint_col);
+            set_bg(get_ai_bg());
+            set_fg(get_dim());
+            out_str(hint);
+        }
     }
 
     // Calculate input area
@@ -2516,8 +2569,8 @@ static void render_ai_panel(const Layout* L)
     if (input_lines > AI_INPUT_MAX_LINES)
         input_lines = AI_INPUT_MAX_LINES;
 
-    int32_t input_start_row = app.rows - input_lines;
-    int32_t msg_area_start = 4;
+    int32_t input_start_row = bottom - input_lines;
+    int32_t msg_area_start = sheet ? top + 1 : 4;
     int32_t msg_area_end = input_start_row - 2;
     int32_t msg_area_height = msg_area_end - msg_area_start;
     if (msg_area_height < 1)
@@ -2573,6 +2626,7 @@ static void render_ai_panel(const Layout* L)
     }
 
     max_scroll = total_lines > msg_area_height ? total_lines - msg_area_height : 0;
+    chat_max_scroll = max_scroll;
     if (app.chat_scroll < 0)
         app.chat_scroll = 0;
     if (app.chat_scroll > max_scroll)
@@ -2692,28 +2746,34 @@ static void render_ai_panel(const Layout* L)
                 out_char(status[c]);
     }
 
+    // The pill in the chat's right padding column, over the message rows
+    scrollind_show(SCROLLIND_CHAT, L->ai_start_col + L->ai_cols - 1, msg_area_start, msg_area_height,
+        total_lines, msg_area_height, first_visible);
+
     free(msg_start_lines);
     free(msg_line_counts);
 
 skip_chat:
-    // Scroll indicator
-    if (max_scroll > 0 && app.chat_scroll > 0) {
-        move_to(3, content_start);
+    // Scroll indicator: its own row under the header, or beside a sheet's handle when it fits.
+    // Where the fading pill can be drawn it says the same thing without words.
+    if (max_scroll > 0 && app.chat_scroll > 0 && !scrollind_available()
+        && (!sheet || content_start + 18 < handle_col)) {
+        move_to(sheet ? top : 3, content_start);
         set_fg(get_dim());
         set_bg(get_ai_bg());
         out_str("↑ scroll for more");
     }
 
-    // Input separator
-    move_to(input_start_row - 1, content_start);
-    set_bg(get_ai_bg());
-    set_fg(get_border());
-    for (int32_t ic = 0; ic < content_width; ic++)
-        out_str("─");
-
-    // Input area
+    // Input area: one rung up the tonal ladder (surface_container_high) from the chat, which is
+    // what sets it apart - no separator line. The row above the prompt is the band's own padding.
+    int32_t band_col = L->ai_start_col + border_cols;
+    int32_t band_cols = L->ai_cols - border_cols;
+    set_bg(get_input_bg());
+    for (int32_t row = input_start_row - 1; row <= bottom; row++) {
+        move_to(row, band_col);
+        out_spaces(band_cols);
+    }
     move_to(input_start_row, content_start);
-    set_bg(get_ai_bg());
     set_fg(get_accent());
     out_str("> ");
     set_fg(get_fg());
@@ -2721,7 +2781,7 @@ skip_chat:
     int32_t cur_row = input_start_row, cur_col = 2;
     int32_t cursor_row = input_start_row, cursor_col = content_start + 2;
 
-    for (size_t i = 0; i < app.ai_input_len && cur_row <= app.rows; i++) {
+    for (size_t i = 0; i < app.ai_input_len && cur_row <= bottom; i++) {
         if (i == app.ai_input_cursor) {
             cursor_row = cur_row;
             cursor_col = content_start + cur_col;
@@ -2731,9 +2791,9 @@ skip_chat:
         if (c == '\n') {
             cur_row++;
             cur_col = 0;
-            if (cur_row <= app.rows) {
+            if (cur_row <= bottom) {
                 move_to(cur_row, content_start);
-                set_bg(get_ai_bg());
+                set_bg(get_input_bg());
             }
             continue;
         }
@@ -2741,10 +2801,10 @@ skip_chat:
         if (cur_col >= input_width + 2) {
             cur_row++;
             cur_col = 0;
-            if (cur_row > app.rows)
+            if (cur_row > bottom)
                 break;
             move_to(cur_row, content_start);
-            set_bg(get_ai_bg());
+            set_bg(get_input_bg());
         }
 
         out_char(c);
@@ -3467,6 +3527,10 @@ static void render_writing_plain(void)
         cursor_screen_col = L.margin + 1 + cursor_col_in_line;
     }
 
+    if (L.margin > 0)
+        scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
+            L.text_height, app.scroll_y);
+
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
 }
@@ -3482,6 +3546,7 @@ static void render(void)
 
     sync_begin();
     cursor_visible(false);
+    scrollind_frame_begin();
 
     switch (app.mode) {
     case MODE_WELCOME:
@@ -3528,6 +3593,7 @@ static void render(void)
         break;
     }
 
+    scrollind_frame_end();
     sync_end();
     out_flush();
 }
@@ -3645,12 +3711,17 @@ static struct {
     bool press_active; //!< a press has landed and no release/drag-elsewhere has resolved it yet
 } touch_state = { 0 };
 
-//! Which pane a screen column falls in. In the portrait overlay (calc_layout().ai_overlay, added
-//! by the data-safety patch) the chat is drawn over every column and row of the note, so there is
-//! no uncovered note region to route a tap to: every tap there is a chat tap.
-static bool tap_is_over_chat(const Layout* L, int32_t col)
+//! Which pane a screen cell falls in. Beside the note the split is by column; as a bottom sheet
+//! (calc_layout().ai_sheet) it is by row, the sheet's first row and everything under it being the
+//! chat. In the full-screen overlay (too short for a sheet) the chat is drawn over every cell of
+//! the note, so there is no uncovered note region to route a tap to: every tap there is a chat tap.
+static bool tap_is_over_chat(const Layout* L, int32_t row, int32_t col)
 {
-    return app.ai_open && (L->ai_overlay || col >= L->ai_start_col);
+    if (!app.ai_open)
+        return false;
+    if (L->ai_sheet)
+        return row >= L->ai_top;
+    return L->ai_overlay || col >= L->ai_start_col;
 }
 
 //! Reverse of calc_cursor_vrow_in_block's BLOCK_HEADER case. OSC 66 scales a header's text by
@@ -3947,15 +4018,16 @@ static void handle_mouse_click(void)
     int32_t row = input_last_mouse_row();
     int32_t col = input_last_mouse_col();
 
-    if (tap_is_over_chat(&L, col)) {
+    if (tap_is_over_chat(&L, row, col)) {
         app.ai_focused = true;
         touch_state.press_active = false;
         return;
     }
 
-    // A tap over the note focuses it, closing the chat's focus the same way Tab does (in the
-    // overlay layout this branch is unreachable: tap_is_over_chat() is always true there, so a
-    // tap never "closes" the overlay the way Esc does - there is no uncovered note region to tap).
+    // A tap over the note focuses it, closing the chat's focus the same way Tab does; a sheet
+    // stays open, dimmed, under the note. (In the full-screen overlay this branch is unreachable:
+    // tap_is_over_chat() is always true there, so a tap never "closes" the overlay the way Esc
+    // does - there is no uncovered note region to tap.)
     app.ai_focused = false;
     app.view_detached = false;
 
@@ -3995,14 +4067,49 @@ static void handle_mouse_click(void)
     touch_state.press_active = true;
 }
 
+//! A swipe arrives as a run of wheel events with no begin or end of its own; one landing more than
+//! this long after the previous starts a new swipe.
+#define SWIPE_GAP_MS 250
+
+static struct {
+    int64_t last_ms; //!< clock() time of the previous wheel event
+    bool over_chat; //!< the pane the current swipe started over, which keeps it for the whole swipe
+    bool swallow; //!< the swipe closed the sheet; its remaining events go nowhere
+} swipe_state = { 0 };
+
 //! DAWN_KEY_MOUSE_SCROLL_UP/DOWN in MODE_WRITING: routed to whichever pane the finger is over, not
 //! whichever pane has focus, so scrolling the note works while the chat is focused and vice versa.
+//! The pane is chosen where the swipe starts and kept until it ends, so a swipe that drifts over a
+//! sheet's edge doesn't change hands halfway. On a sheet, a swipe down (wheel up, Termux's reading
+//! of a finger moving down) that starts on its top row, or with the chat already showing its
+//! oldest message, closes it, as a sheet does.
 static void handle_mouse_scroll(int32_t key)
 {
     Layout L = calc_layout();
+    int32_t row = input_last_mouse_row();
     int32_t col = input_last_mouse_col();
 
-    if (tap_is_over_chat(&L, col)) {
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    bool starts = swipe_state.last_ms == 0 || now - swipe_state.last_ms > SWIPE_GAP_MS;
+    swipe_state.last_ms = now;
+    if (starts) {
+        swipe_state.over_chat = tap_is_over_chat(&L, row, col);
+        swipe_state.swallow = false;
+        // The finger has usually moved a row by the time the first event is sent, so the handle
+        // row and the one under it both count as "on the edge".
+        bool on_edge = row <= L.ai_top + 1;
+        if (L.ai_sheet && swipe_state.over_chat && key == DAWN_KEY_MOUSE_SCROLL_UP
+            && (on_edge || app.chat_scroll >= chat_max_scroll)) {
+            app.ai_open = false;
+            app.ai_focused = false;
+            swipe_state.swallow = true;
+            return;
+        }
+    }
+    if (swipe_state.swallow)
+        return;
+
+    if (app.ai_open && swipe_state.over_chat) {
         if (key == DAWN_KEY_MOUSE_SCROLL_UP)
             app.chat_scroll += 3;
         else {
@@ -4035,7 +4142,7 @@ static void handle_mouse_drag(void)
     int32_t row = input_last_mouse_row();
     int32_t col = input_last_mouse_col();
 
-    if (tap_is_over_chat(&L, col))
+    if (tap_is_over_chat(&L, row, col))
         return; // no drag-selection in the chat pane
 
     if (!touch_state.press_active) {
@@ -5659,6 +5766,7 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 void dawn_engine_shutdown(void)
 {
     DAWN_BACKEND(app)->set_title(NULL);
+    scrollind_shutdown();
 
     // save_session writes only what changed; an empty note that was emptied on purpose counts.
     if (app.session_path && app.mode == MODE_WRITING && !app.preview_mode) {
@@ -5988,8 +6096,8 @@ static void render_writing(void)
 
     Layout L = calc_layout();
 
-    // On a narrow screen the chat is all there is while it is open: the note, its images and its
-    // status bar wait underneath. Every key goes to the chat, so it holds the focus.
+    // On a screen too short for a sheet the chat is all there is while it is open: the note, its
+    // images and its status bar wait underneath. Every key goes to the chat, so it holds the focus.
     if (!print_mode && L.ai_overlay) {
         app.ai_focused = true;
         image_frame_start();
@@ -6016,7 +6124,7 @@ static void render_writing(void)
             set_bg(get_bg());
             for (int32_t c = 0; c < L.text_area_cols; c++)
                 out_char(' ');
-            if (app.ai_open) {
+            if (app.ai_open && !L.ai_sheet) {
                 set_bg(get_bg());
                 set_fg(get_border());
                 out_char(' ');
@@ -6304,7 +6412,14 @@ static void render_writing(void)
 
     set_bg(get_bg());
 
-    render_status_bar(&L);
+    // The note's pill, in its right margin over the text rows (none when there is no margin)
+    if (L.margin > 0 && bc && bc->valid)
+        scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, bc->total_vrows,
+            L.text_height, app.scroll_y);
+
+    // Under a sheet the note has no status line: the chat's input line is the bottom edge.
+    if (!L.ai_sheet)
+        render_status_bar(&L);
 
     if (app.ai_open) {
         render_ai_panel(&L);
@@ -6381,6 +6496,14 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
         rs->run_count = block->inline_run_count;
         rs->current_run_idx = 0;
 
+        // A block quote sits on its own rung (surface_container_low): each of its rows is filled
+        // across the text column below, and every return to "the page" inside it returns here.
+        bool quote_surface = block->type == BLOCK_BLOCKQUOTE && !ctx->is_print_mode;
+        if (quote_surface) {
+            theme_surface_begin(get_quote_bg());
+            set_bg(get_bg());
+        }
+
         while (rs->pos < block->end && rs->pos < len) {
             int32_t screen_row = VROW_TO_SCREEN(&ctx->L, rs->virtual_row, app.scroll_y);
             char c = gap_at(&app.text, rs->pos);
@@ -6430,8 +6553,14 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
 
             // Render line prefixes (blockquote bars, list bullets, etc.)
             if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
-                if (rs->col_width == 0)
+                if (rs->col_width == 0) {
+                    if (quote_surface) {
+                        move_to(screen_row, ctx->L.margin + 1);
+                        set_bg(get_bg());
+                        out_spaces(ctx->L.text_width);
+                    }
                     move_to(screen_row, ctx->L.margin + 1);
+                }
                 render_line_prefixes(ctx, rs, block, line_end, &seg_end, &seg_width);
             }
 
@@ -6547,6 +6676,10 @@ static void render_block(const RenderCtx* ctx, RenderState* rs, const Block* blo
                 rs->col_width = 0;
                 rs->pos = skip_leading_space(&app.text, rs->pos, line_end);
             }
+        }
+        if (quote_surface) {
+            theme_surface_end();
+            set_bg(get_bg());
         }
         break;
     }

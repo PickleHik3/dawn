@@ -68,8 +68,18 @@
 //! AI chat panel width in columns
 #define AI_PANEL_WIDTH 45
 
-//! Below this many columns the chat covers the screen instead of sitting beside the note
+//! Below this many columns the chat is a bottom sheet under the note instead of a side panel
 #define AI_PANEL_MIN_COLS 80
+
+//! Bottom sheet height, in percent of the screen's rows
+#define AI_SHEET_HEIGHT 45
+
+//! Fewest rows the bottom sheet is given
+#define AI_SHEET_MIN_ROWS 8
+
+//! Fewest rows the note keeps above the sheet; when both minimums can't be met the chat covers
+//! the whole screen instead
+#define AI_SHEET_MIN_NOTE_ROWS 5
 
 //! How many pre-edit copies of a note the AI's edits keep, per note
 #define MAX_NOTE_VERSIONS 20
