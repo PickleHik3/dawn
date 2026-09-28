@@ -49,6 +49,11 @@ bool ai_speak_start(const char* const* texts, const size_t* lens, int32_t count)
 //! (fire-and-forget, on its own thread) so the phone falls silent now. Never blocks.
 void ai_speak_stop(void);
 
+//! ai_speak_stop() for when dawn is exiting: the stop request goes out on the calling thread
+//! (at most ~2 s, and only when something is being spoken), since a detached thread would die
+//! with the process before the phone heard it.
+void ai_speak_shutdown(void);
+
 //! The run's current state. Cheap; call it every frame.
 void ai_speak_status(ai_speak_status_t* out);
 

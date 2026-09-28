@@ -418,6 +418,26 @@ void ai_speak_stop(void)
     }
 }
 
+void ai_speak_shutdown(void)
+{
+    atomic_store(&g_active_gen, 0u);
+    pthread_mutex_lock(&g_lock);
+    bool was_running = g_st.phase == AI_SPEAK_RUNNING;
+    g_st.phase = was_running ? AI_SPEAK_STOPPED : g_st.phase;
+    g_st.gen = 0;
+    pthread_mutex_unlock(&g_lock);
+    if (!was_running)
+        return;
+    char* base_url = NULL;
+    char* api_key = NULL;
+    if (ai_bridge_endpoint(&base_url, &api_key, NULL)) {
+        long status = 0;
+        free(post_json(base_url, api_key, "/ai/speak/stop", "{}", 2L, 0, &status));
+    }
+    free(base_url);
+    free(api_key);
+}
+
 void ai_speak_status(ai_speak_status_t* out)
 {
     if (!out)
