@@ -3363,13 +3363,22 @@ static void render_writing_plain(void)
         cursor_col_in_line = gap_display_width(&app.text, wr->lines[cursor_vrow].start, len);
     }
 
-    // Adjust scroll with margin
+    // Adjust scroll with margin. While touch-detached (dawn_touch), stay put and just clamp to
+    // the document's own bounds, the same as render_writing() does for WYSIWYG mode.
     int32_t scroll_margin = L.text_height > 10 ? 3 : 1;
-    if (cursor_vrow < app.scroll_y + scroll_margin) {
-        app.scroll_y = cursor_vrow - scroll_margin;
-    }
-    if (cursor_vrow >= app.scroll_y + L.text_height - scroll_margin) {
-        app.scroll_y = cursor_vrow - L.text_height + scroll_margin + 1;
+    if (app.view_detached) {
+        int32_t max_scroll = wr->count - L.text_height + scroll_margin;
+        if (max_scroll < 0)
+            max_scroll = 0;
+        if (app.scroll_y > max_scroll)
+            app.scroll_y = max_scroll;
+    } else {
+        if (cursor_vrow < app.scroll_y + scroll_margin) {
+            app.scroll_y = cursor_vrow - scroll_margin;
+        }
+        if (cursor_vrow >= app.scroll_y + L.text_height - scroll_margin) {
+            app.scroll_y = cursor_vrow - L.text_height + scroll_margin + 1;
+        }
     }
     if (app.scroll_y < 0)
         app.scroll_y = 0;
@@ -3502,6 +3511,7 @@ static void begin_session(char* path)
 
     app.cursor = 0;
     app.scroll_y = 0;
+    app.view_detached = false;
     app.selecting = false;
     undo_reset();
     app.dirty = false;
@@ -3567,9 +3577,278 @@ static void move_cursor(size_t new_pos, bool extend_sel)
     app.cursor = new_pos;
 }
 
+// #endregion
+
+// #region Touch Input (dawn_touch)
+//
+// Termux sends SGR mouse events (dawn enables ?1000h ?1006h): a tap is a button-0 press then
+// release at the same column/row, and a swipe is wheel buttons 64/65. DAWN_KEY_MOUSE_CLICK and
+// DAWN_KEY_MOUSE_SCROLL_UP/DOWN carry no position of their own; the position is whatever
+// input_last_mouse_col()/row() held when the key was decoded (dawn_backend_posix.c).
+//
+// A tap's press and its release both decode to DAWN_KEY_MOUSE_CLICK (the posix backend does not
+// distinguish 'M' from 'm' for button 0), so handle_mouse_click() runs twice per tap at the same
+// position; both runs land on the same target, so that is harmless here.
+
+//! Which pane a screen column falls in. In the portrait overlay (calc_layout().ai_overlay, added
+//! by the data-safety patch) the chat is drawn over every column and row of the note, so there is
+//! no uncovered note region to route a tap to: every tap there is a chat tap.
+static bool tap_is_over_chat(const Layout* L, int32_t col)
+{
+    return app.ai_open && (L->ai_overlay || col >= L->ai_start_col);
+}
+
+//! Reverse of calc_cursor_vrow_in_block's BLOCK_HEADER case. OSC 66 scales a header's text by
+//! `scale`, so each character takes `scale` terminal columns and `available` characters fit per
+//! wrapped row; dividing the tapped column by `scale` gets back to a character index. This is an
+//! approximation, not an exact inverse: a grapheme wider than one column, or a tap that lands
+//! between two scaled cells of the same character, can be off by a character. Good enough to land
+//! in the right word.
+static size_t map_header_vrow_to_pos(const Block* block, int32_t target_vrow, int32_t target_col, int32_t wrap_width)
+{
+    int32_t level = block->data.header.level;
+    int32_t scale = (level == 1) ? 2 : 1;
+    int32_t available = wrap_width / scale;
+    if (available < 1)
+        available = 1;
+    int32_t target_row = target_vrow / scale;
+    int32_t target_char_col = target_col / scale;
+
+    size_t pos = block->start;
+    int32_t row = 0, char_col = 0;
+    while (pos < block->end && gap_at(&app.text, pos) != '\n') {
+        if (row == target_row && char_col >= target_char_col)
+            return pos;
+        size_t next;
+        int32_t gw = gap_grapheme_width(&app.text, pos, &next);
+        int32_t new_col = char_col + gw;
+        if (new_col > available) {
+            if (row == target_row)
+                return pos; // the tapped row ends here; the tap was past its last character
+            row++;
+            char_col = gw;
+        } else {
+            char_col = new_col;
+        }
+        pos = next;
+    }
+    return pos;
+}
+
+//! Reverse of calc_cursor_vrow_in_block's BLOCK_CODE/BLOCK_MATH/BLOCK_TABLE case, which counts
+//! newlines with no wrapping: walk newlines to the target line, then walk columns within it.
+//! Also used, with target_col forced to 0, for tables/math/images/hr: those wrap or lay out their
+//! content in ways this cannot invert exactly, so a tap there just snaps to the block's own line.
+static size_t map_line_vrow_to_pos(const Block* block, int32_t target_vrow, int32_t target_col)
+{
+    size_t pos = block->start;
+    int32_t vrow = 0;
+    while (pos < block->end && vrow < target_vrow) {
+        if (gap_at(&app.text, pos) == '\n')
+            vrow++;
+        pos++;
+    }
+    int32_t col = 0;
+    while (pos < block->end && gap_at(&app.text, pos) != '\n') {
+        size_t next;
+        int32_t gw = gap_grapheme_width(&app.text, pos, &next);
+        if (col + gw > target_col)
+            break;
+        col += gw;
+        pos = next;
+    }
+    return pos;
+}
+
+//! Reverse of calc_cursor_vrow_in_block's default case (paragraphs, list items, block quotes,
+//! footnote definitions): walk the block's wrapped lines, the same way nav_move_visual_line does,
+//! until target_vrow is reached, then walk graphemes within that wrapped segment until target_col
+//! is covered.
+static size_t map_wrapped_vrow_to_pos(const Block* block, int32_t target_vrow, int32_t target_col, int32_t wrap_width)
+{
+    if (wrap_width <= 0)
+        wrap_width = 1;
+
+    size_t pos = block->start;
+    int32_t vrow = 0;
+
+    while (pos <= block->end) {
+        size_t line_end = pos;
+        while (line_end < block->end && gap_at(&app.text, line_end) != '\n')
+            line_end++;
+
+        size_t seg_start = pos;
+        do {
+            size_t seg_end = seg_start < line_end
+                ? gap_find_wrap_point(&app.text, seg_start, line_end, wrap_width, NULL)
+                : line_end;
+
+            if (vrow == target_vrow) {
+                size_t result = seg_start;
+                int32_t width = 0;
+                while (result < seg_end) {
+                    size_t next;
+                    int32_t gw = gap_grapheme_width(&app.text, result, &next);
+                    if (width + gw > target_col)
+                        break;
+                    width += gw;
+                    result = next;
+                }
+                return result;
+            }
+            vrow++;
+
+            if (seg_end >= line_end)
+                break;
+            seg_start = seg_end;
+            while (seg_start < line_end && gap_at(&app.text, seg_start) == ' ')
+                seg_start++;
+        } while (seg_start < line_end);
+
+        if (line_end >= block->end)
+            return line_end;
+        pos = line_end + 1;
+    }
+
+    return block->end;
+}
+
+//! Map a tap's screen row/col to a byte position in the note. Uses the block cache in WYSIWYG
+//! mode (the same model render_writing() draws from) and the plain-mode wrap cache in plain mode.
+static size_t map_tap_to_buffer_pos(const Layout* L, int32_t screen_row, int32_t screen_col)
+{
+    size_t len = gap_len(&app.text);
+
+    if (app.plain_mode) {
+        if (!plain_wrap_cache.lines || plain_wrap_text_len != len || plain_wrap_width != L->text_width)
+            return app.cursor; // stale cache; leave the cursor be rather than guess wrong
+        int32_t vrow = screen_row - L->top_margin + app.scroll_y;
+        if (vrow < 0)
+            return 0;
+        if (vrow >= plain_wrap_cache.count)
+            return len;
+        WrapLine* line = &plain_wrap_cache.lines[vrow];
+        int32_t target_col = screen_col - L->margin - 1;
+        if (target_col < 0)
+            target_col = 0;
+        size_t pos = line->start;
+        int32_t width = 0;
+        while (pos < line->end) {
+            size_t next;
+            int32_t gw = gap_grapheme_width(&app.text, pos, &next);
+            if (width + gw > target_col)
+                break;
+            width += gw;
+            pos = next;
+        }
+        return pos;
+    }
+
+    BlockCache* bc = (BlockCache*)app.block_cache;
+    if (!bc || !bc->valid || bc->count == 0)
+        return app.cursor;
+
+    int32_t vrow = screen_row - L->top_margin + app.scroll_y;
+    if (vrow < 0)
+        return 0;
+    if (vrow >= bc->total_vrows)
+        return len;
+
+    int32_t col = screen_col - L->margin - 1;
+    if (col < 0)
+        col = 0;
+
+    Block* blk = block_at_vrow(bc, vrow);
+    if (!blk)
+        return app.cursor;
+
+    int32_t vrow_in_block = vrow - blk->vrow_start;
+    if (vrow_in_block < 0)
+        return blk->start; // tap landed in the blank lines before the very first block
+    if (vrow_in_block >= blk->vrow_count)
+        return blk->end; // tap landed in the gap after this block, before the next one
+
+    switch (blk->type) {
+    case BLOCK_HEADER:
+        return map_header_vrow_to_pos(blk, vrow_in_block, col, L->text_width);
+    case BLOCK_CODE:
+        return map_line_vrow_to_pos(blk, vrow_in_block, col);
+    case BLOCK_TABLE:
+    case BLOCK_MATH:
+    case BLOCK_IMAGE:
+    case BLOCK_HR:
+        return map_line_vrow_to_pos(blk, vrow_in_block, 0);
+    default:
+        // BLOCK_PARAGRAPH, BLOCK_LIST_ITEM, BLOCK_BLOCKQUOTE, BLOCK_FOOTNOTE_DEF
+        return map_wrapped_vrow_to_pos(blk, vrow_in_block, col, L->text_width);
+    }
+}
+
+//! DAWN_KEY_MOUSE_CLICK in MODE_WRITING: focuses whichever pane the tap landed in, and in the
+//! note also places the cursor and clears any selection, like a mouse click does on desktop.
+static void handle_mouse_click(void)
+{
+    Layout L = calc_layout();
+    int32_t row = input_last_mouse_row();
+    int32_t col = input_last_mouse_col();
+
+    if (tap_is_over_chat(&L, col)) {
+        app.ai_focused = true;
+        return;
+    }
+
+    // A tap over the note focuses it, closing the chat's focus the same way Tab does (in the
+    // overlay layout this branch is unreachable: tap_is_over_chat() is always true there, so a
+    // tap never "closes" the overlay the way Esc does - there is no uncovered note region to tap).
+    app.ai_focused = false;
+    app.selecting = false;
+    app.view_detached = false;
+    app.cursor = map_tap_to_buffer_pos(&L, row, col);
+}
+
+//! DAWN_KEY_MOUSE_SCROLL_UP/DOWN in MODE_WRITING: routed to whichever pane the finger is over, not
+//! whichever pane has focus, so scrolling the note works while the chat is focused and vice versa.
+static void handle_mouse_scroll(int32_t key)
+{
+    Layout L = calc_layout();
+    int32_t col = input_last_mouse_col();
+
+    if (tap_is_over_chat(&L, col)) {
+        if (key == DAWN_KEY_MOUSE_SCROLL_UP)
+            app.chat_scroll += 3;
+        else {
+            app.chat_scroll -= 3;
+            if (app.chat_scroll < 0)
+                app.chat_scroll = 0;
+        }
+        return;
+    }
+
+    // Scrolling the note by touch detaches the view from the cursor so render_writing() doesn't
+    // immediately snap it back before the finger even lifts; it clamps scroll_y to the document's
+    // own bounds instead, until a cursor-moving or editing key reattaches the view (handle_writing).
+    app.view_detached = true;
+    if (key == DAWN_KEY_MOUSE_SCROLL_UP) {
+        app.scroll_y -= 3;
+        if (app.scroll_y < 0)
+            app.scroll_y = 0;
+    } else {
+        app.scroll_y += 3; // clamped to the document's own bounds during render
+    }
+}
+
+// #endregion
+
+// #region Input Handlers
+
 static void handle_writing(int32_t key)
 {
     size_t len = gap_len(&app.text);
+
+    // Every key that reaches here edits or navigates the note (mouse scroll and click are routed
+    // to handle_mouse_scroll()/handle_mouse_click() before handle_writing() is ever called), so
+    // this is where a touch-detached view reattaches to the cursor (dawn_touch).
+    app.view_detached = false;
 
     switch (key) {
     case '\x1b':
@@ -3815,18 +4094,9 @@ static void handle_writing(int32_t key)
         break;
     }
 
-    // Mouse scroll: scroll view without moving cursor
-    case DAWN_KEY_MOUSE_SCROLL_UP: {
-        app.scroll_y -= 3;
-        if (app.scroll_y < 0)
-            app.scroll_y = 0;
-        break;
-    }
-    case DAWN_KEY_MOUSE_SCROLL_DOWN: {
-        app.scroll_y += 3;
-        // Will be clamped during render
-        break;
-    }
+    // Mouse scroll and click no longer reach here: MODE_WRITING's dispatch (handle_input) routes
+    // them to handle_mouse_scroll()/handle_mouse_click() by tap/finger position before choosing
+    // between handle_ai_input() and handle_writing() (dawn_touch).
 
     // Page Up/Down: scroll by half screen and move cursor
     case DAWN_KEY_PGUP: {
@@ -4236,13 +4506,13 @@ static void handle_ai_input(int32_t key)
             app.ai_input_cursor++;
         break;
 
+    // Mouse wheel scroll is routed to handle_mouse_scroll() before this is called (dawn_touch); it
+    // scrolls app.chat_scroll the same way, just by tap position rather than focus.
     case DAWN_KEY_PGUP:
-    case DAWN_KEY_MOUSE_SCROLL_UP:
-        app.chat_scroll += (key == DAWN_KEY_PGUP ? 10 : 3);
+        app.chat_scroll += 10;
         break;
     case DAWN_KEY_PGDN:
-    case DAWN_KEY_MOUSE_SCROLL_DOWN:
-        app.chat_scroll -= (key == DAWN_KEY_PGDN ? 10 : 3);
+        app.chat_scroll -= 10;
         if (app.chat_scroll < 0)
             app.chat_scroll = 0;
         break;
@@ -4392,6 +4662,16 @@ static void handle_input(void)
             // Over the note there is nothing to hand the focus to; esc brings the note back.
             if (!calc_layout().ai_overlay)
                 app.ai_focused = !app.ai_focused;
+            break;
+        }
+        // A tap or swipe is routed by where it landed, not by which pane has focus: a tap
+        // anywhere focuses that pane, and a swipe scrolls whichever pane it is over (dawn_touch).
+        if (key == DAWN_KEY_MOUSE_CLICK) {
+            handle_mouse_click();
+            break;
+        }
+        if (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN) {
+            handle_mouse_scroll(key);
             break;
         }
         if (app.ai_open && app.ai_focused)
@@ -5499,10 +5779,21 @@ static void render_writing(void)
         }
     }
 
-    // Adjust scroll with margin to keep cursor away from edges (skip in print mode)
+    // Adjust scroll with margin to keep cursor away from edges (skip in print mode). While the
+    // view is touch-detached (app.view_detached, set by handle_mouse_scroll - dawn_touch), stay
+    // put instead of snapping back to the cursor; just clamp to the document's own bounds so a
+    // swipe can't scroll past the end into empty space (scroll_margin rows of allowance so the
+    // last line isn't glued to the very bottom edge).
     int32_t scroll_margin = L.text_height > 10 ? 3 : 1;
     if (!print_mode) {
-        if (cursor_vrow < app.scroll_y + scroll_margin) {
+        if (app.view_detached) {
+            int32_t total_vrows = (bc && bc->valid) ? bc->total_vrows : 0;
+            int32_t max_scroll = total_vrows - L.text_height + scroll_margin;
+            if (max_scroll < 0)
+                max_scroll = 0;
+            if (app.scroll_y > max_scroll)
+                app.scroll_y = max_scroll;
+        } else if (cursor_vrow < app.scroll_y + scroll_margin) {
             app.scroll_y = cursor_vrow - scroll_margin;
         } else if (cursor_vrow >= app.scroll_y + L.text_height - scroll_margin) {
             app.scroll_y = cursor_vrow - L.text_height + scroll_margin + 1;
@@ -5699,7 +5990,8 @@ static void render_writing(void)
 
     // Re-adjust scroll based on actual rendered cursor position (skip in print mode)
     // This handles cases where cursor-in-block expands beyond cached vrows
-    if (!print_mode) {
+    // Skipped while touch-detached, for the same reason as the first adjustment above.
+    if (!print_mode && !app.view_detached) {
         if (rs.cursor_virtual_row < app.scroll_y + scroll_margin) {
             app.scroll_y = rs.cursor_virtual_row - scroll_margin;
             if (app.scroll_y < 0)

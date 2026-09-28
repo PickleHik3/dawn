@@ -272,6 +272,8 @@ typedef struct {
 
     // Viewport
     int32_t scroll_y; //!< Vertical scroll offset
+    bool view_detached; //!< A touch scroll moved the view away from the cursor; render() stops
+        //!< following the cursor until a cursor-moving or editing key reattaches it (dawn_touch)
 
     // Timer
     int32_t timer_mins; //!< Timer duration in minutes
