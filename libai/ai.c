@@ -683,3 +683,56 @@ bool ai_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens) {
 }
 
 // #endregion
+
+// #region The warm writing session (P2)
+
+ai_result_t ai_set_session_verbatim(ai_context_t *context, ai_session_id_t session_id,
+                                    bool verbatim) {
+  if (!validate_context(context)) return AI_ERROR_INVALID_PARAMS;
+  ai_bridge_session_id_t bridge_session =
+      find_bridge_session(context, session_id);
+  if (bridge_session == AI_BRIDGE_INVALID_ID ||
+      !ai_bridge_set_session_verbatim(bridge_session, verbatim)) {
+    set_error(context, AI_ERROR_SESSION_NOT_FOUND, "Session not found");
+    return AI_ERROR_SESSION_NOT_FOUND;
+  }
+  return AI_SUCCESS;
+}
+
+void ai_runtime_info(ai_runtime_info_t *out) {
+  if (!out) return;
+  ai_bridge_runtime_info_t info;
+  ai_bridge_runtime_info(&info);
+  memset(out, 0, sizeof(*out));
+  out->state = info.state == AI_BRIDGE_MODEL_LOADED       ? AI_MODEL_LOADED
+               : info.state == AI_BRIDGE_MODEL_NOT_LOADED ? AI_MODEL_NOT_LOADED
+                                                          : AI_MODEL_UNKNOWN;
+  out->reachable = info.reachable;
+  out->loading = info.loading;
+  out->generating = info.generating;
+  memcpy(out->loaded_model, info.loaded_model, sizeof(out->loaded_model));
+  out->checked_at_ms = info.checked_at_ms;
+}
+
+int32_t ai_models(ai_model_info_t *out, int32_t max) {
+  ai_bridge_model_info_t found[AI_BRIDGE_MAX_MODELS];
+  int32_t count = ai_bridge_models(found, AI_BRIDGE_MAX_MODELS);
+  for (int32_t i = 0; out && i < count && i < max && i < AI_BRIDGE_MAX_MODELS; i++) {
+    memcpy(out[i].id, found[i].id, sizeof(out[i].id));
+    memcpy(out[i].name, found[i].name, sizeof(out[i].name));
+    out[i].context_window = found[i].context_window;
+    out[i].size_bytes = found[i].size_bytes;
+  }
+  return count;
+}
+
+void ai_models_refresh(void) { ai_bridge_models_refresh(); }
+
+bool ai_active_model(char *out, size_t cap, bool *pinned) {
+  return ai_bridge_active_model(out, cap, pinned);
+}
+
+void ai_keep_warm(int32_t minutes) { ai_bridge_keep_warm(minutes); }
+
+
+// #endregion

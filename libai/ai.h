@@ -932,6 +932,54 @@ bool ai_take_usage(int32_t *prompt_tokens, int32_t *completion_tokens);
 
 /** @} */
 
+/**
+ * @defgroup warm The warm writing session (P2)
+ * @{
+ */
+
+/**
+ * @brief Make a session's history verbatim (exactly what was sent and received), so TAI can keep
+ * its KV cache between turns. See ai_bridge_set_session_verbatim().
+ */
+ai_result_t ai_set_session_verbatim(ai_context_t *context, ai_session_id_t session_id,
+                                    bool verbatim);
+
+/** @brief The last runtime answer. See ai_bridge_runtime_info_t. */
+typedef struct {
+  ai_model_state_t state;
+  int32_t reachable; /**< -1 not asked yet, 0 no, 1 yes */
+  bool loading;
+  bool generating;
+  char loaded_model[128];
+  int64_t checked_at_ms;
+} ai_runtime_info_t;
+
+void ai_runtime_info(ai_runtime_info_t *out);
+
+#define AI_MAX_MODELS 16
+
+/** @brief One chat model TAI can serve. See ai_bridge_model_info_t. */
+typedef struct {
+  char id[128];
+  char name[96];
+  int32_t context_window;
+  int64_t size_bytes;
+} ai_model_info_t;
+
+/** @brief The models TAI can serve; -1 when never fetched. See ai_bridge_models(). */
+int32_t ai_models(ai_model_info_t *out, int32_t max);
+
+/** @brief Fetch the model list again, in the background. */
+void ai_models_refresh(void);
+
+/** @brief The model requests name, and whether ai.json pins it. See ai_bridge_active_model(). */
+bool ai_active_model(char *out, size_t cap, bool *pinned);
+
+/** @brief Keep the resident model warm for `minutes` more, never loading one. */
+void ai_keep_warm(int32_t minutes);
+
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif
