@@ -37,8 +37,17 @@ void ai_send(const char* prompt);
 //! model had not finished is made. The chat is ready for the next question once the reply ends.
 void ai_stop(void);
 
-//! Name an untitled note once it has enough text, in the background. Call once per frame.
-void ai_title_tick(void);
+//! The AI's per-frame work: the warm writing session (priming, the waiting question, the
+//! compaction, keep-warm) and the automatic title. Call once per frame.
+void ai_tick(void);
+
+//! A new, empty conversation with dawn's one system prompt and its tools, its history verbatim
+//! (ai_set_session_verbatim()). dawn_session.c builds every conversation with it. 0 on failure.
+ai_session_id_t ai_new_conversation(void);
+
+//! Dawn's one system prompt, and its tools as JSON, for the session's token budget.
+const char* ai_system_prompt(void);
+const char* ai_tools_json(void);
 
 // #endregion
 

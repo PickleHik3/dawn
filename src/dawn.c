@@ -18,6 +18,7 @@
 #include "dawn_input.h"
 #include "dawn_nav.h"
 #include "dawn_notice.h"
+#include "dawn_session.h"
 #include "dawn_render.h"
 #include "dawn_scrollind.h"
 #include "dawn_search.h"
@@ -2583,6 +2584,15 @@ static void render_ai_panel(const Layout* L)
     int32_t *msg_start_lines = NULL, *msg_line_counts = NULL;
     int32_t max_scroll = 0;
 
+#if HAS_LIBAI
+    // Turns the model no longer holds word for word (a compaction, another note's chat loaded
+    // from disk) stay as dim scrollback, with one faint divider above the first one it holds.
+    int32_t held_from = session_held_from();
+#else
+    int32_t held_from = 0;
+#endif
+    int32_t divider_line = -1;
+
     if (app.chat_count > 0) {
         msg_start_lines = malloc(sizeof(int32_t) * (size_t)app.chat_count);
         msg_line_counts = malloc(sizeof(int32_t) * (size_t)app.chat_count);
@@ -2593,6 +2603,8 @@ static void render_ai_panel(const Layout* L)
         }
 
         for (int32_t i = 0; i < app.chat_count; i++) {
+            if (i == held_from && held_from > 0)
+                divider_line = total_lines++;
             msg_start_lines[i] = total_lines;
             ChatMessage* m = &app.chat_msgs[i];
 
@@ -2619,6 +2631,8 @@ static void render_ai_panel(const Layout* L)
             msg_line_counts[i] = lines;
             total_lines += lines + 1;
         }
+        if (held_from > 0 && held_from >= app.chat_count)
+            divider_line = total_lines++;
     }
 
     int32_t thinking_line = -1;
@@ -2642,10 +2656,23 @@ static void render_ai_panel(const Layout* L)
     // Render messages
     int32_t screen_row = msg_area_start;
 
-    for (int32_t i = 0; i < app.chat_count && screen_row < msg_area_end; i++) {
+    for (int32_t i = 0; i <= app.chat_count && screen_row < msg_area_end; i++) {
+        // The divider sits on its own line, just above the first message the model holds.
+        bool divider_here = divider_line >= 0 && (i == app.chat_count ? held_from >= app.chat_count : i == held_from);
+        if (divider_here && divider_line >= first_visible && divider_line < last_visible) {
+            move_to(screen_row, content_start);
+            set_bg(get_ai_bg());
+            set_fg(get_border());
+            for (int32_t c = 0; c < content_width; c++)
+                out_str("─");
+            screen_row++;
+        }
+        if (i == app.chat_count || screen_row >= msg_area_end)
+            break;
         ChatMessage* m = &app.chat_msgs[i];
         int32_t msg_start = msg_start_lines[i];
         int32_t msg_lines = msg_line_counts[i];
+        bool old_turn = i < held_from;
 
         if (msg_start + msg_lines < first_visible)
             continue;
@@ -2680,7 +2707,7 @@ static void render_ai_panel(const Layout* L)
 
                 if (line_in_msg == 0) {
                     if (m->is_user) {
-                        set_fg(get_accent());
+                        set_fg(old_turn ? get_dim() : get_accent());
                         out_str("you ");
                     } else {
                         set_fg(get_dim());
@@ -2690,8 +2717,8 @@ static void render_ai_panel(const Layout* L)
                     out_str("    ");
                 }
 
-                set_fg(step_line ? get_dim() : get_fg());
-                if (m->is_user || step_line) {
+                set_fg(step_line || old_turn ? get_dim() : get_fg());
+                if (m->is_user || step_line || old_turn) {
                     for (int32_t c = 0; c < chars; c++)
                         out_char(m->text[pos + c]);
                 } else {
@@ -4347,8 +4374,12 @@ static void handle_writing(int32_t key)
         if (app.ai_ready && CAN_MODIFY()) {
             app.ai_open = !app.ai_open;
             app.ai_focused = app.ai_open;
-            if (app.ai_open && !app.ai_session)
-                ai_init_session();
+            if (app.ai_open) {
+                if (!app.ai_session)
+                    ai_init_session();
+                // Warm the model now: by the time the question is typed, the note is read.
+                session_chat_opened();
+            }
         }
 #endif
         break;
@@ -5083,6 +5114,7 @@ static void handle_input(void)
                 app.ai_focused = true;
                 if (!app.ai_session)
                     ai_init_session();
+                session_chat_opened();
             }
 #endif
             break;
@@ -5837,7 +5869,7 @@ bool dawn_frame(void)
     }
 #if HAS_LIBAI
     ai_pump();
-    ai_title_tick();
+    ai_tick();
 #endif
     handle_input();
     render();
