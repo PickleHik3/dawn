@@ -1,6 +1,7 @@
 // dawn_image.c
 
 #include "dawn_image.h"
+#include "dawn_scrollind.h"
 #include <string.h>
 
 bool image_is_supported(const char* path)
@@ -42,6 +43,8 @@ void image_mask_region(int32_t col, int32_t row, int32_t cols, int32_t rows, Daw
 void image_clear_all(void)
 {
     DAWN_BACKEND(app)->img_clear_all();
+    // a=d,d=A took the scroll indicator's pills with it
+    scrollind_forget();
 }
 
 void image_cache_invalidate(const char* path)

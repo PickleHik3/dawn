@@ -19,6 +19,7 @@
 #include "dawn_nav.h"
 #include "dawn_notice.h"
 #include "dawn_render.h"
+#include "dawn_scrollind.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
 #include "dawn_tex.h"
@@ -2745,12 +2746,18 @@ static void render_ai_panel(const Layout* L)
                 out_char(status[c]);
     }
 
+    // The pill in the chat's right padding column, over the message rows
+    scrollind_show(SCROLLIND_CHAT, L->ai_start_col + L->ai_cols - 1, msg_area_start, msg_area_height,
+        total_lines, msg_area_height, first_visible);
+
     free(msg_start_lines);
     free(msg_line_counts);
 
 skip_chat:
-    // Scroll indicator: its own row under the header, or beside a sheet's handle when it fits
-    if (max_scroll > 0 && app.chat_scroll > 0 && (!sheet || content_start + 18 < handle_col)) {
+    // Scroll indicator: its own row under the header, or beside a sheet's handle when it fits.
+    // Where the fading pill can be drawn it says the same thing without words.
+    if (max_scroll > 0 && app.chat_scroll > 0 && !scrollind_available()
+        && (!sheet || content_start + 18 < handle_col)) {
         move_to(sheet ? top : 3, content_start);
         set_fg(get_dim());
         set_bg(get_ai_bg());
@@ -3520,6 +3527,10 @@ static void render_writing_plain(void)
         cursor_screen_col = L.margin + 1 + cursor_col_in_line;
     }
 
+    if (L.margin > 0)
+        scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
+            L.text_height, app.scroll_y);
+
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
 }
@@ -3535,6 +3546,7 @@ static void render(void)
 
     sync_begin();
     cursor_visible(false);
+    scrollind_frame_begin();
 
     switch (app.mode) {
     case MODE_WELCOME:
@@ -3581,6 +3593,7 @@ static void render(void)
         break;
     }
 
+    scrollind_frame_end();
     sync_end();
     out_flush();
 }
@@ -5753,6 +5766,7 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 void dawn_engine_shutdown(void)
 {
     DAWN_BACKEND(app)->set_title(NULL);
+    scrollind_shutdown();
 
     // save_session writes only what changed; an empty note that was emptied on purpose counts.
     if (app.session_path && app.mode == MODE_WRITING && !app.preview_mode) {
@@ -6397,6 +6411,11 @@ static void render_writing(void)
     }
 
     set_bg(get_bg());
+
+    // The note's pill, in its right margin over the text rows (none when there is no margin)
+    if (L.margin > 0 && bc && bc->valid)
+        scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, bc->total_vrows,
+            L.text_height, app.scroll_y);
 
     // Under a sheet the note has no status line: the chat's input line is the bottom edge.
     if (!L.ai_sheet)

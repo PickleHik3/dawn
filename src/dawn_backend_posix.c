@@ -2145,9 +2145,38 @@ static int32_t posix_image_display_cropped(const char* path, int32_t row, int32_
     return visible_rows;
 }
 
+//! Set by img_keep_overlays: something (the scroll indicator) keeps its own placements above the
+//! text, so the per-frame clear must not touch them.
+static bool keep_overlays = false;
+
 static void posix_image_frame_start(void)
 {
+    if (keep_overlays) {
+        // Only dawn's own layers: document images sit at z=-2 and popup masks at z=-1. Deleting
+        // every placement would take the overlays too, and a kitty image left without any
+        // placement loses its animation frames in the launcher.
+        buf_append_str("\x1b_Ga=d,d=z,z=-2,q=2\x1b\\\x1b_Ga=d,d=z,z=-1,q=2\x1b\\");
+        return;
+    }
     buf_append_str("\x1b_Ga=d,d=a,q=2\x1b\\");
+}
+
+static void posix_image_keep_overlays(bool keep)
+{
+    keep_overlays = keep;
+}
+
+//! The terminal's cell size in pixels, from the window size it reports (the launcher fills in
+//! ws_xpixel/ws_ypixel as columns and rows times its cell size).
+static bool posix_image_cell_px(int32_t* w, int32_t* h)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0 || ws.ws_row == 0
+        || ws.ws_xpixel == 0 || ws.ws_ypixel == 0)
+        return false;
+    *w = ws.ws_xpixel / ws.ws_col;
+    *h = ws.ws_ypixel / ws.ws_row;
+    return *w > 0 && *h > 0;
 }
 
 static void posix_image_frame_end(void)
@@ -2707,4 +2736,6 @@ const DawnBackend dawn_backend_posix = {
     .img_resolve = posix_image_resolve_path,
     .img_calc_rows = posix_image_calc_rows,
     .img_invalidate = posix_image_invalidate,
+    .img_cell_px = posix_image_cell_px,
+    .img_keep_overlays = posix_image_keep_overlays,
 };
