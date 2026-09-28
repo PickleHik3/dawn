@@ -1593,6 +1593,22 @@ static bool render_header_element(const RenderCtx* ctx, RenderState* rs, const B
             char_col += gw;
         }
 
+        // A cursor at the end of the heading sits in the cell after its last sized character,
+        // which holds nothing sized, so the terminal draws it one cell tall. Write one sized
+        // blank there: the cursor then lands on a scaled cell and is drawn heading-tall.
+        if (header_end == app.cursor && char_col < available_width
+            && (current_text_scale > 1 || (current_frac_num > 0 && current_frac_denom > 0))
+            && HAS_CAP(DAWN_CAP_TEXT_SIZING)) {
+            screen_row = VROW_TO_SCREEN(&ctx->L, rs->virtual_row, app.scroll_y);
+            if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
+                block_apply_style(line_style);
+                if (current_frac_num > 0 && current_frac_denom > current_frac_num)
+                    print_scaled_frac_char(' ', current_text_scale, current_frac_num, current_frac_denom);
+                else
+                    print_scaled_char(' ', current_text_scale);
+            }
+        }
+
         // Track cursor at newline position
         if (header_end < ctx->len && gap_at(&app.text, header_end) == '\n') {
             if (header_end == app.cursor) {
