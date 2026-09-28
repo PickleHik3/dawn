@@ -38,6 +38,11 @@
 #define BRACKETED_PASTE_ON CSI "?2004h"
 #define BRACKETED_PASTE_OFF CSI "?2004l"
 
+// Dictation marks (launcher protocol, private mode 7727): while set, the launcher's dictation
+// announces itself with OSC 7727 marks and delivers each phrase as a marked bracketed paste.
+#define DICTATION_MARKS_ON CSI "?7727h"
+#define DICTATION_MARKS_OFF CSI "?7727l"
+
 #define SYNC_START CSI "?2026h"
 #define SYNC_END CSI "?2026l"
 

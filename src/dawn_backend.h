@@ -76,8 +76,27 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_MOUSE_DRAG, //!< Motion while button 0 held (SGR btn 32, needs mode 1002)
     DAWN_KEY_THEME_DARK, //!< Launcher reports dark mode (CSI ?997;1n)
     DAWN_KEY_THEME_LIGHT, //!< Launcher reports light mode (CSI ?997;2n)
-    DAWN_KEY_BTAB
+    DAWN_KEY_BTAB,
+    DAWN_KEY_DICTATION //!< A dictation mark (OSC 7727) arrived: drain them with take_dictation()
 } DawnKey;
+
+//! What the launcher's dictation said (dictation marks protocol, OSC 7727).
+DAWN_ENUM(uint8_t) {
+    DAWN_DICT_LISTEN, //!< Mic open
+    DAWN_DICT_PHRASE, //!< A dictated phrase: text holds the bracketed paste that followed the mark
+    DAWN_DICT_REPLACE, //!< Polished wording for an earlier phrase id: text is the new wording
+    DAWN_DICT_END, //!< Mic closed
+    DAWN_DICT_CANCEL //!< Mic closed without a result (end;reason=cancel)
+} DawnDictVerb;
+
+//! One dictation event. For PHRASE and REPLACE, text is malloc'd (the caller of take_dictation
+//! frees it) and len bytes long, not NUL-terminated past len; otherwise text is NULL.
+typedef struct {
+    DawnDictVerb verb;
+    uint32_t id; //!< Phrase id (PHRASE/REPLACE), 0 otherwise
+    char* text;
+    size_t len;
+} DawnDictEvent;
 
 typedef struct {
     int16_t x, y; //!< Mouse position (max 32K)
@@ -207,6 +226,10 @@ typedef struct DawnBackend {
     //! Keep placements above the text (z > 0) alive across frames: img_frame_start then clears
     //! only dawn's own document images and masks instead of every placement (optional)
     void (*img_keep_overlays)(bool keep);
+
+    //! Pop the oldest pending dictation event (optional: NULL where the host has no dictation
+    //! marks). Returns false when none is waiting. DAWN_KEY_DICTATION from read_key() says one is.
+    bool (*take_dictation)(DawnDictEvent* out);
 
 } DawnBackend;
 
