@@ -515,9 +515,7 @@ static char* note_context_budget(int32_t budget_tokens, bool* whole, Baseline* b
     sb_str(&out, "The user's open note is below. \"This\", \"the note\" and \"the document\" mean it.\n");
     sb_str(&out, title_line);
     sb_str(&out, explainer);
-    sb_str(&out, "<note>\n");
-    sb_str(&out, snapshot);
-    sb_str(&out, "\n</note>");
+    sb_str(&out, snapshot); // its section already comes between <note> tags (dawn_ai_tokens.c)
     free(snapshot);
     return sb_take(&out);
 }

@@ -233,7 +233,7 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
         char* section = slice_within_budget(gb, sec_start_pos, sec_end_pos, &budget, &cut);
         rtrim(section);
         if (section[0]) {
-            // <note> matches ai_init_session()'s system instructions ("the open note between
+            // <note> matches the system prompt (dawn_chat.c: "a snapshot of it between
             // <note> tags"), whether this is the whole note or, once trimmed, just its section.
             buf_append_str(&out, "<note>\n");
             buf_append_str(&out, section);
