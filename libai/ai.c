@@ -546,6 +546,36 @@ ai_result_t ai_cancel_stream(ai_context_t *context, ai_stream_id_t stream_id) {
   return AI_ERROR_STREAM_NOT_FOUND;
 }
 
+ai_result_t ai_set_progress_callback(ai_context_t *context,
+                                     ai_session_id_t session_id,
+                                     ai_progress_callback_t callback,
+                                     void *user_data) {
+  if (!validate_context(context)) return AI_ERROR_INVALID_PARAMS;
+
+  ai_bridge_session_id_t bridge_session =
+      find_bridge_session(context, session_id);
+  if (bridge_session == AI_BRIDGE_INVALID_ID) {
+    set_error(context, AI_ERROR_SESSION_NOT_FOUND, "Session not found");
+    return AI_ERROR_SESSION_NOT_FOUND;
+  }
+
+#ifndef __APPLE__
+  // The same cast as the stream callback: the bridge sees the context as void*
+  // and the phase as its integer value.
+  ai_bridge_progress_callback_t bridge_callback =
+      (ai_bridge_progress_callback_t)callback;
+  if (!ai_bridge_set_progress_callback(bridge_session, bridge_callback,
+                                       user_data)) {
+    set_error(context, AI_ERROR_SESSION_NOT_FOUND, "Session not found");
+    return AI_ERROR_SESSION_NOT_FOUND;
+  }
+#else
+  (void)callback;
+  (void)user_data;
+#endif
+  return AI_SUCCESS;
+}
+
 bool ai_validate_messages_json(const char *messages_json) {
   if (!messages_json) return false;
 

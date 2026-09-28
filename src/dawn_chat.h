@@ -33,6 +33,10 @@ void ai_init_session(void);
 //! @param prompt user's input message
 void ai_send(const char* prompt);
 
+//! Stop the reply in flight. What already streamed stays, marked as stopped; no edit the
+//! model had not finished is made. The chat is ready for the next question once the reply ends.
+void ai_stop(void);
+
 //! Name an untitled note once it has enough text, in the background. Call once per frame.
 void ai_title_tick(void);
 

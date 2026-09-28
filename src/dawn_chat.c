@@ -31,6 +31,10 @@ void chat_clear(void)
     app.chat_msgs = NULL;
     app.chat_count = 0;
 #if HAS_LIBAI
+    // A reply still streaming has nowhere to go now; end it. Its last chunk clears ai_thinking.
+    if (app.ai_thinking && app.ai_ctx && app.ai_stream != AI_INVALID_ID
+        && ai_cancel_stream(app.ai_ctx, app.ai_stream) == AI_SUCCESS)
+        app.ai_stopping = true;
     // The chat is per note: without this the model still remembers the last note's conversation
     // and answers "summarize this" about that one.
     if (app.ai_ctx && app.ai_session)
@@ -45,6 +49,34 @@ void chat_clear(void)
 // #region AI Streaming
 
 static void apply_reply_edits(void);
+static void mark_stopped(void);
+
+static void ai_set_status(const char* text)
+{
+    snprintf(app.ai_status, sizeof(app.ai_status), "%s", text);
+}
+
+//! The reply ends with a step line ("✓ read the note"), so the text that follows starts a
+//! paragraph of its own instead of continuing that line.
+static bool g_after_step;
+
+//! Put a line of its own at the end of the reply that is streaming: what a tool did, or that the
+//! user stopped it. The panel draws these dim, by their first character.
+static void chat_step(const char* line)
+{
+    if (app.chat_count == 0 || app.chat_msgs[app.chat_count - 1].is_user)
+        return;
+    ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
+    const char* sep = m->len > 0 && m->text[m->len - 1] != '\n' ? "\n" : "";
+    size_t add = strlen(sep) + strlen(line);
+    char* grown = realloc(m->text, m->len + add + 1);
+    if (!grown)
+        return;
+    m->text = grown;
+    m->len += (size_t)snprintf(m->text + m->len, add + 1, "%s%s", sep, line);
+    g_after_step = true;
+    app.chat_scroll = 0;
+}
 
 static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_data)
 {
@@ -56,31 +88,35 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
         if (strcmp(chunk, "null") == 0 || strlen(chunk) == 0)
             return;
 
+        // The reply froze when the user pressed stop; whatever was still on its way is dropped.
+        if (app.ai_stopping)
+            return;
+
         // Check for error responses
         if (strncmp(chunk, "Error:", 6) == 0) {
-            // Replace AI message with error
+            // Replace AI message with error. The end of the reply follows and clears ai_thinking.
             if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
                 ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
                 free(m->text);
                 m->text = dawn_strdup(chunk);
                 m->len = strlen(chunk);
             }
-            app.ai_thinking = false;
+            g_after_step = false;
             return;
         }
 
         if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
             ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
-            size_t chunk_len = strlen(chunk);
+            const char* lead = g_after_step ? "\n\n" : "";
+            size_t chunk_len = strlen(lead) + strlen(chunk);
 
             // Reallocate and append
             char* new_text = realloc(m->text, m->len + chunk_len + 1);
             if (new_text) {
                 m->text = new_text;
-                memcpy(m->text + m->len, chunk, chunk_len);
-                m->len += chunk_len;
-                m->text[m->len] = '\0';
+                m->len += (size_t)snprintf(m->text + m->len, chunk_len + 1, "%s%s", lead, chunk);
             }
+            g_after_step = false;
 
             // Auto-scroll to bottom when streaming
             app.chat_scroll = 0;
@@ -88,9 +124,105 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
     } else {
         // Stream complete
         app.ai_thinking = false;
-        apply_reply_edits();
+        app.ai_stream = AI_INVALID_ID;
+        app.ai_status[0] = '\0';
+        if (app.ai_stopping) {
+            app.ai_stopping = false;
+            mark_stopped();
+        } else {
+            apply_reply_edits();
+        }
     }
 }
+
+void ai_stop(void)
+{
+    if (!app.ai_thinking || app.ai_stopping || !app.ai_ctx || app.ai_stream == AI_INVALID_ID)
+        return;
+    // Not found means the reply already ended and its last chunk is on its way: nothing to stop.
+    if (ai_cancel_stream(app.ai_ctx, app.ai_stream) != AI_SUCCESS)
+        return;
+    app.ai_stopping = true;
+    ai_set_status("stopping…");
+}
+
+// #region Progress
+
+//! What the chat says for each tool: while it runs, and as a step line once it returned. The
+//! edit tools state their own result (only they know the new title, or why an edit failed).
+static const struct {
+    const char* name;
+    const char* doing;
+    const char* done;
+    const char* failed;
+} TOOL_WORDS[] = {
+    { "read_document", "reading the note", "read the note", "couldn't read the note" },
+    { "web_search", "searching the web", "searched the web", "the web search failed" },
+    { "get_time", "checking the time", "checked the time", "couldn't get the time" },
+    { "past_sessions", "looking through past notes", "looked through past notes", "couldn't read past notes" },
+    { "replace_note", "rewriting the note", NULL, NULL },
+    { "replace_selection", "rewriting the selection", NULL, NULL },
+    { "insert_at_cursor", "writing at the cursor", NULL, NULL },
+    { "append_to_note", "writing an addition", NULL, NULL },
+    { "set_title", "choosing a title", NULL, NULL },
+};
+
+static void ai_progress_cb(ai_context_t* context, ai_progress_t phase, const char* tool,
+    int32_t step, int32_t steps, void* user_data)
+{
+    (void)context;
+    (void)user_data;
+    if (!app.ai_thinking || app.ai_stopping)
+        return;
+
+    const char *doing = "using a tool", *done = NULL, *failed = NULL;
+    bool known = false;
+    for (size_t i = 0; tool && i < sizeof(TOOL_WORDS) / sizeof(TOOL_WORDS[0]); i++) {
+        if (strcmp(TOOL_WORDS[i].name, tool) == 0) {
+            doing = TOOL_WORDS[i].doing;
+            done = TOOL_WORDS[i].done;
+            failed = TOOL_WORDS[i].failed;
+            known = true;
+            break;
+        }
+    }
+
+    char text[sizeof(app.ai_status)] = "";
+    switch (phase) {
+    case AI_PROGRESS_WAITING:
+        ai_set_status("thinking…");
+        break;
+    case AI_PROGRESS_WRITING:
+        ai_set_status("writing…");
+        break;
+    case AI_PROGRESS_TOOL_ARGS:
+    case AI_PROGRESS_TOOL_START:
+        if (steps > 1)
+            snprintf(text, sizeof(text), "%s (%d of %d)…", doing, step, steps);
+        else
+            snprintf(text, sizeof(text), "%s…", doing);
+        ai_set_status(text);
+        break;
+    case AI_PROGRESS_TOOL_DONE:
+    case AI_PROGRESS_TOOL_FAILED: {
+        bool ok = phase == AI_PROGRESS_TOOL_DONE;
+        const char* what = ok ? done : failed;
+        if (what)
+            snprintf(text, sizeof(text), "%s %s", ok ? "✓" : "✗", what);
+        else if (!known)
+            snprintf(text, sizeof(text), "%s %s %s", ok ? "✓" : "✗", ok ? "used" : "couldn't use", tool ? tool : "a tool");
+        if (what || !known)
+            chat_step(text);
+        // The answer, or the next step, comes from another request.
+        ai_set_status("thinking…");
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// #endregion
 
 // #region Note Context
 
@@ -266,22 +398,6 @@ char* document_tool_callback(const char* params_json, void* user_data)
 //! still the open one, so a slow reply cannot rewrite the note the user has since switched to.
 static char* g_turn_path;
 
-//! Append a line to the reply that is streaming, so every change the AI makes is stated in the
-//! chat whether or not the model mentions it.
-static void chat_note_edit(const char* note)
-{
-    if (app.chat_count == 0 || app.chat_msgs[app.chat_count - 1].is_user)
-        return;
-    ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
-    const char* sep = m->len > 0 && m->text[m->len - 1] != '\n' ? "\n\n" : "";
-    size_t add = strlen(sep) + strlen(note) + 2;
-    char* grown = realloc(m->text, m->len + add + 1);
-    if (!grown)
-        return;
-    m->text = grown;
-    m->len += (size_t)snprintf(m->text + m->len, add + 1, "%s%s\n\n", sep, note);
-}
-
 //! text with carriage returns dropped, in place.
 static void drop_carriage_returns(char* text)
 {
@@ -455,13 +571,19 @@ static char* edit_tool(EditKind kind, const char* params_json)
     char* text = edit_text_param(params_json);
     const char* error = edit_note(kind, text);
     char* result;
+    // Every change the AI makes, or fails to make, is stated in the chat whether or not the
+    // model mentions it.
+    char line[256];
     if (error) {
+        snprintf(line, sizeof(line), "✗ Couldn't %s: %s", EDITS[kind].name, error);
+        chat_step(line);
         result = edit_error(error);
     } else {
-        char done[160];
         if (kind == EDIT_TITLE)
-            snprintf(done, sizeof(done), "Renamed the note to \"%s\".", note_title());
-        chat_note_edit(kind == EDIT_TITLE ? done : EDITS[kind].done);
+            snprintf(line, sizeof(line), "✓ Renamed the note to \"%s\".", note_title());
+        else
+            snprintf(line, sizeof(line), "✓ %s", EDITS[kind].done);
+        chat_step(line);
         cJSON* response = cJSON_CreateObject();
         cJSON_AddBoolToObject(response, "ok", true);
         result = cJSON_PrintUnformatted(response);
@@ -546,11 +668,11 @@ static void apply_reply_edits(void)
         const char* error = edit_note(kind, text);
         char line[256];
         if (error)
-            snprintf(line, sizeof(line), "Couldn't %s: %s", EDITS[kind].name, error);
+            snprintf(line, sizeof(line), "✗ Couldn't %s: %s", EDITS[kind].name, error);
         else if (kind == EDIT_TITLE)
-            snprintf(line, sizeof(line), "Renamed the note to \"%s\".", note_title());
+            snprintf(line, sizeof(line), "✓ Renamed the note to \"%s\".", note_title());
         else
-            snprintf(line, sizeof(line), "%s", EDITS[kind].done);
+            snprintf(line, sizeof(line), "✓ %s", EDITS[kind].done);
         free(text);
         notes_len += (size_t)snprintf(notes + notes_len, sizeof(notes) - notes_len, "%s%s",
             notes_len ? "\n" : "", line);
@@ -591,6 +713,28 @@ static void apply_reply_edits(void)
     free(shown);
 }
 
+//! The reply the user stopped: what streamed stays, ending in a "stopped" line. An edit block
+//! that was on its way is neither made nor shown, complete or not: the user said stop.
+static void mark_stopped(void)
+{
+    if (app.chat_count == 0 || app.chat_msgs[app.chat_count - 1].is_user)
+        return;
+    ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
+    size_t cut = m->len;
+    for (int k = 0; k < EDIT_KIND_COUNT; k++) {
+        char tag[40];
+        snprintf(tag, sizeof(tag), "<%s>", EDITS[k].name);
+        const char* at = strstr(m->text, tag);
+        if (at && (size_t)(at - m->text) < cut)
+            cut = (size_t)(at - m->text);
+    }
+    while (cut > 0 && (m->text[cut - 1] == '\n' || m->text[cut - 1] == ' '))
+        cut--;
+    m->len = cut;
+    m->text[cut] = '\0';
+    chat_step("⏹ stopped");
+}
+
 // #endregion
 
 void ai_send(const char* prompt)
@@ -602,6 +746,10 @@ void ai_send(const char* prompt)
     chat_add("", false);
 
     app.ai_thinking = true;
+    app.ai_stopping = false;
+    app.ai_turn_started = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    ai_set_status("thinking…");
+    g_after_step = false;
     free(g_turn_path);
     g_turn_path = app.session_path ? dawn_strdup(app.session_path) : NULL;
 
@@ -614,8 +762,17 @@ void ai_send(const char* prompt)
         .seed = 0
     };
 
-    ai_generate_response_stream(app.ai_ctx, app.ai_session, prompt, &params,
+    app.ai_stream = ai_generate_response_stream(app.ai_ctx, app.ai_session, prompt, &params,
         ai_stream_cb, NULL);
+    if (app.ai_stream == AI_INVALID_ID) {
+        // No reply will ever end this turn; say so now rather than spin for good.
+        app.ai_thinking = false;
+        app.ai_status[0] = '\0';
+        ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
+        free(m->text);
+        m->text = dawn_strdup("Error: Couldn't start the request.");
+        m->len = strlen(m->text);
+    }
 }
 
 void ai_init_session(void)
@@ -707,6 +864,7 @@ void ai_init_session(void)
     app.ai_session = ai_create_session(app.ai_ctx, &config);
 
     if (app.ai_session) {
+        ai_set_progress_callback(app.ai_ctx, app.ai_session, ai_progress_cb, NULL);
         ai_register_tool(app.ai_ctx, app.ai_session, "read_document",
             document_tool_callback, NULL);
         ai_register_tool(app.ai_ctx, app.ai_session, "web_search",

@@ -295,6 +295,37 @@ typedef void (*ai_stream_callback_t)(ai_context_t *context, const char *chunk,
 typedef char *(*ai_tool_callback_t)(const char *parameters_json,
                                     void *user_data);
 
+/**
+ * @brief What a streaming generation is doing, reported between chunks
+ */
+typedef enum {
+  AI_PROGRESS_WAITING = 0,    /**< A request went out; nothing came back yet */
+  AI_PROGRESS_WRITING = 1,    /**< Reply text is streaming */
+  AI_PROGRESS_TOOL_ARGS = 2,  /**< The model is writing a call to `tool` */
+  AI_PROGRESS_TOOL_START = 3, /**< `tool` runs now, `step` of `steps` */
+  AI_PROGRESS_TOOL_DONE = 4,  /**< `tool` returned a result */
+  AI_PROGRESS_TOOL_FAILED = 5 /**< `tool` returned an error or nothing */
+} ai_progress_t;
+
+/**
+ * @brief Callback function for progress reports during streaming generation
+ *
+ * Delivered from ai_pump(), in order with the stream's chunks, for every
+ * stream of a session that registered one with ai_set_progress_callback().
+ *
+ * @param context Context handle for this operation
+ * @param phase What the stream is doing now
+ * @param tool The tool's name in the tool phases, NULL otherwise. Only valid
+ * during the callback.
+ * @param step 1-based index of the tool call within its round (tool phases)
+ * @param steps Number of tool calls in the round (tool phases)
+ * @param user_data User data pointer given to ai_set_progress_callback()
+ */
+typedef void (*ai_progress_callback_t)(ai_context_t *context,
+                                       ai_progress_t phase, const char *tool,
+                                       int32_t step, int32_t steps,
+                                       void *user_data);
+
 /** @} */
 
 /**
@@ -712,6 +743,23 @@ ai_stream_id_t ai_generate_structured_response_stream(
  * @note Completed streams return AI_ERROR_STREAM_NOT_FOUND.
  */
 ai_result_t ai_cancel_stream(ai_context_t *context, ai_stream_id_t stream_id);
+
+/**
+ * @brief Report what the session's streams are doing, between chunks
+ *
+ * Reports arrive through ai_pump() like chunks. NULL turns them off. A no-op
+ * with the FoundationModels bridge, which does not report progress.
+ *
+ * @param context Context containing the session
+ * @param session_id Session whose streams report
+ * @param callback Function called with each report, or NULL
+ * @param user_data Pointer passed to the callback
+ * @return AI_SUCCESS, or an error code when the session was not found
+ */
+ai_result_t ai_set_progress_callback(ai_context_t *context,
+                                     ai_session_id_t session_id,
+                                     ai_progress_callback_t callback,
+                                     void *user_data);
 
 /** @} */
 

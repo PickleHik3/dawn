@@ -737,6 +737,19 @@ static void check_auto_newline(char typed_char)
 
 // #region Chat Markdown Rendering
 
+//! Whether the reply line starting at text is a step the chat noted ("✓ read the note",
+//! "✗ couldn't …", "⏹ stopped") rather than the model's own words. Those are drawn dim, as is.
+static bool chat_is_step_line(const char* text, size_t len)
+{
+    static const char* const marks[] = { "✓ ", "✗ ", "⏹ " };
+    for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
+        size_t n = strlen(marks[i]);
+        if (len >= n && memcmp(text, marks[i], n) == 0)
+            return true;
+    }
+    return false;
+}
+
 //! Print text with inline markdown formatting for AI chat
 static void chat_print_md(const char* text, size_t start, int32_t len)
 {
@@ -2346,7 +2359,7 @@ static void render_ai_panel(const Layout* L)
         out_str("─");
 
     // Hint
-    const char* hint = "esc close";
+    const char* hint = app.ai_thinking && app.ai_focused && !app.ai_stopping ? "esc stop" : "esc close";
     int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding - 1;
     move_to(1, hint_col);
     set_bg(get_ai_bg());
@@ -2453,6 +2466,7 @@ static void render_ai_panel(const Layout* L)
 
         size_t pos = 0;
         int32_t line_in_msg = 0;
+        bool step_line = false; // a "✓ did this" line of the reply, and its wrapped rest
 
         while (pos < m->len && screen_row < msg_area_end) {
             int32_t global_line = msg_start + line_in_msg;
@@ -2469,6 +2483,8 @@ static void render_ai_panel(const Layout* L)
                 line_in_msg++;
                 continue;
             }
+            if (pos == 0 || m->text[pos - 1] == '\n')
+                step_line = !m->is_user && chat_is_step_line(m->text + pos, m->len - pos);
 
             if (visible) {
                 move_to(screen_row, content_start);
@@ -2486,8 +2502,8 @@ static void render_ai_panel(const Layout* L)
                     out_str("    ");
                 }
 
-                set_fg(get_fg());
-                if (m->is_user) {
+                set_fg(step_line ? get_dim() : get_fg());
+                if (m->is_user || step_line) {
                     for (int32_t c = 0; c < chars; c++)
                         out_char(m->text[pos + c]);
                 } else {
@@ -2523,16 +2539,25 @@ static void render_ai_panel(const Layout* L)
             screen_row++;
     }
 
-    // Thinking indicator
+    // Thinking indicator: a spinner, what the AI is doing now, and how long the turn has taken
     if (app.ai_thinking && thinking_line >= first_visible && thinking_line < last_visible && screen_row < msg_area_end) {
         move_to(screen_row, content_start);
         set_bg(get_ai_bg());
         set_fg(get_dim());
         out_str("ai  ");
-        int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC);
-        int32_t phase = (int32_t)(now % 4);
-        const char* dots[] = { "·  ", "·· ", "···", "   " };
-        out_str(dots[phase]);
+        int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        static const char* const spinner[] = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+        set_fg(get_accent());
+        out_str(spinner[(now / 125) % 10]);
+        set_fg(get_dim());
+        int64_t secs = app.ai_turn_started > 0 && now > app.ai_turn_started ? (now - app.ai_turn_started) / 1000 : 0;
+        char status[160];
+        snprintf(status, sizeof(status), " %s %llds", app.ai_status[0] ? app.ai_status : "thinking…", (long long)secs);
+        // As much as fits after the spinner; the wrap helper counts columns, not bytes.
+        int32_t fit = chat_wrap_line(status, strlen(status), 0, first_line_width - 1);
+        if (fit > 0)
+            for (int32_t c = 0; c < fit; c++)
+                out_char(status[c]);
     }
 
     free(msg_start_lines);
@@ -3930,6 +3955,13 @@ static void handle_ai_input(int32_t key)
 {
     switch (key) {
     case '\x1b':
+#if HAS_LIBAI
+        // While a reply is on its way, esc stops it; the panel closes on the next esc.
+        if (app.ai_thinking && !app.ai_stopping) {
+            ai_stop();
+            break;
+        }
+#endif
         app.ai_open = false;
         break;
 

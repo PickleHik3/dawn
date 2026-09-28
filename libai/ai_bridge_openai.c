@@ -18,7 +18,9 @@
  * on dawn's own thread. Response chunks are queued and delivered from ai_bridge_pump(), which the
  * frame loop calls, and tools that read or change the document run there too while the worker
  * waits. Tools that only reach the network or the clock run on the worker, so a slow web search
- * does not freeze typing.
+ * does not freeze typing. Progress reports (waiting, writing, which tool runs) travel the same
+ * queue, and a stop request is a flag the worker checks between chunks, between tool calls and
+ * from curl's progress callback.
  */
 
 #include "ai_bridge.h"
@@ -249,6 +251,8 @@ typedef struct {
     cJSON* history; //!< user / assistant messages, without the system message
     bool tools_refused; //!< The endpoint refused tools once; ask without them from then on
     bool told_tools_refused;
+    ai_bridge_progress_callback_t progress; //!< NULL when the caller does not want reports
+    void* progress_data;
 } session_t;
 
 typedef struct {
@@ -323,7 +327,7 @@ static cJSON* openai_tools_from(const char* tools_json)
 
 // #region Main-thread queue
 
-typedef enum { EVENT_CHUNK, EVENT_CALL } event_kind_t;
+typedef enum { EVENT_CHUNK, EVENT_CALL, EVENT_PROGRESS } event_kind_t;
 
 typedef struct event {
     event_kind_t kind;
@@ -334,11 +338,18 @@ typedef struct event {
     void* user_data;
     char* chunk; //!< NULL marks the end of the reply
     // EVENT_CALL
+    stream_t* stream; //!< The stream waiting for the result; a cancelled one gets none
     ai_bridge_tool_callback_t tool_callback;
     char* parameters;
     char* result;
     bool done;
     bool abandoned; //!< The worker stopped waiting; whoever finishes last frees the event
+    // EVENT_PROGRESS
+    ai_bridge_progress_callback_t progress_callback;
+    int32_t phase;
+    char* tool;
+    int32_t step;
+    int32_t steps;
 } event_t;
 
 static event_t* g_queue_head;
@@ -378,6 +389,32 @@ static void emit(stream_t* st, const char* chunk)
     pthread_mutex_unlock(&g_lock);
 }
 
+//! Tells the session's progress callback, if it has one, what the stream is doing now. Reports
+//! queue behind the chunks already sent, so the caller sees them in order.
+static void progress(stream_t* st, ai_bridge_progress_t phase, const char* tool, int32_t step,
+    int32_t steps)
+{
+    if (st->inline_calls)
+        return;
+    pthread_mutex_lock(&g_lock);
+    session_t* s = &g_sessions[st->session];
+    if (s->progress) {
+        event_t* e = calloc(1, sizeof(*e));
+        if (e) {
+            e->kind = EVENT_PROGRESS;
+            e->progress_callback = s->progress;
+            e->context = st->context;
+            e->user_data = s->progress_data;
+            e->phase = (int32_t)phase;
+            e->tool = dup_str(tool);
+            e->step = step;
+            e->steps = steps;
+            enqueue_locked(e);
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
 void ai_bridge_pump(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -391,11 +428,17 @@ void ai_bridge_pump(void)
             e->stream_callback(e->context, e->chunk, e->user_data);
             free(e->chunk);
             free(e);
+        } else if (e->kind == EVENT_PROGRESS) {
+            e->progress_callback(e->context, e->phase, e->tool, e->step, e->steps, e->user_data);
+            free(e->tool);
+            free(e);
         } else {
+            // A stopped stream's tool never runs: the user asked for no more changes, and the
+            // worker may not have noticed the flag yet.
             pthread_mutex_lock(&g_lock);
-            bool abandoned = e->abandoned;
+            bool skip = e->abandoned || atomic_load(&e->stream->cancel);
             pthread_mutex_unlock(&g_lock);
-            char* result = abandoned ? NULL : e->tool_callback(e->parameters, e->user_data);
+            char* result = skip ? NULL : e->tool_callback(e->parameters, e->user_data);
             pthread_mutex_lock(&g_lock);
             if (e->abandoned) {
                 free(result);
@@ -428,6 +471,7 @@ static char* call_tool(stream_t* st, const tool_t* tool, const char* parameters)
     if (!e)
         return NULL;
     e->kind = EVENT_CALL;
+    e->stream = st;
     e->tool_callback = tool->callback;
     e->user_data = tool->user_data;
     e->parameters = dup_str(parameters);
@@ -474,6 +518,7 @@ typedef struct {
     tool_call_t calls[MAX_TOOL_CALLS];
     int32_t call_count;
     bool saw_event;
+    bool told_writing; //!< Progress: the first reply text has arrived
     char* stream_error;
 } exchange_t;
 
@@ -507,8 +552,13 @@ static void absorb_delta(exchange_t* x, cJSON* delta, bool streaming)
     cJSON* content = cJSON_GetObjectItemCaseSensitive(delta, "content");
     if (cJSON_IsString(content) && content->valuestring[0]) {
         sb_append(&x->content, content->valuestring, strlen(content->valuestring));
-        if (streaming)
+        if (streaming) {
+            if (!x->told_writing) {
+                x->told_writing = true;
+                progress(x->stream, AI_BRIDGE_PROGRESS_WRITING, NULL, 0, 0);
+            }
             emit(x->stream, content->valuestring);
+        }
     }
 
     cJSON* calls = cJSON_GetObjectItemCaseSensitive(delta, "tool_calls");
@@ -530,8 +580,14 @@ static void absorb_delta(exchange_t* x, cJSON* delta, bool streaming)
         cJSON* fn = cJSON_GetObjectItemCaseSensitive(call, "function");
         cJSON* name = cJSON_GetObjectItemCaseSensitive(fn, "name");
         cJSON* args = cJSON_GetObjectItemCaseSensitive(fn, "arguments");
-        if (cJSON_IsString(name))
+        if (cJSON_IsString(name)) {
+            bool named = tc->name.len > 0;
             sb_append(&tc->name, name->valuestring, strlen(name->valuestring));
+            // The arguments of an edit are the new text itself, the longest silence of a turn
+            // with tools: say what is being written as soon as the call has a name.
+            if (streaming && !named && tc->name.len > 0)
+                progress(x->stream, AI_BRIDGE_PROGRESS_TOOL_ARGS, tc->name.data, i + 1, x->call_count);
+        }
         if (cJSON_IsString(args))
             sb_append(&tc->arguments, args->valuestring, strlen(args->valuestring));
         else if (cJSON_IsObject(args)) {
@@ -835,6 +891,17 @@ static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, c
     return out;
 }
 
+//! Every tool reports failure as an object with an "error" key; no result at all is one too.
+static bool tool_failed(const char* output)
+{
+    if (!output)
+        return true;
+    cJSON* root = cJSON_Parse(output);
+    bool failed = cJSON_IsObject(root) && cJSON_GetObjectItemCaseSensitive(root, "error") != NULL;
+    cJSON_Delete(root);
+    return failed;
+}
+
 static cJSON* assistant_tool_message(exchange_t* x)
 {
     cJSON* m = message_new("assistant", x->content.len ? x->content.data : NULL);
@@ -887,6 +954,7 @@ static void run_turn(stream_t* st)
 
         exchange_t x = { .stream = st };
         char* error = NULL;
+        progress(st, AI_BRIDGE_PROGRESS_WAITING, NULL, 0, 0);
         send_result_t result = send_request(&cfg, body ? body : "{}", &x, use_tools, &error);
         free(body);
 
@@ -935,6 +1003,10 @@ static void run_turn(stream_t* st)
         cJSON_AddItemToArray(turn, assistant_tool_message(&x));
         if (x.content.len > 0)
             emit(st, "\n\n");
+        int32_t steps = 0;
+        for (int32_t i = 0; i < x.call_count; i++)
+            steps += x.calls[i].name.data != NULL;
+        int32_t step = 0;
         for (int32_t i = 0; i < x.call_count && !atomic_load(&st->cancel); i++) {
             tool_call_t* tc = &x.calls[i];
             if (!tc->name.data)
@@ -942,8 +1014,12 @@ static void run_turn(stream_t* st)
             pthread_mutex_lock(&g_lock);
             const tool_t* tool = find_tool(s, tc->name.data);
             pthread_mutex_unlock(&g_lock);
+            progress(st, AI_BRIDGE_PROGRESS_TOOL_START, tc->name.data, ++step, steps);
             char* output = tool ? call_tool(st, tool, tc->arguments.data ? tc->arguments.data : "{}")
                                 : dup_printf("{\"error\":\"No tool named %s\"}", tc->name.data);
+            if (!atomic_load(&st->cancel))
+                progress(st, tool_failed(output) ? AI_BRIDGE_PROGRESS_TOOL_FAILED : AI_BRIDGE_PROGRESS_TOOL_DONE,
+                    tc->name.data, step, steps);
             cJSON* reply = message_new("tool", output ? output : "{\"error\":\"The tool failed\"}");
             cJSON_AddStringToObject(reply, "tool_call_id", tc->id ? tc->id : "");
             cJSON_AddItemToArray(turn, reply);
@@ -1169,6 +1245,21 @@ ai_bridge_stream_id_t ai_bridge_generate_structured_response_stream(
     (void)callback;
     (void)user_data;
     return AI_BRIDGE_INVALID_ID;
+}
+
+bool ai_bridge_set_progress_callback(ai_bridge_session_id_t session_id,
+    ai_bridge_progress_callback_t callback, void* user_data)
+{
+    bool ok = false;
+    pthread_mutex_lock(&g_lock);
+    session_t* s = &g_sessions[session_id];
+    if (session_id != AI_BRIDGE_INVALID_ID && s->used && !s->closing) {
+        s->progress = callback;
+        s->progress_data = user_data;
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ok;
 }
 
 bool ai_bridge_cancel_stream(ai_bridge_stream_id_t stream_id)

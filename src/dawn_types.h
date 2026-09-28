@@ -311,10 +311,14 @@ typedef struct {
     int32_t chat_count; //!< Number of messages
     int32_t chat_scroll; //!< Chat scroll offset
     bool ai_thinking; //!< AI processing request
+    bool ai_stopping; //!< The user pressed stop; waiting for the reply to end
+    char ai_status[96]; //!< What the AI is doing now, shown beside the spinner
+    int64_t ai_turn_started; //!< When the question went out, DAWN_CLOCK_MS
 
 #if HAS_LIBAI
     ai_context_t* ai_ctx; //!< libai context
     ai_session_id_t ai_session; //!< libai session
+    ai_stream_id_t ai_stream; //!< The reply in flight, for stopping it
 #endif
     bool ai_ready; //!< AI available
 

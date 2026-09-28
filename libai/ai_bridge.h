@@ -427,6 +427,50 @@ void ai_bridge_free_string(char *ptr);
  */
 void ai_bridge_pump(void);
 
+/**
+ * @brief What a stream is doing, reported between chunks
+ *
+ * The OpenAI-compatible bridge reports these through the callback given to
+ * ai_bridge_set_progress_callback(), delivered from ai_bridge_pump() like
+ * chunks. The FoundationModels bridge does not report progress.
+ */
+typedef enum {
+  AI_BRIDGE_PROGRESS_WAITING = 0, /**< A request went out; nothing came back yet */
+  AI_BRIDGE_PROGRESS_WRITING = 1, /**< Reply text is streaming */
+  AI_BRIDGE_PROGRESS_TOOL_ARGS = 2, /**< The model is writing a call to `tool` */
+  AI_BRIDGE_PROGRESS_TOOL_START = 3, /**< `tool` runs now, `step` of `steps` */
+  AI_BRIDGE_PROGRESS_TOOL_DONE = 4, /**< `tool` returned a result */
+  AI_BRIDGE_PROGRESS_TOOL_FAILED = 5 /**< `tool` returned an error or nothing */
+} ai_bridge_progress_t;
+
+/**
+ * @brief Callback function type for progress reports
+ *
+ * @param context Context pointer given to the streaming function
+ * @param phase One of ai_bridge_progress_t
+ * @param tool The tool's name for the tool phases, NULL otherwise. Only valid
+ * during the callback.
+ * @param step 1-based index of the tool call within its round (tool phases)
+ * @param steps Number of tool calls in the round (tool phases)
+ * @param user_data Pointer given to ai_bridge_set_progress_callback()
+ */
+typedef void (*ai_bridge_progress_callback_t)(void *context, int32_t phase,
+                                              const char *tool, int32_t step,
+                                              int32_t steps, void *user_data);
+
+/**
+ * @brief Report the progress of every stream of a session
+ *
+ * Reports arrive on the thread that calls ai_bridge_pump(), in order with the
+ * stream's chunks. NULL turns reports off. The FoundationModels bridge does not
+ * have it.
+ *
+ * @return true if the session was found
+ */
+bool ai_bridge_set_progress_callback(ai_bridge_session_id_t session_id,
+                                     ai_bridge_progress_callback_t callback,
+                                     void *user_data);
+
 #ifdef __cplusplus
 }
 #endif
