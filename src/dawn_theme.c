@@ -26,6 +26,206 @@ static const DawnColor DARK_BORDER = { 50, 48, 45 }; //!< Soft borders
 static const DawnColor DARK_CODE_BG = { 30, 30, 34 }; //!< Code block background
 static const DawnColor DARK_MODAL_BG = { 35, 35, 40 }; //!< Modal popup background
 
+//! Emphasis tokens with no material palette loaded: sensible values derived from the built-in
+//! cream/charcoal look rather than reusing get_accent() for everything.
+static const DawnColor LIGHT_ITALIC = { 120, 90, 110 }; //!< Muted plum
+static const DawnColor LIGHT_LINK = { 70, 95, 150 }; //!< Ink blue
+static const DawnColor LIGHT_HIGHLIGHT_BG = { 255, 235, 180 };
+static const DawnColor LIGHT_HIGHLIGHT_FG = { 60, 50, 20 };
+
+static const DawnColor DARK_ITALIC = { 175, 140, 165 }; //!< Muted plum
+static const DawnColor DARK_LINK = { 140, 170, 220 }; //!< Ink blue
+static const DawnColor DARK_HIGHLIGHT_BG = { 70, 60, 25 };
+static const DawnColor DARK_HIGHLIGHT_FG = { 235, 220, 170 };
+
+// #endregion
+
+// #region Material You Palette (~/.termux/material-colors-{dark,light}.properties)
+//
+// Termux:Styling writes these when the phone's wallpaper-derived Material You palette changes.
+// Loaded roles map onto dawn's own tokens (see dawn-first-party-spec.html #colors); anything the
+// file doesn't define falls back to the built-in constants above, and if neither properties file
+// exists at all, dawn keeps its own cream/charcoal look exactly as before.
+
+typedef struct {
+    bool loaded;
+    DawnColor bg, fg, dim, accent, select, ai_bg, code_bg, modal_bg, border;
+    DawnColor italic, link, underline, highlight_bg, highlight_fg, error;
+} MaterialPalette;
+
+static struct {
+    MaterialPalette light, dark;
+    int64_t light_mtime, dark_mtime; //!< 0 = file absent (or never checked)
+    int64_t last_check_ms; //!< Throttles the mtime stat()s to at most once a second
+    bool paths_ready;
+    char light_path[1024], dark_path[1024];
+} material = { 0 };
+
+//! Parse "RRGGBB" (6 hex digits, upper or lower case) into a color. Returns false on anything else
+//! (no leading '#' required from the caller - material_find_color() already stripped it).
+static bool parse_hex6(const char* s, DawnColor* out)
+{
+    uint8_t v[3] = { 0, 0, 0 };
+    for (int32_t i = 0; i < 6; i++) {
+        char c = s[i];
+        int32_t digit;
+        if (c >= '0' && c <= '9')
+            digit = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            digit = c - 'A' + 10;
+        else
+            return false;
+        v[i / 2] = (uint8_t)((v[i / 2] << 4) | digit);
+    }
+    out->r = v[0];
+    out->g = v[1];
+    out->b = v[2];
+    return true;
+}
+
+//! Find "key=#RRGGBB" (or "key=RRGGBB", or with a trailing alpha byte after the RGB) on its own
+//! line in buf and parse its color. Lines are newline-separated key=value pairs, Java properties
+//! style; a line starting with '#' or '!' is a comment (only meaningful if it isn't also "key=..."
+//! - properties comments start the line with the marker itself, not inside a key).
+static bool material_find_color(const char* buf, size_t len, const char* key, DawnColor* out)
+{
+    size_t key_len = strlen(key);
+    size_t i = 0;
+    while (i < len) {
+        size_t line_start = i;
+        while (i < len && buf[i] != '\n')
+            i++;
+        size_t line_len = i - line_start;
+        i++; // skip the newline itself
+
+        if (line_len == 0 || buf[line_start] == '#' || buf[line_start] == '!')
+            continue;
+        if (line_len <= key_len || strncmp(buf + line_start, key, key_len) != 0)
+            continue;
+        if (buf[line_start + key_len] != '=')
+            continue;
+
+        size_t val_start = line_start + key_len + 1;
+        if (val_start < line_start + line_len && buf[val_start] == '#')
+            val_start++;
+        if (line_start + line_len - val_start < 6)
+            continue;
+        if (parse_hex6(buf + val_start, out))
+            return true;
+    }
+    return false;
+}
+
+static void material_load_one(const char* path, MaterialPalette* mp, const MaterialPalette* fallback)
+{
+    size_t len = 0;
+    char* buf = DAWN_BACKEND(app)->read_file(path, &len);
+    if (!buf) {
+        mp->loaded = false;
+        return;
+    }
+
+    // Each role falls back to the built-in palette passed in, one key at a time, so a partial
+    // file (a role Termux:Styling hasn't started writing yet) still gets a coherent theme.
+    DawnColor surface_container = fallback->ai_bg;
+    material_find_color(buf, len, "surface_container", &surface_container);
+
+    mp->bg = fallback->bg;
+    material_find_color(buf, len, "terminal_background", &mp->bg);
+    mp->fg = fallback->fg;
+    material_find_color(buf, len, "terminal_foreground", &mp->fg);
+    mp->dim = fallback->dim;
+    material_find_color(buf, len, "on_surface_variant", &mp->dim);
+    mp->accent = fallback->accent;
+    material_find_color(buf, len, "primary", &mp->accent);
+    mp->select = fallback->select;
+    material_find_color(buf, len, "terminal_selection_bg", &mp->select);
+    mp->ai_bg = surface_container;
+    mp->code_bg = surface_container;
+    mp->modal_bg = fallback->modal_bg;
+    material_find_color(buf, len, "surface_container_high", &mp->modal_bg);
+    mp->border = fallback->border;
+    material_find_color(buf, len, "outline_variant", &mp->border);
+    mp->italic = fallback->italic;
+    material_find_color(buf, len, "tertiary", &mp->italic);
+    mp->link = fallback->link;
+    material_find_color(buf, len, "secondary", &mp->link);
+    mp->underline = mp->accent; // "primary", same key as accent
+    mp->highlight_bg = fallback->highlight_bg;
+    material_find_color(buf, len, "tertiary_container", &mp->highlight_bg);
+    mp->highlight_fg = fallback->highlight_fg;
+    material_find_color(buf, len, "on_tertiary_container", &mp->highlight_fg);
+    mp->error = fallback->accent; // sensible fallback until a proof-mark feature needs it
+    material_find_color(buf, len, "error", &mp->error);
+
+    free(buf);
+    mp->loaded = true;
+}
+
+static void material_init_paths(void)
+{
+    const char* home = DAWN_BACKEND(app)->home_dir();
+    if (!home)
+        home = "";
+    snprintf(material.dark_path, sizeof(material.dark_path), "%s/.termux/material-colors-dark.properties", home);
+    snprintf(material.light_path, sizeof(material.light_path), "%s/.termux/material-colors-light.properties", home);
+    material.paths_ready = true;
+}
+
+//! Re-stat and, if changed, reload both palette files - throttled to at most once a second so the
+//! frequent get_bg()/get_fg()/... calls each render don't turn into a stat() storm.
+static void material_refresh(void)
+{
+    if (!material.paths_ready)
+        material_init_paths();
+
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    if (material.last_check_ms != 0 && now - material.last_check_ms < 1000)
+        return;
+    material.last_check_ms = now;
+
+    int64_t dm = DAWN_BACKEND(app)->mtime(material.dark_path);
+    if (dm != material.dark_mtime) {
+        material.dark_mtime = dm;
+        if (dm == 0) {
+            material.dark.loaded = false;
+        } else {
+            MaterialPalette fallback = { .bg = DARK_BG, .fg = DARK_FG, .dim = DARK_DIM, .accent = DARK_ACCENT,
+                .select = DARK_SELECT, .ai_bg = DARK_AI_BG, .code_bg = DARK_CODE_BG, .modal_bg = DARK_MODAL_BG,
+                .border = DARK_BORDER, .italic = DARK_ITALIC, .link = DARK_LINK,
+                .highlight_bg = DARK_HIGHLIGHT_BG, .highlight_fg = DARK_HIGHLIGHT_FG };
+            material_load_one(material.dark_path, &material.dark, &fallback);
+        }
+    }
+
+    int64_t lm = DAWN_BACKEND(app)->mtime(material.light_path);
+    if (lm != material.light_mtime) {
+        material.light_mtime = lm;
+        if (lm == 0) {
+            material.light.loaded = false;
+        } else {
+            MaterialPalette fallback = { .bg = LIGHT_BG, .fg = LIGHT_FG, .dim = LIGHT_DIM, .accent = LIGHT_ACCENT,
+                .select = LIGHT_SELECT, .ai_bg = LIGHT_AI_BG, .code_bg = LIGHT_CODE_BG, .modal_bg = LIGHT_MODAL_BG,
+                .border = LIGHT_BORDER, .italic = LIGHT_ITALIC, .link = LIGHT_LINK,
+                .highlight_bg = LIGHT_HIGHLIGHT_BG, .highlight_fg = LIGHT_HIGHLIGHT_FG };
+            material_load_one(material.light_path, &material.light, &fallback);
+        }
+    }
+}
+
+static inline const MaterialPalette* material_for(Theme t)
+{
+    return (t == THEME_DARK) ? &material.dark : &material.light;
+}
+
+bool theme_material_active(void)
+{
+    material_refresh();
+    return material.dark.loaded || material.light.loaded;
+}
+
 // #endregion
 
 // #region Output Primitives
@@ -138,16 +338,110 @@ DawnColor get_bg(void)
     if (app.ctx.mode == DAWN_MODE_PRINT && app.ctx.host_bg) {
         return *app.ctx.host_bg;
     }
+    material_refresh();
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->bg;
     return app.theme == THEME_DARK ? DARK_BG : LIGHT_BG;
 }
-DawnColor get_fg(void) { return app.theme == THEME_DARK ? DARK_FG : LIGHT_FG; }
-DawnColor get_dim(void) { return app.theme == THEME_DARK ? DARK_DIM : LIGHT_DIM; }
-DawnColor get_accent(void) { return app.theme == THEME_DARK ? DARK_ACCENT : LIGHT_ACCENT; }
-DawnColor get_select(void) { return app.theme == THEME_DARK ? DARK_SELECT : LIGHT_SELECT; }
-DawnColor get_ai_bg(void) { return app.theme == THEME_DARK ? DARK_AI_BG : LIGHT_AI_BG; }
-DawnColor get_border(void) { return app.theme == THEME_DARK ? DARK_BORDER : LIGHT_BORDER; }
-DawnColor get_code_bg(void) { return app.theme == THEME_DARK ? DARK_CODE_BG : LIGHT_CODE_BG; }
-DawnColor get_modal_bg(void) { return app.theme == THEME_DARK ? DARK_MODAL_BG : LIGHT_MODAL_BG; }
+DawnColor get_fg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->fg;
+    return app.theme == THEME_DARK ? DARK_FG : LIGHT_FG;
+}
+DawnColor get_dim(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->dim;
+    return app.theme == THEME_DARK ? DARK_DIM : LIGHT_DIM;
+}
+DawnColor get_accent(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->accent;
+    return app.theme == THEME_DARK ? DARK_ACCENT : LIGHT_ACCENT;
+}
+DawnColor get_select(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->select;
+    return app.theme == THEME_DARK ? DARK_SELECT : LIGHT_SELECT;
+}
+DawnColor get_ai_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->ai_bg;
+    return app.theme == THEME_DARK ? DARK_AI_BG : LIGHT_AI_BG;
+}
+DawnColor get_border(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->border;
+    return app.theme == THEME_DARK ? DARK_BORDER : LIGHT_BORDER;
+}
+DawnColor get_code_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->code_bg;
+    return app.theme == THEME_DARK ? DARK_CODE_BG : LIGHT_CODE_BG;
+}
+DawnColor get_modal_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->modal_bg;
+    return app.theme == THEME_DARK ? DARK_MODAL_BG : LIGHT_MODAL_BG;
+}
+DawnColor get_italic_color(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->italic;
+    return app.theme == THEME_DARK ? DARK_ITALIC : LIGHT_ITALIC;
+}
+DawnColor get_link_color(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->link;
+    return app.theme == THEME_DARK ? DARK_LINK : LIGHT_LINK;
+}
+DawnColor get_underline_color_token(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->underline;
+    return get_accent(); // built-in palette has no separate underline token
+}
+DawnColor get_highlight_bg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->highlight_bg;
+    return app.theme == THEME_DARK ? DARK_HIGHLIGHT_BG : LIGHT_HIGHLIGHT_BG;
+}
+DawnColor get_highlight_fg(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->highlight_fg;
+    return app.theme == THEME_DARK ? DARK_HIGHLIGHT_FG : LIGHT_HIGHLIGHT_FG;
+}
+DawnColor get_error_color(void)
+{
+    const MaterialPalette* m = material_for(app.theme);
+    if (m->loaded)
+        return m->error;
+    return get_accent(); // built-in palette has no separate error token (yet)
+}
 
 // #endregion
 

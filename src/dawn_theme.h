@@ -96,6 +96,31 @@ DawnColor get_code_bg(void);
 //! Get current theme's modal popup background color
 DawnColor get_modal_bg(void);
 
+//! Get current theme's italic-text color (material palette: tertiary; built-in: a muted plum)
+DawnColor get_italic_color(void);
+
+//! Get current theme's link text color (material palette: secondary; built-in: an ink blue).
+//! Distinct from get_accent() so links can read differently from timer/focus/quote-bar accents.
+DawnColor get_link_color(void);
+
+//! Get current theme's underline color for SGR 58 styled underlines (material palette: primary,
+//! i.e. the same as get_accent(); built-in: get_accent() too, so this is a no-op there)
+DawnColor get_underline_color_token(void);
+
+//! Get current theme's highlight (==mark==) background color (material palette: tertiary_container)
+DawnColor get_highlight_bg(void);
+
+//! Get current theme's highlight (==mark==) foreground color (material palette: on_tertiary_container)
+DawnColor get_highlight_fg(void);
+
+//! Get current theme's error/proof-mark color (material palette: error; built-in: get_accent())
+DawnColor get_error_color(void);
+
+//! Whether the material palette (~/.termux/material-colors-*.properties) is driving app.theme
+//! instead of dawn's own persisted setting - the launcher's light/dark reports (CSI ?997;n) only
+//! take over when the files exist.
+bool theme_material_active(void);
+
 // #endregion
 
 // #region DawnColor Utilities

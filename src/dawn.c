@@ -2835,8 +2835,7 @@ static void render_status_bar(const Layout* L)
     float notice_fresh;
     if (!app.focus_mode && notice_current(&notice_text, &notice_kind, &notice_fresh)) {
         DawnColor c = (notice_kind == NOTICE_ERROR)
-            ? get_accent() // stays at full strength until notice_ack(); a dedicated error token
-                           // arrives with the material palette (P1 #colors), not yet in dawn_theme
+            ? get_error_color() // stays at full strength until notice_ack(), no fade
             : color_lerp(get_bg(), get_dim(), notice_fresh);
         int32_t notice_col = status_right - (int32_t)strlen(notice_text) + 1;
         if (notice_col > status_left + 20) {
@@ -3056,7 +3055,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
                 if (use_osc8)
                     DAWN_BACKEND(app)->link_begin(url);
                 set_underline(UNDERLINE_STYLE_SINGLE);
-                set_fg(get_accent());
+                set_underline_color(get_underline_color_token());
+                set_fg(get_link_color());
                 if (in_code)
                     set_dim(true);
                 link_started = true;
@@ -4764,6 +4764,22 @@ static void handle_input(void)
     if (key != DAWN_KEY_MOUSE_RELEASE)
         notice_ack();
 
+    // The launcher's light/dark report (P1 #colors): only takes over app.theme from dawn's own
+    // persisted setting when a material palette is actually loaded for at least one mode: without
+    // the files there's nothing for the launcher's report to change, so dawn's own ^D toggle (and
+    // whatever the user last chose) keeps working exactly as before.
+    if (key == DAWN_KEY_THEME_DARK || key == DAWN_KEY_THEME_LIGHT) {
+        if (theme_material_active()) {
+            Theme want = (key == DAWN_KEY_THEME_DARK) ? THEME_DARK : THEME_LIGHT;
+            if (app.theme != want) {
+                app.theme = want;
+                highlight_cleanup(app.hl_ctx);
+                app.hl_ctx = highlight_init(app.theme == THEME_DARK);
+            }
+        }
+        return;
+    }
+
     switch (app.mode) {
     case MODE_WELCOME:
         switch (key) {
@@ -5874,8 +5890,9 @@ static void render_run_autolink(const RenderCtx* ctx, RenderState* rs, const Inl
         url[prefix_len + ulen] = '\0';
         bool use_osc8 = dawn_ctx_has(&app.ctx, DAWN_CAP_HYPERLINKS) && url_scheme_is_linkable(url);
 
-        set_fg(get_accent());
+        set_fg(get_link_color());
         set_underline(UNDERLINE_STYLE_SINGLE);
+        set_underline_color(get_underline_color_token());
         if (use_osc8)
             DAWN_BACKEND(app)->link_begin(url);
         rs->pos++; // skip <

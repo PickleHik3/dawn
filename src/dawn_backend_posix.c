@@ -658,6 +658,10 @@ static bool posix_init(DawnMode mode)
 
     // Enable mouse and bracketed paste
     printf(MOUSE_ON BRACKETED_PASTE_ON);
+    // Light/dark mode reporting (P1 #colors): ?2031h arms the launcher's unsolicited CSI
+    // ?997;1n/?997;2n reports on every mode change, and ?996n asks for the current mode once so
+    // dawn doesn't start out guessing. Harmless if the host doesn't understand either sequence.
+    printf(THEME_MODE_ON THEME_MODE_QUERY);
     printf(CLEAR_SCREEN CURSOR_HOME);
     fflush(stdout);
 
@@ -708,7 +712,7 @@ static void posix_shutdown(void)
         printf(KITTY_KBD_POP);
     }
 
-    printf(SYNC_START CURSOR_SHOW MOUSE_OFF BRACKETED_PASTE_OFF ALT_SCREEN_OFF RESET SYNC_END);
+    printf(SYNC_START CURSOR_SHOW MOUSE_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
     fflush(stdout);
 
     if (posix_state.raw_mode) {
