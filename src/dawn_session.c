@@ -7,7 +7,9 @@
 #include "ai.h"
 #include "dawn_ai_queue.h"
 #include "dawn_ai_tokens.h"
+#include "cJSON.h"
 #include "dawn_chat.h"
+#include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_gap.h"
 #include "dawn_nav.h"
@@ -1288,7 +1290,8 @@ bool session_quiet(const char* instruction, int32_t max_tokens, SessionQuietDone
 
 // #region Public: lifecycle
 
-void session_reset(void)
+//! Drop the conversation and whatever runs on it; the note and the chat stay as they are.
+static void conv_drop(void)
 {
     if (g_job.kind != JOB_NONE) {
         job_cancel();
@@ -1305,6 +1308,11 @@ void session_reset(void)
     g_conv_id = 0;
     conv_forget();
     log_clear();
+}
+
+void session_reset(void)
+{
+    conv_drop();
     free(g_conv_path);
     g_conv_path = NULL;
     g_held_from = 0;
@@ -1567,6 +1575,72 @@ bool session_saw_whole_note(void)
     if (g_job.kind == JOB_USER)
         return g_job.whole;
     return g_whole;
+}
+
+// #endregion
+
+// #region Public: model choice
+
+//! Save the picked model in ~/.config/dawn/state.json, keeping whatever else the file holds.
+static bool save_model_choice(const char* id)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/state.json", config_dir());
+    size_t size = 0;
+    char* text = DAWN_BACKEND(app)->read_file(path, &size);
+    cJSON* root = text ? cJSON_Parse(text) : NULL;
+    free(text);
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        root = cJSON_CreateObject();
+    }
+    if (!root)
+        return false;
+    cJSON_DeleteItemFromObjectCaseSensitive(root, "model");
+    cJSON_AddStringToObject(root, "model", id);
+    char* json = cJSON_Print(root);
+    cJSON_Delete(root);
+    bool ok = json && DAWN_BACKEND(app)->mkdir_p(config_dir())
+        && DAWN_BACKEND(app)->write_file(path, json, strlen(json));
+    free(json);
+    return ok;
+}
+
+void session_pick_model(const char* id)
+{
+    if (!app.ai_ready || !app.ai_ctx || !id || !id[0])
+        return;
+    g_model_read_ms = 0;
+    model_refresh();
+    if (g_model_pinned) {
+        // A model set by hand in ai.json wins over the picker.
+        if (strcmp(g_model_id, id) != 0)
+            notice_post(NOTICE_INFO, "ai.json sets the model");
+        return;
+    }
+    if (strcmp(session_model_id(), id) == 0 && (g_primed || g_job.kind == JOB_PRIME))
+        return; // already on it
+    if (!save_model_choice(id)) {
+        notice_post(NOTICE_ERROR, "couldn't save the model choice");
+        return;
+    }
+    g_model_read_ms = 0;
+    model_refresh();
+
+    // A reply in flight stops; the conversation starts over on the new model, which the prime
+    // loads at once ("waking the model · N s"). The chat so far stays, as scrollback it never heard.
+    if (app.ai_thinking)
+        ai_stop();
+    conv_drop();
+    g_held_from = app.chat_count;
+    g_no_memory[0] = '\0';
+    g_busy_seen_ms = 0;
+    g_rebuild_after_summary = false;
+    g_prime_wanted = true;
+    g_prime_retry_at = 0;
+    ai_models_refresh();
+    if (g_job.kind == JOB_NONE && app.mode == MODE_WRITING)
+        prime_start();
 }
 
 // #endregion

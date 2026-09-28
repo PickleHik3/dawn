@@ -109,6 +109,16 @@ char* session_note_context(void);
 
 // #endregion
 
+// #region Model choice
+
+//! Switch to model id at once, with no confirmation: it is saved to ~/.config/dawn/state.json
+//! (unless ai.json names a model, which wins; the status line says so), a reply in flight stops,
+//! and the conversation starts over and is primed, which loads the model ("waking the model ·
+//! N s"). Dawn never switches models on its own.
+void session_pick_model(const char* id);
+
+// #endregion
+
 #endif // HAS_LIBAI
 
 #endif // DAWN_SESSION_H

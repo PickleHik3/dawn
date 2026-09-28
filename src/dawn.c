@@ -2469,6 +2469,112 @@ static int32_t chat_max_scroll = 0;
 //! 0 when not drawn), so a tap on it opens the model picker.
 static int32_t chat_name_row = 0, chat_name_col0 = 0, chat_name_col1 = 0;
 
+#if HAS_LIBAI
+//! The model picker: a small list over the chat's messages, opened by tapping the model's name in
+//! the header or Ctrl+L in the chat. Choosing switches at once; esc or Ctrl+L closes it.
+static struct {
+    bool open;
+    int32_t sel; //!< The highlighted row
+    int32_t first_row, rows, col0, col1; //!< Where the last render drew the rows, for taps
+} chat_picker;
+
+static void chat_picker_open(void)
+{
+    ai_model_info_t models[AI_MAX_MODELS];
+    int32_t count = ai_models(models, AI_MAX_MODELS);
+    const char* current = session_model_id();
+    chat_picker.open = true;
+    chat_picker.sel = 0;
+    for (int32_t i = 0; i < count && i < AI_MAX_MODELS; i++)
+        if (strcmp(models[i].id, current) == 0)
+            chat_picker.sel = i;
+    ai_models_refresh();
+}
+
+static void chat_picker_choose(int32_t index)
+{
+    ai_model_info_t models[AI_MAX_MODELS];
+    int32_t count = ai_models(models, AI_MAX_MODELS);
+    chat_picker.open = false;
+    if (index >= 0 && index < count && index < AI_MAX_MODELS)
+        session_pick_model(models[index].id);
+}
+
+//! A key while the picker is open. Everything goes to the list; nothing reaches the input.
+static void chat_picker_key(int32_t key)
+{
+    int32_t count = ai_models(NULL, 0);
+    if (count > AI_MAX_MODELS)
+        count = AI_MAX_MODELS;
+    switch (key) {
+    case '\x1b':
+    case 12: // Ctrl+L, the key that opened it
+    case 31:
+        chat_picker.open = false;
+        break;
+    case DAWN_KEY_UP:
+    case 16:
+        if (chat_picker.sel > 0)
+            chat_picker.sel--;
+        break;
+    case DAWN_KEY_DOWN:
+    case 14:
+        if (chat_picker.sel < count - 1)
+            chat_picker.sel++;
+        break;
+    case '\r':
+    case '\n':
+        chat_picker_choose(chat_picker.sel);
+        break;
+    default:
+        break;
+    }
+}
+
+//! Draw the picker over the chat's message rows: one row per model, the one in use marked, the
+//! highlighted one on the selected-row surface.
+static void render_chat_picker(int32_t top, int32_t max_rows, int32_t col, int32_t width)
+{
+    ai_model_info_t models[AI_MAX_MODELS];
+    int32_t count = ai_models(models, AI_MAX_MODELS);
+    if (count > AI_MAX_MODELS)
+        count = AI_MAX_MODELS;
+    const char* current = session_model_id();
+    int32_t rows = count > 0 ? count : 1;
+    if (rows > max_rows)
+        rows = max_rows;
+    if (chat_picker.sel >= count)
+        chat_picker.sel = count > 0 ? count - 1 : 0;
+    // Keep the highlighted row in view when the list is taller than the room.
+    int32_t first = chat_picker.sel >= rows ? chat_picker.sel - rows + 1 : 0;
+    chat_picker.first_row = top;
+    chat_picker.rows = count > 0 ? rows : 0;
+    chat_picker.col0 = col;
+    chat_picker.col1 = col + width;
+    for (int32_t r = 0; r < rows; r++) {
+        int32_t i = first + r;
+        bool sel = count > 0 && i == chat_picker.sel;
+        move_to(top + r, col);
+        set_bg(sel ? get_row_select_bg() : get_modal_bg());
+        out_spaces(width);
+        move_to(top + r, col + 1);
+        if (count <= 0) {
+            set_fg(get_dim());
+            out_str(count < 0 ? "looking for models…" : "no models yet");
+            continue;
+        }
+        bool in_use = strcmp(models[i].id, current) == 0;
+        set_fg(get_accent());
+        out_str(in_use ? "• " : "  ");
+        set_fg(sel ? get_fg() : get_dim());
+        const char* name = models[i].name;
+        int32_t fit = chat_wrap_line(name, strlen(name), 0, width - 4);
+        for (int32_t c = 0; c < fit; c++)
+            out_char(name[c]);
+    }
+}
+#endif
+
 //! The chat header: the model's name, bold, and under it one dim line saying what the session is
 //! doing ("has read this note", "waking the model · 12 s", …). Returns the rows used (2).
 static int32_t render_chat_header(int32_t row, int32_t col, int32_t width, int32_t hint_room)
@@ -2813,6 +2919,11 @@ static void render_ai_panel(const Layout* L)
             for (int32_t c = 0; c < fit; c++)
                 out_char(status[c]);
     }
+
+#if HAS_LIBAI
+    if (chat_picker.open)
+        render_chat_picker(msg_area_start, msg_area_height, content_start, content_width);
+#endif
 
     // The pill in the chat's right padding column, over the message rows
     scrollind_show(SCROLLIND_CHAT, L->ai_start_col + L->ai_cols - 1, msg_area_start, msg_area_height,
@@ -4089,6 +4200,22 @@ static void handle_mouse_click(void)
     if (tap_is_over_chat(&L, row, col)) {
         app.ai_focused = true;
         touch_state.press_active = false;
+#if HAS_LIBAI
+        // The picker: a tap on a row chooses it, anywhere else closes the list.
+        if (chat_picker.open) {
+            if (row >= chat_picker.first_row && row < chat_picker.first_row + chat_picker.rows
+                && col >= chat_picker.col0 && col < chat_picker.col1) {
+                int32_t first = chat_picker.sel >= chat_picker.rows ? chat_picker.sel - chat_picker.rows + 1 : 0;
+                chat_picker_choose(first + row - chat_picker.first_row);
+            } else {
+                chat_picker.open = false;
+            }
+            return;
+        }
+        // A tap on the model's name opens it.
+        if (chat_name_row > 0 && row == chat_name_row && col >= chat_name_col0 && col <= chat_name_col1)
+            chat_picker_open();
+#endif
         return;
     }
 
@@ -4796,7 +4923,20 @@ static void handle_writing(int32_t key)
 
 static void handle_ai_input(int32_t key)
 {
+#if HAS_LIBAI
+    if (chat_picker.open) {
+        chat_picker_key(key);
+        return;
+    }
+#endif
     switch (key) {
+#if HAS_LIBAI
+    case 12:
+        // Ctrl+L: the model picker (in the note, Ctrl+L is the outline: both are "the list").
+        chat_picker_open();
+        break;
+#endif
+
     case '\x1b':
 #if HAS_LIBAI
         // While a reply is on its way, esc stops it; the panel closes on the next esc.
@@ -5095,6 +5235,10 @@ static void handle_input(void)
         break;
 
     case MODE_WRITING:
+#if HAS_LIBAI
+        if (!app.ai_open)
+            chat_picker.open = false;
+#endif
         if (app.ai_open && key == '\t') {
             // Over the note there is nothing to hand the focus to; esc brings the note back.
             if (!calc_layout().ai_overlay)
