@@ -3581,14 +3581,28 @@ static void move_cursor(size_t new_pos, bool extend_sel)
 
 // #region Touch Input (dawn_touch)
 //
-// Termux sends SGR mouse events (dawn enables ?1000h ?1006h): a tap is a button-0 press then
-// release at the same column/row, and a swipe is wheel buttons 64/65. DAWN_KEY_MOUSE_CLICK and
-// DAWN_KEY_MOUSE_SCROLL_UP/DOWN carry no position of their own; the position is whatever
-// input_last_mouse_col()/row() held when the key was decoded (dawn_backend_posix.c).
+// Termux sends SGR mouse events (dawn enables ?1000h ?1002h ?1006h): a tap is a button-0 press
+// (DAWN_KEY_MOUSE_CLICK) then release (DAWN_KEY_MOUSE_RELEASE) at the same column/row, ?1002 adds
+// motion while the button stays down (DAWN_KEY_MOUSE_DRAG, button 32) after a long-press, and a
+// swipe is wheel buttons 64/65. None of these carry a position of their own; the position is
+// whatever input_last_mouse_col()/row() held when the key was decoded (dawn_backend_posix.c).
 //
-// A tap's press and its release both decode to DAWN_KEY_MOUSE_CLICK (the posix backend does not
-// distinguish 'M' from 'm' for button 0), so handle_mouse_click() runs twice per tap at the same
-// position; both runs land on the same target, so that is harmless here.
+// Double/triple tap and press-drag selection (P1 #touch) are tracked in touch_state below: a
+// second press within DOUBLE_TAP_MS and DOUBLE_TAP_CELLS of the last one selects a word, a third
+// selects the paragraph, and a press followed by a drag before release extends the selection from
+// the press point to wherever the finger is now (no floating bar: Ctrl+C, typing and Ctrl+/ act on
+// the resulting selection like they always have).
+
+#define DOUBLE_TAP_MS 350
+#define DOUBLE_TAP_CELLS 1
+
+static struct {
+    int64_t last_tap_ms; //!< clock() time of the previous press
+    int32_t last_tap_row, last_tap_col; //!< screen cell of the previous press
+    int32_t tap_run; //!< consecutive taps landing within the double-tap window/radius (1, 2, 3+)
+    size_t press_pos; //!< buffer position of the current press, for press-then-drag extension
+    bool press_active; //!< a press has landed and no release/drag-elsewhere has resolved it yet
+} touch_state = { 0 };
 
 //! Which pane a screen column falls in. In the portrait overlay (calc_layout().ai_overlay, added
 //! by the data-safety patch) the chat is drawn over every column and row of the note, so there is
@@ -3784,8 +3798,106 @@ static size_t map_tap_to_buffer_pos(const Layout* L, int32_t screen_row, int32_t
     }
 }
 
-//! DAWN_KEY_MOUSE_CLICK in MODE_WRITING: focuses whichever pane the tap landed in, and in the
-//! note also places the cursor and clears any selection, like a mouse click does on desktop.
+//! Task checkbox tap: toggles `- [ ]`/`- [x]` as one undo step, without moving the cursor. Only
+//! the glyph columns ("☐ "/"☑ ", drawn by render_line_prefixes on the item's first line) count; a
+//! tap on the item's text falls through to ordinary cursor placement.
+static bool try_toggle_task_box(const Layout* L, int32_t screen_row, int32_t screen_col)
+{
+    if (app.plain_mode || !CAN_MODIFY())
+        return false; // plain mode shows the raw "- [ ] " text, not a tappable glyph
+
+    BlockCache* bc = (BlockCache*)app.block_cache;
+    if (!bc || !bc->valid || bc->count == 0)
+        return false;
+
+    int32_t vrow = screen_row - L->top_margin + app.scroll_y;
+    int32_t col = screen_col - L->margin - 1;
+    if (vrow < 0 || col < 0)
+        return false;
+
+    Block* blk = block_at_vrow(bc, vrow);
+    if (!blk || blk->type != BLOCK_LIST_ITEM || blk->data.list.task_state == 0)
+        return false;
+    if (vrow != blk->vrow_start)
+        return false; // only the first line carries the box
+
+    int32_t indent = blk->data.list.indent;
+    if (col < indent || col >= indent + 2)
+        return false;
+
+    // The raw marker is "- [ ] "/"- [x] " starting at indent; the check char sits 3 past that
+    // (md_check_task in dawn_md.c parses the very same offset).
+    size_t check_pos = (size_t)blk->start + (size_t)indent + 3;
+    if (check_pos >= blk->end)
+        return false;
+    char c = gap_at(&app.text, check_pos);
+    if (c != ' ' && c != 'x' && c != 'X')
+        return false;
+
+    save_undo_state();
+    gap_delete(&app.text, check_pos, 1);
+    gap_insert(&app.text, check_pos, (c == ' ') ? 'x' : ' ');
+    app.dirty = true;
+    return true;
+}
+
+//! Whether a byte is part of a "word" for double-tap word selection: same class as is_word_key.
+static inline bool is_word_byte(char c)
+{
+    return is_word_key((unsigned char)c);
+}
+
+//! Select the word touching pos (or the whitespace run touching it, if pos isn't on a word) -
+//! double-tap in the note.
+static void select_word_at(size_t pos)
+{
+    size_t len = gap_len(&app.text);
+    if (len == 0) {
+        app.selecting = false;
+        return;
+    }
+    if (pos > len)
+        pos = len;
+
+    // Prefer the word to the left when sitting exactly on a boundary, like desktop double-click.
+    size_t probe = pos;
+    if (probe >= len || !is_word_byte(gap_at(&app.text, probe))) {
+        if (probe > 0 && is_word_byte(gap_at(&app.text, probe - 1)))
+            probe--;
+    }
+    if (probe >= len) {
+        app.selecting = false;
+        return;
+    }
+
+    bool word = is_word_byte(gap_at(&app.text, probe));
+    size_t s = probe, e = probe + 1;
+    while (s > 0 && is_word_byte(gap_at(&app.text, s - 1)) == word && gap_at(&app.text, s - 1) != '\n')
+        s--;
+    while (e < len && is_word_byte(gap_at(&app.text, e)) == word && gap_at(&app.text, e) != '\n')
+        e++;
+
+    app.sel_anchor = s;
+    app.cursor = e;
+    app.selecting = (e > s);
+}
+
+//! Select the paragraph (markdown block) touching pos - triple-tap in the note.
+static void select_paragraph_at(size_t pos)
+{
+    Block* b = get_block_at(pos);
+    if (!b) {
+        app.selecting = false;
+        return;
+    }
+    app.sel_anchor = b->start;
+    app.cursor = b->end;
+    app.selecting = (b->end > b->start);
+}
+
+//! DAWN_KEY_MOUSE_CLICK (press) in MODE_WRITING: focuses whichever pane the tap landed in, and in
+//! the note also places the cursor, like a mouse click does on desktop - unless it lands on a task
+//! checkbox (toggles it in place) or continues a double/triple tap (selects word/paragraph).
 static void handle_mouse_click(void)
 {
     Layout L = calc_layout();
@@ -3794,6 +3906,7 @@ static void handle_mouse_click(void)
 
     if (tap_is_over_chat(&L, col)) {
         app.ai_focused = true;
+        touch_state.press_active = false;
         return;
     }
 
@@ -3801,9 +3914,42 @@ static void handle_mouse_click(void)
     // overlay layout this branch is unreachable: tap_is_over_chat() is always true there, so a
     // tap never "closes" the overlay the way Esc does - there is no uncovered note region to tap).
     app.ai_focused = false;
-    app.selecting = false;
     app.view_detached = false;
-    app.cursor = map_tap_to_buffer_pos(&L, row, col);
+
+    if (try_toggle_task_box(&L, row, col)) {
+        touch_state.press_active = false;
+        touch_state.tap_run = 0;
+        return;
+    }
+
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    int32_t drow = row - touch_state.last_tap_row;
+    int32_t dcol = col - touch_state.last_tap_col;
+    if (drow < 0)
+        drow = -drow;
+    if (dcol < 0)
+        dcol = -dcol;
+    bool continues = touch_state.tap_run > 0 && now - touch_state.last_tap_ms <= DOUBLE_TAP_MS
+        && drow <= DOUBLE_TAP_CELLS && dcol <= DOUBLE_TAP_CELLS;
+    touch_state.tap_run = continues ? touch_state.tap_run + 1 : 1;
+    touch_state.last_tap_ms = now;
+    touch_state.last_tap_row = row;
+    touch_state.last_tap_col = col;
+
+    size_t pos = map_tap_to_buffer_pos(&L, row, col);
+
+    if (touch_state.tap_run == 2) {
+        select_word_at(pos);
+    } else if (touch_state.tap_run >= 3) {
+        select_paragraph_at(pos);
+    } else {
+        app.selecting = false;
+        app.cursor = pos;
+    }
+
+    // Remember the press so a drag before release extends a selection from here.
+    touch_state.press_pos = pos;
+    touch_state.press_active = true;
 }
 
 //! DAWN_KEY_MOUSE_SCROLL_UP/DOWN in MODE_WRITING: routed to whichever pane the finger is over, not
@@ -3835,6 +3981,51 @@ static void handle_mouse_scroll(int32_t key)
     } else {
         app.scroll_y += 3; // clamped to the document's own bounds during render
     }
+}
+
+//! DAWN_KEY_MOUSE_DRAG (mode 1002 motion with button 0 held) in MODE_WRITING: extends the
+//! selection from the original press point to wherever the finger is now, and auto-scrolls when
+//! the finger sits at the top/bottom edge of the note so a long selection can reach off-screen.
+static void handle_mouse_drag(void)
+{
+    Layout L = calc_layout();
+    int32_t row = input_last_mouse_row();
+    int32_t col = input_last_mouse_col();
+
+    if (tap_is_over_chat(&L, col))
+        return; // no drag-selection in the chat pane
+
+    if (!touch_state.press_active) {
+        // A drag reported without a press we tracked (e.g. it started over the chat pane and
+        // slid onto the note) still needs an anchor: use wherever the finger is now.
+        touch_state.press_pos = map_tap_to_buffer_pos(&L, row, col);
+        touch_state.press_active = true;
+    }
+
+    app.ai_focused = false;
+    app.view_detached = true;
+
+    // Auto-scroll while the finger sits at the top/bottom margin row, same step as a swipe.
+    if (row <= L.top_margin) {
+        app.scroll_y -= 3;
+        if (app.scroll_y < 0)
+            app.scroll_y = 0;
+    } else if (row >= L.top_margin + L.text_height) {
+        app.scroll_y += 3; // clamped to the document's own bounds during render
+    }
+
+    size_t pos = map_tap_to_buffer_pos(&L, row, col);
+    app.sel_anchor = touch_state.press_pos;
+    app.cursor = pos;
+    app.selecting = (pos != touch_state.press_pos);
+}
+
+//! DAWN_KEY_MOUSE_RELEASE (button 0 lifted) in MODE_WRITING: just ends the press/drag tracking:
+//! a plain tap already placed the cursor (or toggled a task box) on the press in handle_mouse_click,
+//! and a drag has already left its selection in place.
+static void handle_mouse_release(void)
+{
+    touch_state.press_active = false;
 }
 
 // #endregion
@@ -4668,6 +4859,14 @@ static void handle_input(void)
         // anywhere focuses that pane, and a swipe scrolls whichever pane it is over (dawn_touch).
         if (key == DAWN_KEY_MOUSE_CLICK) {
             handle_mouse_click();
+            break;
+        }
+        if (key == DAWN_KEY_MOUSE_DRAG) {
+            handle_mouse_drag();
+            break;
+        }
+        if (key == DAWN_KEY_MOUSE_RELEASE) {
+            handle_mouse_release();
             break;
         }
         if (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN) {
