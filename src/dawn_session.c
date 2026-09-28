@@ -11,6 +11,7 @@
 #include "dawn_fm.h"
 #include "dawn_gap.h"
 #include "dawn_nav.h"
+#include "dawn_notice.h"
 #include "dawn_utils.h"
 
 #include <stdint.h>
@@ -546,6 +547,7 @@ static struct {
     int64_t started_ms;
     int64_t started_wall_ms;
     int64_t waking_since; //!< The model was asleep when this started (DAWN_CLOCK_MS), else 0
+    bool reading; //!< It carries a whole snapshot the writer is waiting on ("reading the note…")
     sbuf_t reply;
     char error[64]; //!< The first "Error: …" chunk, "" when none
     int32_t held_from; //!< JOB_USER on a fresh conversation / JOB_REBUILD: the new session_held_from()
@@ -601,6 +603,21 @@ static int64_t g_prime_retry_at;
 static int64_t g_compact_retry_at;
 static int64_t g_last_keep_warm_ms;
 static bool g_rebuild_after_summary;
+static bool g_prime_wanted; //!< The chat opened: prime even without typing, loading the model if needed
+
+// What the header says beyond the job in flight
+static char g_no_memory[128]; //!< The model TAI couldn't load for lack of memory ("" = none)
+static int64_t g_busy_seen_ms; //!< When TAI last said another generation holds the model
+
+//! The last runtime answer, polled from session_tick() (every frame while something is going on,
+//! every 10 s otherwise), so nothing else has to ask the bridge per frame.
+static ai_runtime_info_t g_info;
+static int64_t g_info_polled_ms;
+
+//! The model requests go to, re-read from ai.json / state.json every couple of seconds.
+static char g_model_id[128];
+static bool g_model_pinned;
+static int64_t g_model_read_ms;
 
 static int32_t g_system_tokens; //!< Estimated size of the system prompt and tools
 
@@ -676,8 +693,36 @@ static ai_session_id_t conv_replace(void)
 
 static bool model_loaded_now(ai_runtime_info_t* info)
 {
-    ai_runtime_info(info);
+    *info = g_info;
     return info->state == AI_MODEL_LOADED && !info->loading;
+}
+
+//! Refresh g_info: every frame when urgent (the chat is open, something runs), else every 10 s.
+static void runtime_poll(bool urgent)
+{
+    int64_t now = now_ms();
+    if (!urgent && g_info_polled_ms && now - g_info_polled_ms < 10000)
+        return;
+    ai_runtime_info(&g_info);
+    g_info_polled_ms = now;
+}
+
+static void model_refresh(void)
+{
+    int64_t now = now_ms();
+    if (g_model_read_ms && now - g_model_read_ms < 2000)
+        return;
+    g_model_read_ms = now;
+    if (!ai_active_model(g_model_id, sizeof(g_model_id), &g_model_pinned))
+        g_model_id[0] = '\0';
+}
+
+const char* session_model_id(void)
+{
+    model_refresh();
+    if (g_model_id[0])
+        return g_model_id;
+    return g_info.loaded_model;
 }
 
 // #endregion
@@ -690,8 +735,8 @@ static void session_stream_cb(ai_context_t* context, const char* chunk, void* us
 //! the caller beforehand. Returns false when the request could not start.
 static bool job_start(JobKind kind, ai_session_id_t conv, const char* message, int32_t max_tokens)
 {
-    ai_runtime_info_t info;
-    bool loaded = model_loaded_now(&info);
+    ai_runtime_info(&g_info);
+    bool loaded = g_info.state == AI_MODEL_LOADED && !g_info.loading;
 
     g_job.kind = kind;
     g_job.token = g_next_token++;
@@ -818,6 +863,16 @@ static void job_finish(void)
     ai_queue_set_lane(AI_LANE_NONE);
     g_last_job_end_ms = now_ms();
     g_last_job_end_wall_ms = wall_ms();
+    if (!g_job.cancelled && !g_job.orphaned) {
+        if (strcmp(g_job.error, "Error: insufficient_memory") == 0)
+            snprintf(g_no_memory, sizeof(g_no_memory), "%s", session_model_id());
+        else if (strcmp(g_job.error, "Error: generation_active") == 0)
+            g_busy_seen_ms = g_last_job_end_ms;
+        else if (!g_job.error[0]) {
+            g_no_memory[0] = '\0';
+            g_busy_seen_ms = 0;
+        }
+    }
 
     switch (kind) {
     case JOB_USER: {
@@ -839,7 +894,10 @@ static void job_finish(void)
             }
             user_deliver(g_job.error);
         } else if (!g_job.cancelled && strcmp(g_job.error, "Error: insufficient_memory") == 0) {
-            user_deliver("Error: Not enough memory to load the model.");
+            char line[160], text[200];
+            session_header(NULL, 0, line, sizeof(line));
+            snprintf(text, sizeof(text), "Error: %s", line[0] ? line : "not enough memory for the model");
+            user_deliver(text);
         } else if (!g_job.cancelled && strcmp(g_job.error, "Error: context_full") == 0) {
             user_deliver("Error: That doesn't fit in the model's memory. Ask something shorter.");
         }
@@ -853,10 +911,17 @@ static void job_finish(void)
         break;
     }
     case JOB_PRIME:
-        if (ok)
+        if (ok) {
             commit_turn(prompt_tokens, completion_tokens, have_usage);
-        else if (!g_job.cancelled && !g_job.orphaned)
-            g_prime_retry_at = now_ms() + PRIME_RETRY_MS;
+            g_prime_wanted = false;
+        } else if (!g_job.cancelled && !g_job.orphaned) {
+            // Another app holds the model: try again soon. Anything else: give it a while, and
+            // the chat's own request stops asking (the header says what happened).
+            bool busy = strcmp(g_job.error, "Error: generation_active") == 0;
+            g_prime_retry_at = now_ms() + (busy ? 5000 : PRIME_RETRY_MS);
+            if (!busy)
+                g_prime_wanted = false;
+        }
         break;
     case JOB_QUIET: {
         SessionQuietDone done = g_job.done;
@@ -1008,6 +1073,7 @@ static void user_start(void)
         g_job.whole = whole;
     }
     char* message = sb_take(&msg);
+    g_job.reading = fresh;
     bool started = job_start(JOB_USER, conv, message, g_user.max_tokens);
     free(message);
     if (!started) {
@@ -1058,6 +1124,7 @@ static bool prime_start(void)
     char* message = sb_take(&msg);
     g_job.whole = whole;
     g_job.held_from = -1;
+    g_job.reading = true;
     bool started = job_start(JOB_PRIME, conv, message, PRIME_REPLY_TOKENS);
     free(message);
     return started;
@@ -1072,6 +1139,7 @@ static bool summary_start(void)
         return false;
     baseline_free(&g_job.pending);
     g_job.held_from = -1;
+    g_job.reading = false;
     return job_start(JOB_SUMMARY, g_conv_id, instruction, SUMMARY_REPLY_TOKENS);
 }
 
@@ -1112,6 +1180,7 @@ static bool rebuild_start(void)
     // Accounting for the new conversation starts from nothing.
     int32_t saved_tokens = g_conv_tokens;
     g_conv_tokens = 0;
+    g_job.reading = false; // the writer never sees this one happen
     bool started = job_start(JOB_REBUILD, conv, message, PRIME_REPLY_TOKENS);
     g_job.est_message += recap_tokens;
     g_conv_tokens = saved_tokens;
@@ -1203,6 +1272,7 @@ bool session_quiet(const char* instruction, int32_t max_tokens, SessionQuietDone
     }
     g_job.whole = g_whole && (!g_job.pending.valid || baseline_all_seen(&g_job.pending));
     g_job.held_from = -1;
+    g_job.reading = false;
     g_job.done = done;
     g_job.done_data = user_data;
     bool started = job_start(JOB_QUIET, g_conv_id, message, max_tokens);
@@ -1242,6 +1312,7 @@ void session_reset(void)
     g_typed_edits = 0;
     g_rebuild_after_summary = false;
     g_prime_retry_at = 0;
+    g_prime_wanted = false;
 }
 
 void session_chat_opened(void)
@@ -1249,7 +1320,12 @@ void session_chat_opened(void)
     if (!app.ai_ready || !app.ai_ctx)
         return;
     ai_models_refresh();
-    if (!g_primed && g_job.kind == JOB_NONE && !g_user.active && app.mode == MODE_WRITING)
+    g_no_memory[0] = '\0'; // asked again: say it again if it still doesn't fit
+    if (g_primed)
+        return;
+    g_prime_wanted = true;
+    g_prime_retry_at = 0;
+    if (g_job.kind == JOB_NONE && !g_user.active && app.mode == MODE_WRITING)
         prime_start();
 }
 
@@ -1306,8 +1382,11 @@ void session_tick(void)
     }
     track_activity(now);
 
-    ai_runtime_info_t info;
-    ai_runtime_info(&info);
+    bool urgent = app.ai_open || g_job.kind != JOB_NONE || g_user.active || g_prime_wanted
+        || (!g_primed && g_typed_edits >= PRIME_TYPED_EDITS);
+    if (urgent || g_primed)
+        runtime_poll(urgent);
+    ai_runtime_info_t info = g_info;
     watch_cache(&info);
 
     // Waking ends once TAI says the model is in.
@@ -1329,6 +1408,13 @@ void session_tick(void)
         && now - g_last_keep_warm_ms >= KEEP_WARM_EVERY_MS && now - g_last_job_end_ms >= KEEP_WARM_EVERY_MS) {
         ai_keep_warm(KEEP_WARM_MINUTES);
         g_last_keep_warm_ms = now;
+    }
+
+    // The chat asked for the note to be read (and may load the model for it); retries after
+    // TAI said "busy" come through here.
+    if (writing && g_prime_wanted && !g_primed && now >= g_prime_retry_at) {
+        prime_start();
+        return;
     }
 
     if (!writing || !loaded)
@@ -1365,6 +1451,102 @@ void session_tick(void)
 // #endregion
 
 // #region Public: what the chat shows
+
+//! "Gemma 4 E4B" and "Gemma 4 E2B" become "E4B" and "E2B": the words both names share in front
+//! say nothing about the difference, and the header line is narrow.
+static void short_names(const char* a, const char* b, const char** a_out, const char** b_out)
+{
+    size_t cut = 0;
+    for (size_t i = 0; a[i] && b[i] && a[i] == b[i]; i++)
+        if (a[i] == ' ')
+            cut = i + 1;
+    *a_out = a[cut] ? a + cut : a;
+    *b_out = b[cut] ? b + cut : b;
+}
+
+void session_header(char* name, size_t name_cap, char* line, size_t line_cap)
+{
+    ai_model_info_t models[AI_MAX_MODELS];
+    int32_t count = ai_models(models, AI_MAX_MODELS);
+    const char* id = session_model_id();
+    const char* shown = NULL;
+    for (int32_t i = 0; i < count && i < AI_MAX_MODELS && id[0]; i++)
+        if (strcmp(models[i].id, id) == 0)
+            shown = models[i].name;
+    if (name && name_cap > 0)
+        snprintf(name, name_cap, "%s", shown ? shown : id[0] ? id : "AI");
+    if (!line || line_cap == 0)
+        return;
+    line[0] = '\0';
+
+    if (g_no_memory[0]) {
+        // Name the smallest other model that could fit instead.
+        const char* failed = g_no_memory;
+        int64_t failed_size = 0;
+        for (int32_t i = 0; i < count && i < AI_MAX_MODELS; i++)
+            if (strcmp(models[i].id, g_no_memory) == 0) {
+                failed = models[i].name;
+                failed_size = models[i].size_bytes;
+            }
+        const char* smaller = NULL;
+        int64_t smaller_size = 0;
+        for (int32_t i = 0; i < count && i < AI_MAX_MODELS; i++) {
+            if (strcmp(models[i].id, g_no_memory) == 0 || models[i].size_bytes <= 0)
+                continue;
+            if (failed_size > 0 && models[i].size_bytes >= failed_size)
+                continue;
+            if (!smaller || models[i].size_bytes < smaller_size) {
+                smaller = models[i].name;
+                smaller_size = models[i].size_bytes;
+            }
+        }
+        if (smaller) {
+            const char *a, *b;
+            short_names(failed, smaller, &a, &b);
+            snprintf(line, line_cap, "not enough memory for %s · try %s", a, b);
+        } else {
+            snprintf(line, line_cap, "not enough memory for %s", failed);
+        }
+        return;
+    }
+    int64_t now = now_ms();
+    if (g_user.waiting_busy || (g_busy_seen_ms && now - g_busy_seen_ms < 6000 && !g_primed)) {
+        snprintf(line, line_cap, "waiting for the model");
+        return;
+    }
+    int64_t waking = session_waking_since();
+    if (waking) {
+        snprintf(line, line_cap, "waking the model · %lld s", (long long)((now - waking) / 1000));
+        return;
+    }
+    if (session_reading()) {
+        snprintf(line, line_cap, "reading the note…");
+        return;
+    }
+    if (g_primed && !g_cache_lost && same_path(g_conv_path, app.session_path))
+        snprintf(line, line_cap, "has read this note");
+}
+
+bool session_reading(void)
+{
+    return g_job.kind != JOB_NONE && g_job.reading && !g_job.got_output && !g_job.orphaned;
+}
+
+bool session_chat_may_open(void)
+{
+    static bool told;
+    if (!app.ai_ready || !app.ai_ctx)
+        return false;
+    ai_runtime_info(&g_info);
+    int32_t models = ai_models(NULL, 0);
+    // Unknown (not asked yet) counts as available: the chat opens and the first request tells.
+    bool off = g_info.reachable == 0 || models == 0;
+    if (off && !told) {
+        notice_post(NOTICE_INFO, "AI is off");
+        told = true;
+    }
+    return !off;
+}
 
 int64_t session_waking_since(void)
 {

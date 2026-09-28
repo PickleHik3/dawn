@@ -2465,6 +2465,42 @@ static bool render_table_element(const RenderCtx* ctx, RenderState* rs, const Bl
 //! at which it shows its oldest message, which is where a swipe down closes a sheet.
 static int32_t chat_max_scroll = 0;
 
+//! Where the last render put the model's name in the chat header (row, first and last column,
+//! 0 when not drawn), so a tap on it opens the model picker.
+static int32_t chat_name_row = 0, chat_name_col0 = 0, chat_name_col1 = 0;
+
+//! The chat header: the model's name, bold, and under it one dim line saying what the session is
+//! doing ("has read this note", "waking the model · 12 s", …). Returns the rows used (2).
+static int32_t render_chat_header(int32_t row, int32_t col, int32_t width, int32_t hint_room)
+{
+    char name[96] = "AI", line[160] = "";
+#if HAS_LIBAI
+    session_header(name, sizeof(name), line, sizeof(line));
+#endif
+    int32_t name_width = width - hint_room;
+    if (name_width < 4)
+        name_width = 4;
+    move_to(row, col);
+    set_bg(get_ai_bg());
+    set_fg(get_fg());
+    set_bold(true);
+    int32_t fit = chat_wrap_line(name, strlen(name), 0, name_width);
+    for (int32_t c = 0; c < fit; c++)
+        out_char(name[c]);
+    set_bold(false);
+    chat_name_row = row;
+    chat_name_col0 = col;
+    chat_name_col1 = col + (fit > 0 ? (int32_t)utf8_display_width(name, (size_t)fit) : 0);
+
+    move_to(row + 1, col);
+    set_bg(get_ai_bg());
+    set_fg(get_dim());
+    fit = chat_wrap_line(line, strlen(line), 0, width);
+    for (int32_t c = 0; c < fit; c++)
+        out_char(line[c]);
+    return 2;
+}
+
 //! Render AI panel
 static void render_ai_panel(const Layout* L)
 {
@@ -2504,34 +2540,33 @@ static void render_ai_panel(const Layout* L)
 
     const char* hint = app.ai_thinking && app.ai_focused && !app.ai_stopping ? "esc stop" : "esc close";
     int32_t handle_col = L->ai_start_col + (L->ai_cols - 2) / 2;
+    int32_t hint_room = (int32_t)strlen(hint) + 2;
     if (sheet) {
         // A sheet's edge is only the change of surface (page to surface_container) and a short
-        // drag handle; no title, no rule. The stop hint is the one thing worth a word here, and
-        // only while a reply is running.
+        // drag handle, then the header: the model's name and what it is doing. The stop hint
+        // shares the name's row, and only while a reply is running.
         move_to(top, handle_col);
         set_bg(get_ai_bg());
         set_fg(get_dim());
         out_str("──");
+        render_chat_header(top + 1, content_start, content_width, hint_room);
         if (app.ai_thinking && app.ai_focused && !app.ai_stopping) {
             int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding;
-            if (hint_col > handle_col + 3) {
-                move_to(top, hint_col);
+            if (hint_col > content_start + 4) {
+                move_to(top + 1, hint_col);
+                set_bg(get_ai_bg());
+                set_fg(get_dim());
                 out_str(hint);
             }
         }
     } else {
-        // Header
-        move_to(1, L->ai_start_col + border_cols);
-        set_bg(get_ai_bg());
-        out_spaces(padding);
-        set_fg(get_fg());
-        set_bold(true);
-        out_str("chat");
+        // Header: the model's name and one dim line, then the rule
+        render_chat_header(1, content_start, content_width, hint_room);
         reset_attrs();
         set_bg(get_ai_bg());
 
         // Header separator
-        move_to(2, L->ai_start_col);
+        move_to(3, L->ai_start_col);
         set_bg(get_ai_bg());
         set_fg(get_border());
         if (!L->ai_overlay)
@@ -2573,7 +2608,7 @@ static void render_ai_panel(const Layout* L)
         input_lines = AI_INPUT_MAX_LINES;
 
     int32_t input_start_row = bottom - input_lines;
-    int32_t msg_area_start = sheet ? top + 1 : 4;
+    int32_t msg_area_start = sheet ? top + 3 : 5;
     int32_t msg_area_end = input_start_row - 2;
     int32_t msg_area_height = msg_area_end - msg_area_start;
     if (msg_area_height < 1)
@@ -2767,7 +2802,11 @@ static void render_ai_panel(const Layout* L)
         set_fg(get_dim());
         int64_t secs = app.ai_turn_started > 0 && now > app.ai_turn_started ? (now - app.ai_turn_started) / 1000 : 0;
         char status[160];
-        snprintf(status, sizeof(status), " %s %llds", app.ai_status[0] ? app.ai_status : "thinking…", (long long)secs);
+        // A status that counts its own seconds ("waking the model · 12 s") gets no second count.
+        if (strstr(app.ai_status, "·"))
+            snprintf(status, sizeof(status), " %s", app.ai_status);
+        else
+            snprintf(status, sizeof(status), " %s %llds", app.ai_status[0] ? app.ai_status : "thinking…", (long long)secs);
         // As much as fits after the spinner; the wrap helper counts columns, not bytes.
         int32_t fit = chat_wrap_line(status, strlen(status), 0, first_line_width - 1);
         if (fit > 0)
@@ -2787,7 +2826,7 @@ skip_chat:
     // Where the fading pill can be drawn it says the same thing without words.
     if (max_scroll > 0 && app.chat_scroll > 0 && !scrollind_available()
         && (!sheet || content_start + 18 < handle_col)) {
-        move_to(sheet ? top : 3, content_start);
+        move_to(sheet ? top : 4, content_start);
         set_fg(get_dim());
         set_bg(get_ai_bg());
         out_str("↑ scroll for more");
@@ -4371,7 +4410,8 @@ static void handle_writing(int32_t key)
 
     case 31:
 #if HAS_LIBAI
-        if (app.ai_ready && CAN_MODIFY()) {
+        // No model or TAI off: the chat doesn't open, and the status line says so once.
+        if (app.ai_ready && CAN_MODIFY() && (app.ai_open || session_chat_may_open())) {
             app.ai_open = !app.ai_open;
             app.ai_focused = app.ai_open;
             if (app.ai_open) {
@@ -5108,7 +5148,7 @@ static void handle_input(void)
         case '/':
         case 31:
 #if HAS_LIBAI
-            if (app.ai_ready) {
+            if (app.ai_ready && session_chat_may_open()) {
                 app.mode = MODE_WRITING;
                 app.ai_open = true;
                 app.ai_focused = true;

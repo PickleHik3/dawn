@@ -982,18 +982,20 @@ static void title_tick(void)
     }
 }
 
-//! Keep the "waking the model · Ns" status ticking while the model loads for the question.
-static void waking_tick(void)
+//! While the question waits on the session (the model loading, the note being read), the line
+//! beside the spinner says what it waits on, in the header's words; once the question's own
+//! request runs, its progress reports take over.
+static void waiting_tick(void)
 {
     if (!app.ai_thinking || app.ai_stopping)
         return;
-    int64_t since = session_waking_since();
-    if (since <= 0)
+    bool waking = session_waking_since() > 0;
+    if (!waking && (session_user_live() && !session_reading()))
         return;
-    int64_t elapsed_s = (DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - since) / 1000;
-    char text[64];
-    snprintf(text, sizeof(text), "waking the model · %llds", (long long)elapsed_s);
-    ai_set_status(text);
+    char line[96];
+    session_header(NULL, 0, line, sizeof(line));
+    if (line[0] && (waking || session_reading() || strcmp(line, "waiting for the model") == 0))
+        ai_set_status(line);
 }
 
 void ai_tick(void)
@@ -1001,7 +1003,7 @@ void ai_tick(void)
     if (!app.ai_ready || !app.ai_ctx)
         return;
     session_tick();
-    waking_tick();
+    waiting_tick();
     title_tick();
 }
 

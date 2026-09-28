@@ -41,6 +41,10 @@ void session_reset(void);
 //! model if it has to (the writer asked for the AI, so a load is expected here).
 void session_chat_opened(void);
 
+//! Whether the chat may open at all: false once TAI is known to be off or to have no model, in
+//! which case the status line says "AI is off" (once per run). Unknown counts as available.
+bool session_chat_may_open(void);
+
 // #endregion
 
 // #region Jobs
@@ -76,6 +80,18 @@ bool session_quiet_ready(void);
 // #endregion
 
 // #region What the chat shows
+
+//! The chat header: the model's name, and one dim line for the session's state ("waking the model
+//! · 12 s", "reading the note…", "has read this note", "waiting for the model", "not enough memory
+//! for E4B · try E2B"), "" when there is nothing to say. Either buffer may be NULL.
+void session_header(char* name, size_t name_cap, char* line, size_t line_cap);
+
+//! Whether a whole snapshot is being read right now (priming, or a question on a new conversation)
+//! and the writer may be waiting on it.
+bool session_reading(void);
+
+//! The model requests go to (configured, else the loaded one), "" when unknown.
+const char* session_model_id(void);
 
 //! When the model started waking for the job in flight (DAWN_CLOCK_MS), or 0 when it isn't.
 int64_t session_waking_since(void);
