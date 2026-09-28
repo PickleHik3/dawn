@@ -31,6 +31,7 @@ DAWN_ENUM(uint16_t) {
     DAWN_CAP_BRACKETED_PASTE = 1 << 6,
     DAWN_CAP_FOCUS_EVENTS = 1 << 7,
     DAWN_CAP_CLIPBOARD = 1 << 8,
+    DAWN_CAP_HYPERLINKS = 1 << 9, //!< OSC 8 hyperlinks understood by the host (launcher's confirm strip)
 } DawnCap;
 
 DAWN_ENUM(uint8_t) {
@@ -71,6 +72,10 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_MOUSE_SCROLL_UP,
     DAWN_KEY_MOUSE_SCROLL_DOWN,
     DAWN_KEY_MOUSE_CLICK,
+    DAWN_KEY_MOUSE_RELEASE, //!< Button 0 released (SGR 'm' terminator)
+    DAWN_KEY_MOUSE_DRAG, //!< Motion while button 0 held (SGR btn 32, needs mode 1002)
+    DAWN_KEY_THEME_DARK, //!< Launcher reports dark mode (CSI ?997;1n)
+    DAWN_KEY_THEME_LIGHT, //!< Launcher reports light mode (CSI ?997;2n)
     DAWN_KEY_BTAB
 } DawnKey;
 

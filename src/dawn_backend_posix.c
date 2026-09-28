@@ -532,6 +532,11 @@ static void detect_capabilities(void)
     posix_state.capabilities |= DAWN_CAP_MOUSE;
     posix_state.capabilities |= DAWN_CAP_CLIPBOARD;
 
+    // OSC 8 hyperlinks: every POSIX terminal we run in (Termux included) either passes them
+    // through or ignores them harmlessly, and it's the launcher's confirm strip that acts on
+    // them, so this is unconditional rather than probed.
+    posix_state.capabilities |= DAWN_CAP_HYPERLINKS;
+
     drain_input();
 }
 
@@ -653,6 +658,10 @@ static bool posix_init(DawnMode mode)
 
     // Enable mouse and bracketed paste
     printf(MOUSE_ON BRACKETED_PASTE_ON);
+    // Light/dark mode reporting (P1 #colors): ?2031h arms the launcher's unsolicited CSI
+    // ?997;1n/?997;2n reports on every mode change, and ?996n asks for the current mode once so
+    // dawn doesn't start out guessing. Harmless if the host doesn't understand either sequence.
+    printf(THEME_MODE_ON THEME_MODE_QUERY);
     printf(CLEAR_SCREEN CURSOR_HOME);
     fflush(stdout);
 
@@ -703,7 +712,7 @@ static void posix_shutdown(void)
         printf(KITTY_KBD_POP);
     }
 
-    printf(SYNC_START CURSOR_SHOW MOUSE_OFF BRACKETED_PASTE_OFF ALT_SCREEN_OFF RESET SYNC_END);
+    printf(SYNC_START CURSOR_SHOW MOUSE_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
     fflush(stdout);
 
     if (posix_state.raw_mode) {
@@ -1119,11 +1128,13 @@ static int32_t posix_read_key_raw(void)
             if (seq[1] == '<') {
                 char mouse_buf[32];
                 int32_t mi = 0;
+                char terminator = 0;
 
                 while (mi < 30) {
                     if (read(STDIN_FILENO, &mouse_buf[mi], 1) != 1)
                         break;
                     if (mouse_buf[mi] == 'M' || mouse_buf[mi] == 'm') {
+                        terminator = mouse_buf[mi];
                         mouse_buf[mi + 1] = '\0';
                         break;
                     }
@@ -1137,9 +1148,14 @@ static int32_t posix_read_key_raw(void)
                         return DAWN_KEY_MOUSE_SCROLL_UP;
                     if (btn == 65)
                         return DAWN_KEY_MOUSE_SCROLL_DOWN;
-                    // Left button click (btn 0 = press, check for 'M' terminator)
+                    // Button 0: 'M' is the press (the click), 'm' the release.
+                    // Without this split, one tap fired MOUSE_CLICK twice.
                     if (btn == 0)
-                        return DAWN_KEY_MOUSE_CLICK;
+                        return (terminator == 'M') ? DAWN_KEY_MOUSE_CLICK : DAWN_KEY_MOUSE_RELEASE;
+                    // Button 32 = motion (mode 1002) with button 0 held: a drag,
+                    // reported after a long-press so touch selection can extend.
+                    if (btn == 32)
+                        return DAWN_KEY_MOUSE_DRAG;
                 }
                 return DAWN_KEY_NONE;
             }

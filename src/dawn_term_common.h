@@ -24,8 +24,16 @@
 #define ALT_SCREEN_ON CSI "?1049h"
 #define ALT_SCREEN_OFF CSI "?1049l"
 
-#define MOUSE_ON CSI "?1000h" CSI "?1006h"
-#define MOUSE_OFF CSI "?1000l" CSI "?1006l"
+// 1002 adds button-event motion (drag reports) on top of 1000's press/release,
+// so a long-press-then-drag keeps sending positions instead of going silent.
+#define MOUSE_ON CSI "?1000h" CSI "?1002h" CSI "?1006h"
+#define MOUSE_OFF CSI "?1000l" CSI "?1002l" CSI "?1006l"
+
+// Light/dark mode reporting: launcher sends CSI ?997;1n (dark) / ?997;2n (light)
+// unsolicited once mode 2031 is enabled, and replies once to CSI ?996n.
+#define THEME_MODE_ON CSI "?2031h"
+#define THEME_MODE_OFF CSI "?2031l"
+#define THEME_MODE_QUERY CSI "?996n"
 
 #define BRACKETED_PASTE_ON CSI "?2004h"
 #define BRACKETED_PASTE_OFF CSI "?2004l"
@@ -199,11 +207,14 @@ static inline int32_t term_parse_vt(const char* buf, int32_t len, int32_t* mouse
         return DAWN_KEY_NONE;
 
     if (buf[1] == '[') {
-        // SGR mouse events: \x1b[<btn;x;yM or \x1b[<btn;x;ym
+        // SGR mouse events: \x1b[<btn;x;yM (press) or \x1b[<btn;x;ym (release/drag)
         if (len >= 3 && buf[2] == '<') {
-            const char* end = memchr(buf + 3, 'M', (size_t)(len - 3));
-            if (!end)
-                end = memchr(buf + 3, 'm', (size_t)(len - 3));
+            const char* end_m = memchr(buf + 3, 'M', (size_t)(len - 3));
+            const char* end_lc = memchr(buf + 3, 'm', (size_t)(len - 3));
+            // Whichever terminator actually appears is the real one: a press
+            // sequence never contains a lowercase 'm' and vice versa.
+            const char* end = end_m ? end_m : end_lc;
+            char terminator = end_m ? 'M' : 'm';
             if (end) {
                 int32_t btn = 0, mx = 0, my = 0;
                 if (sscanf(buf + 3, "%d;%d;%d", &btn, &mx, &my) == 3) {
@@ -215,9 +226,26 @@ static inline int32_t term_parse_vt(const char* buf, int32_t len, int32_t* mouse
                         return DAWN_KEY_MOUSE_SCROLL_UP;
                     if (btn == 65)
                         return DAWN_KEY_MOUSE_SCROLL_DOWN;
+                    // Button 0: 'M' is the press (emit the click), 'm' the release.
                     if (btn == 0)
-                        return DAWN_KEY_MOUSE_CLICK;
+                        return (terminator == 'M') ? DAWN_KEY_MOUSE_CLICK : DAWN_KEY_MOUSE_RELEASE;
+                    // Button 32 = motion (mode 1002) with button 0 held: a drag.
+                    if (btn == 32)
+                        return DAWN_KEY_MOUSE_DRAG;
                 }
+            }
+            return DAWN_KEY_NONE;
+        }
+
+        // Theme report: CSI ?997;1n (dark) or CSI ?997;2n (light), sent unsolicited
+        // by the launcher once mode 2031 is enabled, and once in reply to ?996n.
+        if (len >= 4 && buf[2] == '?') {
+            int32_t code = 0, mode = 0;
+            if (sscanf(buf + 3, "%d;%dn", &code, &mode) == 2 && code == 997) {
+                if (mode == 1)
+                    return DAWN_KEY_THEME_DARK;
+                if (mode == 2)
+                    return DAWN_KEY_THEME_LIGHT;
             }
             return DAWN_KEY_NONE;
         }

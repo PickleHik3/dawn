@@ -527,11 +527,11 @@ void web_on_mouse(int32_t col, int32_t row, int32_t button, int32_t pressed)
     web_state.last_mouse_col = col;
     web_state.last_mouse_row = row;
 
-    // Queue a click event on mouse down (left button only)
-    if (pressed && button == 0) {
+    // Queue a click event on mouse down, a release on mouse up (left button only)
+    if (button == 0) {
         int32_t next_tail = (web_state.key_queue_tail + 1) % 64;
         if (next_tail != web_state.key_queue_head) {
-            web_state.key_queue[web_state.key_queue_tail] = DAWN_KEY_MOUSE_CLICK;
+            web_state.key_queue[web_state.key_queue_tail] = pressed ? DAWN_KEY_MOUSE_CLICK : DAWN_KEY_MOUSE_RELEASE;
             web_state.key_queue_tail = next_tail;
        }
    }

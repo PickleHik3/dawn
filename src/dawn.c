@@ -17,6 +17,7 @@
 #include "dawn_image.h"
 #include "dawn_input.h"
 #include "dawn_nav.h"
+#include "dawn_notice.h"
 #include "dawn_render.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
@@ -2826,6 +2827,25 @@ static void render_status_bar(const Layout* L)
         out_str(sel_buf);
     }
 
+    // Right-aligned notice (dawn_notice), in place of the usual hints: both live in the same
+    // corner and a notice is meant to be seen, so it takes priority while it's showing. Nothing in
+    // focus mode - focus mode already hides everything else here.
+    const char* notice_text;
+    NoticeKind notice_kind;
+    float notice_fresh;
+    if (!app.focus_mode && notice_current(&notice_text, &notice_kind, &notice_fresh)) {
+        DawnColor c = (notice_kind == NOTICE_ERROR)
+            ? get_error_color() // stays at full strength until notice_ack(), no fade
+            : color_lerp(get_bg(), get_dim(), notice_fresh);
+        int32_t notice_col = status_right - (int32_t)strlen(notice_text) + 1;
+        if (notice_col > status_left + 20) {
+            move_to(app.rows, notice_col);
+            set_fg(c);
+            out_str(notice_text);
+        }
+        return;
+    }
+
     // Right side hints
     char hints[64] = "";
     int32_t hints_len = 0;
@@ -2960,6 +2980,15 @@ static bool render_inline_math(const RenderCtx* ctx, RenderState* rs, const Inli
 }
 
 //! Render link element
+//! Only these schemes are worth an OSC 8 wrapper: they're what the launcher's confirm strip
+//! knows how to act on. Anything else (a bare footnote-style reference, a relative path, "ftp:",
+//! ...) renders as before - underlined and accent-colored, just not click-through.
+static bool url_scheme_is_linkable(const char* url)
+{
+    return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0
+        || strncmp(url, "mailto:", 7) == 0;
+}
+
 static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* run)
 {
     size_t link_total = run->byte_end - run->byte_start;
@@ -2977,6 +3006,10 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
     url[ulen] = '\0';
     rs->pos += link_total;
 
+    // OSC 8 has zero width (out_char() is never called for it), so it never disturbs col_width
+    // or the wrap math below; it also costs nothing extra to skip when the backend can't use it.
+    bool use_osc8 = dawn_ctx_has(&app.ctx, DAWN_CAP_HYPERLINKS) && url_scheme_is_linkable(url);
+
     size_t link_pos = run->data.link.text_start;
     size_t link_end = run->data.link.text_start + run->data.link.text_len;
     bool in_code = false;
@@ -2992,7 +3025,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
             if (link_started && IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
                 clear_underline();
                 reset_attrs();
-                DAWN_BACKEND(app)->link_end();
+                if (use_osc8)
+                    DAWN_BACKEND(app)->link_end();
                 set_bg(get_bg());
             }
             link_started = false;
@@ -3018,9 +3052,11 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
         if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
             // Start/restart hyperlink on this line
             if (!link_started) {
-                DAWN_BACKEND(app)->link_begin(url);
+                if (use_osc8)
+                    DAWN_BACKEND(app)->link_begin(url);
                 set_underline(UNDERLINE_STYLE_SINGLE);
-                set_fg(get_accent());
+                set_underline_color(get_underline_color_token());
+                set_fg(get_link_color());
                 if (in_code)
                     set_dim(true);
                 link_started = true;
@@ -3061,7 +3097,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
     if (link_started && IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
         clear_underline();
         reset_attrs();
-        DAWN_BACKEND(app)->link_end();
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_end();
         set_bg(get_bg());
         set_fg(get_fg());
     }
@@ -3581,14 +3618,28 @@ static void move_cursor(size_t new_pos, bool extend_sel)
 
 // #region Touch Input (dawn_touch)
 //
-// Termux sends SGR mouse events (dawn enables ?1000h ?1006h): a tap is a button-0 press then
-// release at the same column/row, and a swipe is wheel buttons 64/65. DAWN_KEY_MOUSE_CLICK and
-// DAWN_KEY_MOUSE_SCROLL_UP/DOWN carry no position of their own; the position is whatever
-// input_last_mouse_col()/row() held when the key was decoded (dawn_backend_posix.c).
+// Termux sends SGR mouse events (dawn enables ?1000h ?1002h ?1006h): a tap is a button-0 press
+// (DAWN_KEY_MOUSE_CLICK) then release (DAWN_KEY_MOUSE_RELEASE) at the same column/row, ?1002 adds
+// motion while the button stays down (DAWN_KEY_MOUSE_DRAG, button 32) after a long-press, and a
+// swipe is wheel buttons 64/65. None of these carry a position of their own; the position is
+// whatever input_last_mouse_col()/row() held when the key was decoded (dawn_backend_posix.c).
 //
-// A tap's press and its release both decode to DAWN_KEY_MOUSE_CLICK (the posix backend does not
-// distinguish 'M' from 'm' for button 0), so handle_mouse_click() runs twice per tap at the same
-// position; both runs land on the same target, so that is harmless here.
+// Double/triple tap and press-drag selection (P1 #touch) are tracked in touch_state below: a
+// second press within DOUBLE_TAP_MS and DOUBLE_TAP_CELLS of the last one selects a word, a third
+// selects the paragraph, and a press followed by a drag before release extends the selection from
+// the press point to wherever the finger is now (no floating bar: Ctrl+C, typing and Ctrl+/ act on
+// the resulting selection like they always have).
+
+#define DOUBLE_TAP_MS 350
+#define DOUBLE_TAP_CELLS 1
+
+static struct {
+    int64_t last_tap_ms; //!< clock() time of the previous press
+    int32_t last_tap_row, last_tap_col; //!< screen cell of the previous press
+    int32_t tap_run; //!< consecutive taps landing within the double-tap window/radius (1, 2, 3+)
+    size_t press_pos; //!< buffer position of the current press, for press-then-drag extension
+    bool press_active; //!< a press has landed and no release/drag-elsewhere has resolved it yet
+} touch_state = { 0 };
 
 //! Which pane a screen column falls in. In the portrait overlay (calc_layout().ai_overlay, added
 //! by the data-safety patch) the chat is drawn over every column and row of the note, so there is
@@ -3784,8 +3835,106 @@ static size_t map_tap_to_buffer_pos(const Layout* L, int32_t screen_row, int32_t
     }
 }
 
-//! DAWN_KEY_MOUSE_CLICK in MODE_WRITING: focuses whichever pane the tap landed in, and in the
-//! note also places the cursor and clears any selection, like a mouse click does on desktop.
+//! Task checkbox tap: toggles `- [ ]`/`- [x]` as one undo step, without moving the cursor. Only
+//! the glyph columns ("☐ "/"☑ ", drawn by render_line_prefixes on the item's first line) count; a
+//! tap on the item's text falls through to ordinary cursor placement.
+static bool try_toggle_task_box(const Layout* L, int32_t screen_row, int32_t screen_col)
+{
+    if (app.plain_mode || !CAN_MODIFY())
+        return false; // plain mode shows the raw "- [ ] " text, not a tappable glyph
+
+    BlockCache* bc = (BlockCache*)app.block_cache;
+    if (!bc || !bc->valid || bc->count == 0)
+        return false;
+
+    int32_t vrow = screen_row - L->top_margin + app.scroll_y;
+    int32_t col = screen_col - L->margin - 1;
+    if (vrow < 0 || col < 0)
+        return false;
+
+    Block* blk = block_at_vrow(bc, vrow);
+    if (!blk || blk->type != BLOCK_LIST_ITEM || blk->data.list.task_state == 0)
+        return false;
+    if (vrow != blk->vrow_start)
+        return false; // only the first line carries the box
+
+    int32_t indent = blk->data.list.indent;
+    if (col < indent || col >= indent + 2)
+        return false;
+
+    // The raw marker is "- [ ] "/"- [x] " starting at indent; the check char sits 3 past that
+    // (md_check_task in dawn_md.c parses the very same offset).
+    size_t check_pos = (size_t)blk->start + (size_t)indent + 3;
+    if (check_pos >= blk->end)
+        return false;
+    char c = gap_at(&app.text, check_pos);
+    if (c != ' ' && c != 'x' && c != 'X')
+        return false;
+
+    save_undo_state();
+    gap_delete(&app.text, check_pos, 1);
+    gap_insert(&app.text, check_pos, (c == ' ') ? 'x' : ' ');
+    app.dirty = true;
+    return true;
+}
+
+//! Whether a byte is part of a "word" for double-tap word selection: same class as is_word_key.
+static inline bool is_word_byte(char c)
+{
+    return is_word_key((unsigned char)c);
+}
+
+//! Select the word touching pos (or the whitespace run touching it, if pos isn't on a word) -
+//! double-tap in the note.
+static void select_word_at(size_t pos)
+{
+    size_t len = gap_len(&app.text);
+    if (len == 0) {
+        app.selecting = false;
+        return;
+    }
+    if (pos > len)
+        pos = len;
+
+    // Prefer the word to the left when sitting exactly on a boundary, like desktop double-click.
+    size_t probe = pos;
+    if (probe >= len || !is_word_byte(gap_at(&app.text, probe))) {
+        if (probe > 0 && is_word_byte(gap_at(&app.text, probe - 1)))
+            probe--;
+    }
+    if (probe >= len) {
+        app.selecting = false;
+        return;
+    }
+
+    bool word = is_word_byte(gap_at(&app.text, probe));
+    size_t s = probe, e = probe + 1;
+    while (s > 0 && is_word_byte(gap_at(&app.text, s - 1)) == word && gap_at(&app.text, s - 1) != '\n')
+        s--;
+    while (e < len && is_word_byte(gap_at(&app.text, e)) == word && gap_at(&app.text, e) != '\n')
+        e++;
+
+    app.sel_anchor = s;
+    app.cursor = e;
+    app.selecting = (e > s);
+}
+
+//! Select the paragraph (markdown block) touching pos - triple-tap in the note.
+static void select_paragraph_at(size_t pos)
+{
+    Block* b = get_block_at(pos);
+    if (!b) {
+        app.selecting = false;
+        return;
+    }
+    app.sel_anchor = b->start;
+    app.cursor = b->end;
+    app.selecting = (b->end > b->start);
+}
+
+//! DAWN_KEY_MOUSE_CLICK (press) in MODE_WRITING: focuses whichever pane the tap landed in, and in
+//! the note also places the cursor, like a mouse click does on desktop - unless it lands on a task
+//! checkbox (toggles it in place) or continues a double/triple tap (selects word/paragraph).
 static void handle_mouse_click(void)
 {
     Layout L = calc_layout();
@@ -3794,6 +3943,7 @@ static void handle_mouse_click(void)
 
     if (tap_is_over_chat(&L, col)) {
         app.ai_focused = true;
+        touch_state.press_active = false;
         return;
     }
 
@@ -3801,9 +3951,42 @@ static void handle_mouse_click(void)
     // overlay layout this branch is unreachable: tap_is_over_chat() is always true there, so a
     // tap never "closes" the overlay the way Esc does - there is no uncovered note region to tap).
     app.ai_focused = false;
-    app.selecting = false;
     app.view_detached = false;
-    app.cursor = map_tap_to_buffer_pos(&L, row, col);
+
+    if (try_toggle_task_box(&L, row, col)) {
+        touch_state.press_active = false;
+        touch_state.tap_run = 0;
+        return;
+    }
+
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    int32_t drow = row - touch_state.last_tap_row;
+    int32_t dcol = col - touch_state.last_tap_col;
+    if (drow < 0)
+        drow = -drow;
+    if (dcol < 0)
+        dcol = -dcol;
+    bool continues = touch_state.tap_run > 0 && now - touch_state.last_tap_ms <= DOUBLE_TAP_MS
+        && drow <= DOUBLE_TAP_CELLS && dcol <= DOUBLE_TAP_CELLS;
+    touch_state.tap_run = continues ? touch_state.tap_run + 1 : 1;
+    touch_state.last_tap_ms = now;
+    touch_state.last_tap_row = row;
+    touch_state.last_tap_col = col;
+
+    size_t pos = map_tap_to_buffer_pos(&L, row, col);
+
+    if (touch_state.tap_run == 2) {
+        select_word_at(pos);
+    } else if (touch_state.tap_run >= 3) {
+        select_paragraph_at(pos);
+    } else {
+        app.selecting = false;
+        app.cursor = pos;
+    }
+
+    // Remember the press so a drag before release extends a selection from here.
+    touch_state.press_pos = pos;
+    touch_state.press_active = true;
 }
 
 //! DAWN_KEY_MOUSE_SCROLL_UP/DOWN in MODE_WRITING: routed to whichever pane the finger is over, not
@@ -3835,6 +4018,51 @@ static void handle_mouse_scroll(int32_t key)
     } else {
         app.scroll_y += 3; // clamped to the document's own bounds during render
     }
+}
+
+//! DAWN_KEY_MOUSE_DRAG (mode 1002 motion with button 0 held) in MODE_WRITING: extends the
+//! selection from the original press point to wherever the finger is now, and auto-scrolls when
+//! the finger sits at the top/bottom edge of the note so a long selection can reach off-screen.
+static void handle_mouse_drag(void)
+{
+    Layout L = calc_layout();
+    int32_t row = input_last_mouse_row();
+    int32_t col = input_last_mouse_col();
+
+    if (tap_is_over_chat(&L, col))
+        return; // no drag-selection in the chat pane
+
+    if (!touch_state.press_active) {
+        // A drag reported without a press we tracked (e.g. it started over the chat pane and
+        // slid onto the note) still needs an anchor: use wherever the finger is now.
+        touch_state.press_pos = map_tap_to_buffer_pos(&L, row, col);
+        touch_state.press_active = true;
+    }
+
+    app.ai_focused = false;
+    app.view_detached = true;
+
+    // Auto-scroll while the finger sits at the top/bottom margin row, same step as a swipe.
+    if (row <= L.top_margin) {
+        app.scroll_y -= 3;
+        if (app.scroll_y < 0)
+            app.scroll_y = 0;
+    } else if (row >= L.top_margin + L.text_height) {
+        app.scroll_y += 3; // clamped to the document's own bounds during render
+    }
+
+    size_t pos = map_tap_to_buffer_pos(&L, row, col);
+    app.sel_anchor = touch_state.press_pos;
+    app.cursor = pos;
+    app.selecting = (pos != touch_state.press_pos);
+}
+
+//! DAWN_KEY_MOUSE_RELEASE (button 0 lifted) in MODE_WRITING: just ends the press/drag tracking:
+//! a plain tap already placed the cursor (or toggled a task box) on the press in handle_mouse_click,
+//! and a drag has already left its selection in place.
+static void handle_mouse_release(void)
+{
+    touch_state.press_active = false;
 }
 
 // #endregion
@@ -3887,6 +4115,7 @@ static void handle_writing(int32_t key)
         footnote_jump(&app.text, &app.cursor);
         break;
     case 15:
+        app.help_page = 0;
         MODE_PUSH(MODE_HELP);
         break;
 
@@ -4530,6 +4759,27 @@ static void handle_input(void)
     if (key == DAWN_KEY_NONE)
         return;
 
+    // Any real input acknowledges a sticky NOTICE_ERROR (a key or a tap - MOUSE_RELEASE would
+    // double up with the MOUSE_CLICK that landed the tap, so it's excluded).
+    if (key != DAWN_KEY_MOUSE_RELEASE)
+        notice_ack();
+
+    // The launcher's light/dark report (P1 #colors): only takes over app.theme from dawn's own
+    // persisted setting when a material palette is actually loaded for at least one mode: without
+    // the files there's nothing for the launcher's report to change, so dawn's own ^D toggle (and
+    // whatever the user last chose) keeps working exactly as before.
+    if (key == DAWN_KEY_THEME_DARK || key == DAWN_KEY_THEME_LIGHT) {
+        if (theme_material_active()) {
+            Theme want = (key == DAWN_KEY_THEME_DARK) ? THEME_DARK : THEME_LIGHT;
+            if (app.theme != want) {
+                app.theme = want;
+                highlight_cleanup(app.hl_ctx);
+                app.hl_ctx = highlight_init(app.theme == THEME_DARK);
+            }
+        }
+        return;
+    }
+
     switch (app.mode) {
     case MODE_WELCOME:
         switch (key) {
@@ -4555,6 +4805,7 @@ static void handle_input(void)
             settings_save();
             break;
         case '?':
+            app.help_page = 0;
             MODE_PUSH(MODE_HELP);
             break;
         }
@@ -4668,6 +4919,14 @@ static void handle_input(void)
         // anywhere focuses that pane, and a swipe scrolls whichever pane it is over (dawn_touch).
         if (key == DAWN_KEY_MOUSE_CLICK) {
             handle_mouse_click();
+            break;
+        }
+        if (key == DAWN_KEY_MOUSE_DRAG) {
+            handle_mouse_drag();
+            break;
+        }
+        if (key == DAWN_KEY_MOUSE_RELEASE) {
+            handle_mouse_release();
             break;
         }
         if (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN) {
@@ -5192,7 +5451,14 @@ static void handle_input(void)
         break;
 
     case MODE_HELP:
-        MODE_POP();
+        // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
+        // failed save or an AI edit can be found again without adding anything to the page itself.
+        if (key == '\t' || key == DAWN_KEY_RIGHT)
+            app.help_page = 1;
+        else if (key == DAWN_KEY_LEFT)
+            app.help_page = 0;
+        else
+            MODE_POP();
         break;
 
     case MODE_TOC: {
@@ -5609,8 +5875,26 @@ static void render_run_autolink(const RenderCtx* ctx, RenderState* rs, const Inl
         }
         set_fg(get_fg());
     } else {
-        set_fg(get_accent());
+        // Build the OSC 8 target: an email autolink's span is just "local@domain" (md_check_autolink
+        // in dawn_md.c), so it needs a "mailto:" prefix to be a real link; a URI autolink's span
+        // already is the full "scheme://..." string.
+        char url[1024];
+        bool is_email = (run->flags & INLINE_FLAG_IS_EMAIL) != 0;
+        size_t prefix_len = is_email ? 7 : 0; // strlen("mailto:")
+        size_t ulen = run->data.autolink.url_len < sizeof(url) - 1 - prefix_len
+            ? run->data.autolink.url_len
+            : sizeof(url) - 1 - prefix_len;
+        if (is_email)
+            memcpy(url, "mailto:", 7);
+        gap_copy_to(&app.text, run->data.autolink.url_start, ulen, url + prefix_len);
+        url[prefix_len + ulen] = '\0';
+        bool use_osc8 = dawn_ctx_has(&app.ctx, DAWN_CAP_HYPERLINKS) && url_scheme_is_linkable(url);
+
+        set_fg(get_link_color());
         set_underline(UNDERLINE_STYLE_SINGLE);
+        set_underline_color(get_underline_color_token());
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_begin(url);
         rs->pos++; // skip <
         size_t url_end = rs->pos + run->data.autolink.url_len;
         while (rs->pos < url_end && rs->pos < ctx->len) {
@@ -5623,6 +5907,8 @@ static void render_run_autolink(const RenderCtx* ctx, RenderState* rs, const Inl
             }
         }
         rs->pos++; // skip >
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_end();
         set_underline(0);
         set_fg(get_fg());
     }
