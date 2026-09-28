@@ -40,6 +40,7 @@ typedef struct {
     int32_t text_area_cols;
     int32_t ai_cols;
     int32_t ai_start_col;
+    bool ai_overlay; //!< The chat covers the whole screen (narrow terminals) instead of a side panel
     int32_t margin;
     int32_t text_width;
     int32_t top_margin;
@@ -109,7 +110,13 @@ static inline Layout calc_layout(void)
     l.ai_cols = 0;
     l.ai_start_col = app.cols + 1;
 
-    if (app.ai_open) {
+    if (app.ai_open && app.cols < AI_PANEL_MIN_COLS) {
+        // A phone-width terminal has no room beside the note: the chat takes the whole screen,
+        // and the note keeps its full-width layout underneath for when the chat closes.
+        l.ai_overlay = true;
+        l.ai_cols = app.cols;
+        l.ai_start_col = 1;
+    } else if (app.ai_open) {
         l.ai_cols = app.cols * AI_PANEL_WIDTH / 100;
         if (l.ai_cols < 30)
             l.ai_cols = 30;
@@ -119,10 +126,20 @@ static inline Layout calc_layout(void)
         l.ai_start_col = l.text_area_cols + 1;
     }
 
+    if (l.ai_cols < 1)
+        l.ai_cols = 1;
+    if (l.text_area_cols < 1)
+        l.text_area_cols = 1;
     l.margin = l.text_area_cols > 80 ? (l.text_area_cols - 70) / 2 : 4;
     l.text_width = l.text_area_cols - l.margin * 2;
+    if (l.text_width < 1) {
+        l.margin = 0;
+        l.text_width = l.text_area_cols;
+    }
     l.top_margin = 2;
     l.text_height = app.rows - l.top_margin - 2;
+    if (l.text_height < 1)
+        l.text_height = 1;
     return l;
 }
 
@@ -434,14 +451,41 @@ App app = { 0 };
 
 // #region Undo/Redo
 
+//! Whether the text is what the snapshot at undo_pos holds.
+static bool undo_at_current(void)
+{
+    if (app.undo_count == 0)
+        return false;
+    const GapBuffer* gb = &app.text;
+    size_t len = gap_len(gb);
+    const char* saved = app.undo_stack[app.undo_pos].text;
+    if (app.undo_stack[app.undo_pos].text_len != len)
+        return false;
+    // The text is the buffer with its gap cut out: the part before the gap, then the part after.
+    size_t front = gb->gap_start;
+    return memcmp(gb->buffer, saved, front) == 0
+        && memcmp(gb->buffer + gb->gap_end, saved + front, len - front) == 0;
+}
+
 //! Save current text state to undo stack
 void save_undo_state(void)
 {
+    // Whatever follows is a change of its own; typing no longer joins the step before it.
+    app.undo_typing = 0;
+    app.dirty = true;
+
     if (app.undo_pos < app.undo_count - 1) {
         for (int32_t i = app.undo_pos + 1; i < app.undo_count; i++) {
             free(app.undo_stack[i].text);
         }
         app.undo_count = app.undo_pos + 1;
+    }
+
+    // The top of the stack already holds this text (a change was just undone, or an edit tool
+    // took its "after" snapshot): only the cursor is new, so no second copy.
+    if (undo_at_current()) {
+        app.undo_stack[app.undo_pos].cursor = app.cursor;
+        return;
     }
 
     if (app.undo_count >= MAX_UNDO) {
@@ -452,7 +496,7 @@ void save_undo_state(void)
     }
 
     size_t text_len = gap_len(&app.text);
-    char* saved_text = malloc(text_len);
+    char* saved_text = malloc(text_len > 0 ? text_len : 1); // an empty note is a state too
     if (saved_text) {
         gap_copy_to(&app.text, 0, text_len, saved_text);
         app.undo_stack[app.undo_count].text = saved_text;
@@ -461,6 +505,48 @@ void save_undo_state(void)
         app.undo_count++;
         app.undo_pos = app.undo_count - 1;
     }
+}
+
+void undo_reset(void)
+{
+    for (int32_t i = 0; i < app.undo_count; i++)
+        free(app.undo_stack[i].text);
+    app.undo_count = 0;
+    app.undo_pos = 0;
+    app.undo_typing = 0;
+    // The text as loaded is the floor: Ctrl+Z stops here instead of reaching the note before.
+    save_undo_state();
+}
+
+//! Whether a typed character continues a word: letters, digits, '_' and anything non-ASCII.
+static inline bool is_word_key(int32_t key)
+{
+    return key >= 128 || key == '_' || (key >= '0' && key <= '9') || (key >= 'a' && key <= 'z') || (key >= 'A' && key <= 'Z');
+}
+
+//! The undo step for typing key at the cursor. A word typed straight through is one step, with
+//! the spaces after it; a new word after a space, punctuation, a line break, a move of the cursor,
+//! a change of any other kind or a pause over a second starts the next one. Call before the
+//! insert; the cursor after it goes to undo_typed().
+static void save_undo_typing(int32_t key)
+{
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    bool word = is_word_key(key);
+    bool space = key == ' ';
+    bool joins = app.undo_typing != 0 && !has_selection() && app.cursor == app.undo_typing_cursor
+        && now - app.undo_typing_ms <= 1000
+        && ((word && app.undo_typing == 1) || (space && app.undo_typing != 0));
+    if (!joins)
+        save_undo_state();
+    app.undo_typing = word ? 1 : space ? 2 : 0;
+    app.undo_typing_ms = now;
+    app.dirty = true;
+}
+
+//! Where the last typed character left the cursor: the next one joins its step only from there.
+static inline void undo_typed(void)
+{
+    app.undo_typing_cursor = app.cursor;
 }
 
 //! Restore undo state at given position
@@ -492,9 +578,15 @@ static void restore_cursor_position(size_t pos)
 
 static void undo(void)
 {
+    // Snapshots are taken before a change, so the latest text has none of its own yet: take it
+    // now, so one Ctrl+Z undoes one change and Ctrl+Y can come back to this.
+    if (app.undo_pos == app.undo_count - 1 && !undo_at_current())
+        save_undo_state();
     if (app.undo_pos > 0) {
         app.undo_pos--;
         restore_undo_state(app.undo_pos);
+        app.undo_typing = 0;
+        app.dirty = true;
     }
 }
 
@@ -503,6 +595,8 @@ static void redo(void)
     if (app.undo_pos < app.undo_count - 1) {
         app.undo_pos++;
         restore_undo_state(app.undo_pos);
+        app.undo_typing = 0;
+        app.dirty = true;
     }
 }
 
@@ -1045,6 +1139,10 @@ static void fm_edit_save(void)
     char lastmod_buf[32];
     dawn_format_iso_time(&lt, lastmod_buf, sizeof(lastmod_buf));
     fm_set_string(app.frontmatter, "lastmod", lastmod_buf);
+
+    // The user asked for frontmatter in this note, plain file or not.
+    app.write_fm = true;
+    app.dirty = true;
 }
 
 // #endregion
@@ -2335,14 +2433,18 @@ static void render_ai_panel(const Layout* L)
 {
     int32_t padding = 1;
     int32_t prefix_len = 4;
-    int32_t content_start = L->ai_start_col + 1 + padding;
-    int32_t content_width = L->ai_cols - 1 - (padding * 2);
+    // As an overlay there is no border column: the panel starts at the screen's edge.
+    int32_t border_cols = L->ai_overlay ? 0 : 1;
+    int32_t content_start = L->ai_start_col + border_cols + padding;
+    int32_t content_width = L->ai_cols - border_cols - (padding * 2);
+    if (content_width < 1)
+        content_width = 1;
     int32_t first_line_width = content_width - prefix_len;
     int32_t cont_line_width = content_width - prefix_len;
-    if (first_line_width < 10)
-        first_line_width = 10;
-    if (cont_line_width < 10)
-        cont_line_width = 10;
+    if (first_line_width < 1)
+        first_line_width = 1;
+    if (cont_line_width < 1)
+        cont_line_width = 1;
 
     if (!app.ai_focused)
         set_dim(true);
@@ -2352,12 +2454,13 @@ static void render_ai_panel(const Layout* L)
         move_to(row, L->ai_start_col);
         set_bg(get_ai_bg());
         set_fg(get_border());
-        out_str("│");
-        clear_range(L->ai_cols - 1);
+        if (!L->ai_overlay)
+            out_str("│");
+        clear_range(L->ai_cols - border_cols);
     }
 
     // Header
-    move_to(1, L->ai_start_col + 1);
+    move_to(1, L->ai_start_col + border_cols);
     set_bg(get_ai_bg());
     out_spaces(padding);
     set_fg(get_fg());
@@ -2370,20 +2473,28 @@ static void render_ai_panel(const Layout* L)
     move_to(2, L->ai_start_col);
     set_bg(get_ai_bg());
     set_fg(get_border());
-    out_str("├");
-    for (int32_t ic = 0; ic < L->ai_cols - 2; ic++)
+    if (!L->ai_overlay)
+        out_str("├");
+    int32_t dashes = L->ai_overlay ? L->ai_cols : L->ai_cols - 2;
+    for (int32_t ic = 0; ic < dashes; ic++)
         out_str("─");
 
     // Hint
     const char* hint = app.ai_thinking && app.ai_focused && !app.ai_stopping ? "esc stop" : "esc close";
-    int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding - 1;
-    move_to(1, hint_col);
-    set_bg(get_ai_bg());
-    set_fg(get_dim());
-    out_str(hint);
+    int32_t hint_col = L->ai_start_col + L->ai_cols - (int32_t)strlen(hint) - padding;
+    if (hint_col < content_start + 5)
+        hint_col = content_start + 5;
+    if (hint_col + (int32_t)strlen(hint) <= L->ai_start_col + L->ai_cols) {
+        move_to(1, hint_col);
+        set_bg(get_ai_bg());
+        set_fg(get_dim());
+        out_str(hint);
+    }
 
     // Calculate input area
     int32_t input_width = content_width - 2;
+    if (input_width < 1)
+        input_width = 1;
     int32_t input_lines = 1, icol = 0;
     for (size_t i = 0; i < app.ai_input_len; i++) {
         if (app.ai_input[i] == '\n') {
@@ -2688,6 +2799,14 @@ static void render_status_bar(const Layout* L)
     char words_buf[32];
     snprintf(words_buf, sizeof(words_buf), "%d word%s", words, words == 1 ? "" : "s");
     out_str(words_buf);
+
+    // The note could not be written; it stays here until a save gets through.
+    if (app.save_failed) {
+        set_fg(get_border());
+        out_str(" · ");
+        set_fg(get_accent());
+        out_str("not saved");
+    }
 
     if (app.focus_mode) {
         set_fg(get_border());
@@ -3367,36 +3486,26 @@ static void render(void)
 
 // #region Session Management
 
-static void new_session(void)
+//! Start an empty note at path (taken over), with no frontmatter. Nothing is written until the
+//! first edit is saved.
+static void begin_session(char* path)
 {
     gap_free(&app.text);
     gap_init(&app.text, 4096);
 
-    // Generate path in .dawn directory
     free(app.session_path);
-    DAWN_BACKEND(app)->mkdir_p(history_dir());
-    DawnTime lt;
-    DAWN_BACKEND(app)->localtime(&lt);
-    char timestamp[20];
-    dawn_format_filename_time(&lt, timestamp, sizeof(timestamp));
-    char path[PATH_MAX];
-#ifdef _WIN32
-    snprintf(path, sizeof(path), "%s\\%s.md", history_dir(), timestamp);
-#else
-    snprintf(path, sizeof(path), "%s/%s.md", history_dir(), timestamp);
-#endif
-    app.session_path = dawn_strdup(path);
+    app.session_path = path;
 
     fm_free(app.frontmatter);
-    app.frontmatter = fm_create();
-    fm_set_string(app.frontmatter, "title", "Untitled");
-    fm_set_string(app.frontmatter, "author", DAWN_BACKEND(app)->username());
-    char date_buf[32];
-    dawn_format_iso_time(&lt, date_buf, sizeof(date_buf));
-    fm_set_string(app.frontmatter, "date", date_buf);
+    app.frontmatter = NULL;
+    app.write_fm = false;
 
     app.cursor = 0;
+    app.scroll_y = 0;
     app.selecting = false;
+    undo_reset();
+    app.dirty = false;
+    app.save_failed = false;
     app.timer_done = false;
     app.timer_on = (app.timer_mins > 0);
     if (app.timer_on) {
@@ -3412,6 +3521,32 @@ static void new_session(void)
     if (app.ai_ready && !app.ai_session)
         ai_init_session();
 #endif
+}
+
+static void new_session(void)
+{
+    // Generate path in .dawn directory
+    DAWN_BACKEND(app)->mkdir_p(history_dir());
+    DawnTime lt;
+    DAWN_BACKEND(app)->localtime(&lt);
+    char timestamp[20];
+    dawn_format_filename_time(&lt, timestamp, sizeof(timestamp));
+    char path[PATH_MAX];
+#ifdef _WIN32
+    snprintf(path, sizeof(path), "%s\\%s.md", history_dir(), timestamp);
+#else
+    snprintf(path, sizeof(path), "%s/%s.md", history_dir(), timestamp);
+#endif
+    begin_session(dawn_strdup(path));
+
+    // A note of dawn's own carries frontmatter from the start.
+    app.frontmatter = fm_create();
+    fm_set_string(app.frontmatter, "title", "Untitled");
+    fm_set_string(app.frontmatter, "author", DAWN_BACKEND(app)->username());
+    char date_buf[32];
+    dawn_format_iso_time(&lt, date_buf, sizeof(date_buf));
+    fm_set_string(app.frontmatter, "date", date_buf);
+    app.write_fm = true;
 }
 
 // #endregion
@@ -3443,7 +3578,11 @@ static void handle_writing(int32_t key)
         else if (app.preview_mode)
             app.quit = true;
         else {
-            save_session();
+            // A note that could not be saved stays open, with the status bar saying so; the next
+            // esc after that warning leaves anyway, since the disk may never come back.
+            bool warned = app.save_failed;
+            if (!save_session() && !warned)
+                break;
             app.mode = app.timer_on ? MODE_FINISHED : MODE_WELCOME;
         }
         break;
@@ -3848,6 +3987,7 @@ static void handle_writing(int32_t key)
     case '\t': {
         if (!CAN_MODIFY())
             break;
+        save_undo_state();
         size_t line_start = find_line_start(app.cursor);
         // Use block query to check if in list
         bool in_list = is_in_list_item(line_start, NULL, NULL, NULL, NULL);
@@ -3872,6 +4012,7 @@ static void handle_writing(int32_t key)
         while (line_start + spaces < gap_len(&app.text) && gap_at(&app.text, line_start + spaces) == ' ' && spaces < 2)
             spaces++;
         if (spaces > 0) {
+            save_undo_state();
             gap_delete(&app.text, line_start, spaces);
             app.cursor = (app.cursor >= line_start + spaces) ? app.cursor - spaces : (app.cursor > line_start) ? line_start
                                                                                                                : app.cursor;
@@ -3948,7 +4089,7 @@ static void handle_writing(int32_t key)
             break;
         // Accept printable chars but not special keys (DAWN_KEY_UP=1000 and above)
         if (IS_PRINTABLE(key)) {
-            save_undo_state();
+            save_undo_typing(key);
             delete_selection_if_any();
             uint8_t utf8_buf[4];
             utf8proc_ssize_t len = utf8proc_encode_char((utf8proc_int32_t)key, utf8_buf);
@@ -3962,6 +4103,7 @@ static void handle_writing(int32_t key)
                 if (key == ']')
                     footnote_maybe_create_at_cursor(&app.text, app.cursor);
             }
+            undo_typed();
         }
         break;
     }
@@ -3979,6 +4121,13 @@ static void handle_ai_input(int32_t key)
         }
 #endif
         app.ai_open = false;
+        break;
+
+    case 31:
+        // The key that opened the chat closes it, from the chat too: as an overlay the note
+        // never sees a key while the chat is up.
+        app.ai_open = false;
+        app.ai_focused = false;
         break;
 
     case '\r':
@@ -4240,7 +4389,9 @@ static void handle_input(void)
 
     case MODE_WRITING:
         if (app.ai_open && key == '\t') {
-            app.ai_focused = !app.ai_focused;
+            // Over the note there is nothing to hand the focus to; esc brings the note back.
+            if (!calc_layout().ai_overlay)
+                app.ai_focused = !app.ai_focused;
             break;
         }
         if (app.ai_open && app.ai_focused)
@@ -4695,6 +4846,7 @@ static void handle_input(void)
                         new_syntax[len++] = '\n';
                     }
 
+                    save_undo_state();
                     gap_delete(&app.text, app.block_edit.pos, app.block_edit.len);
                     gap_insert_str(&app.text, app.block_edit.pos, new_syntax, (size_t)len);
                     app.cursor = app.block_edit.pos;
@@ -4956,8 +5108,11 @@ void dawn_engine_shutdown(void)
 {
     DAWN_BACKEND(app)->set_title(NULL);
 
-    if (gap_len(&app.text) > 0 && app.mode == MODE_WRITING && !app.preview_mode)
-        save_session();
+    // save_session writes only what changed; an empty note that was emptied on purpose counts.
+    if (app.session_path && app.mode == MODE_WRITING && !app.preview_mode) {
+        if (!save_session())
+            fprintf(stderr, "dawn: could not save %s\n", app.session_path);
+    }
 
     gap_free(&app.text);
     free(app.session_path);
@@ -4979,6 +5134,7 @@ void dawn_engine_shutdown(void)
     for (int32_t i = 0; i < app.undo_count; i++)
         free(app.undo_stack[i].text);
     app.undo_count = 0;
+    app.undo_pos = 0;
 
     if (app.block_cache) {
         block_cache_free((BlockCache*)app.block_cache);
@@ -5007,15 +5163,14 @@ bool dawn_frame(void)
     if (app.timer_on)
         timer_check();
 
-    if (app.mode == MODE_WRITING && gap_len(&app.text) > 0 && !app.preview_mode) {
+    // Autosave touches the file only once something changed; a note merely opened stays as it was.
+    if (app.mode == MODE_WRITING && app.dirty && !app.preview_mode) {
         int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC);
         if (app.last_save_time == 0)
             app.last_save_time = now;
         else if (now - app.last_save_time >= 5) {
-            if (app.mode == MODE_WRITING) {
-                save_session();
-                app.last_save_time = now;
-            }
+            save_session();
+            app.last_save_time = now;
         }
     }
 #if HAS_LIBAI
@@ -5033,13 +5188,22 @@ bool dawn_should_quit(void) { return app.quit; }
 
 bool dawn_load_document(const char* path)
 {
-    load_file_for_editing(path);
+    if (DAWN_BACKEND(app)->file_exists(path))
+        return load_file_for_editing(path);
+
+    // A file that does not exist yet: an empty note bound to that path, plain like any file the
+    // user names, and created by its first save. Its directory has to be there already.
+    char* abs = note_path_for(path);
+    if (!abs)
+        return false;
+    begin_session(abs);
     return true;
 }
 
 bool dawn_preview_document(const char* path)
 {
-    load_file_for_editing(path);
+    if (!load_file_for_editing(path))
+        return false;
     app.preview_mode = true;
     app.mode = MODE_WRITING;
     app.timer_on = false;
@@ -5049,7 +5213,8 @@ bool dawn_preview_document(const char* path)
 
 bool dawn_print_document(const char* path)
 {
-    load_file_for_editing(path);
+    if (!load_file_for_editing(path))
+        return false;
     app.preview_mode = true;
     app.mode = MODE_WRITING;
     app.timer_on = false;
@@ -5250,6 +5415,17 @@ static void render_writing(void)
     bool print_mode = IS_PRINT_MODE();
 
     Layout L = calc_layout();
+
+    // On a narrow screen the chat is all there is while it is open: the note, its images and its
+    // status bar wait underneath. Every key goes to the chat, so it holds the focus.
+    if (!print_mode && L.ai_overlay) {
+        app.ai_focused = true;
+        image_frame_start();
+        render_ai_panel(&L);
+        image_frame_end();
+        out_flush();
+        return;
+    }
 
     // In print mode: capture theme bg for margin fills
     if (print_mode) {

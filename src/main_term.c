@@ -5,6 +5,12 @@
 #include "dawn_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
 
 #ifdef _WIN32
 extern const DawnBackend dawn_backend_win32;
@@ -13,6 +19,28 @@ extern const DawnBackend dawn_backend_win32;
 extern const DawnBackend dawn_backend_posix;
 #define DAWN_BACKEND_PLATFORM dawn_backend_posix
 #endif
+
+//! Whether a file by this name could be opened for editing: it exists, or the directory it names
+//! does and the file can be created there on the first save. Checked before the terminal is taken
+//! over, since an error printed after that is lost with the alternate screen.
+static bool file_openable(const char* path, char* dir, size_t dir_size)
+{
+    struct stat st;
+    if (stat(path, &st) == 0)
+        return true;
+    const char* slash = strrchr(path, '/');
+#ifdef _WIN32
+    const char* bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash))
+        slash = bslash;
+#endif
+    size_t n = slash ? (size_t)(slash - path) : 0;
+    if (n == 0)
+        snprintf(dir, dir_size, "%s", slash ? "/" : ".");
+    else
+        snprintf(dir, dir_size, "%.*s", (int)(n < dir_size ? n : dir_size - 1), path);
+    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
+}
 
 int32_t main(int32_t argc, char* argv[])
 {
@@ -47,6 +75,17 @@ int32_t main(int32_t argc, char* argv[])
         stdin_content = args_read_stdin(&stdin_size);
         if (!stdin_content || stdin_size == 0) {
             fprintf(stderr, "dawn: no input on stdin\n");
+            args_free(&args);
+            return 1;
+        }
+    }
+
+    // A file to edit may be new, but the directory it goes in has to be there already.
+    if (args.file && !(args.flags & (ARG_PRINT | ARG_PREVIEW))) {
+        char dir[4096];
+        if (!file_openable(args.file, dir, sizeof(dir))) {
+            fprintf(stderr, "dawn: cannot open %s: no such directory: %s\n", args.file, dir);
+            free(stdin_content);
             args_free(&args);
             return 1;
         }

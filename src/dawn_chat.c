@@ -9,6 +9,7 @@
 #include "dawn_block.h"
 #include "dawn_fm.h"
 
+#include <ctype.h>
 #include <strings.h>
 
 // #region Message Management
@@ -229,6 +230,10 @@ static void ai_progress_cb(ai_context_t* context, ai_progress_t phase, const cha
 #define NOTE_CONTEXT_LIMIT 8000
 #define SELECTION_CONTEXT_LIMIT 4000
 
+//! Whether the note went to the model cut short this turn. A model that saw only the beginning
+//! cannot rewrite the whole: its replace_note would drop the part it never read.
+static bool g_turn_note_cut;
+
 //! [start, start + limit) of the note, shortened to end on a UTF-8 character boundary.
 static char* note_slice(size_t start, size_t end, size_t limit, bool* cut)
 {
@@ -261,6 +266,7 @@ static char* note_context(void)
 
     bool note_cut, sel_cut = false;
     char* note = note_slice(0, len, NOTE_CONTEXT_LIMIT, &note_cut);
+    g_turn_note_cut = note_cut;
     size_t s, e;
     get_selection(&s, &e);
     char* sel = s != e ? note_slice(s, e, SELECTION_CONTEXT_LIMIT, &sel_cut) : NULL;
@@ -398,6 +404,26 @@ char* document_tool_callback(const char* params_json, void* user_data)
 //! still the open one, so a slow reply cannot rewrite the note the user has since switched to.
 static char* g_turn_path;
 
+//! The user's message this turn, in lower case, for whether it asked for a shorter note.
+static char* g_turn_prompt;
+
+//! Where the last AI edit's pre-edit copy went, or "" when none was kept.
+static char g_version_path[PATH_MAX];
+
+//! Whether the user's message asked for the note to get shorter, so a much shorter replace_note
+//! is what they want rather than a model that lost part of the note.
+static bool prompt_asks_to_shorten(void)
+{
+    static const char* const words[] = { "shorten", "shorter", "summar", "condense", "concise", "trim",
+        "cut ", "cut.", "delete", "remove", "drop ", "brief", "tldr", "tl;dr", "reduce", "compress", "abridge" };
+    if (!g_turn_prompt)
+        return false;
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (strstr(g_turn_prompt, words[i]))
+            return true;
+    return false;
+}
+
 //! text with carriage returns dropped, in place.
 static void drop_carriage_returns(char* text)
 {
@@ -440,10 +466,14 @@ static bool note_is_editable(void)
     return true;
 }
 
-//! Replace [start, end) with text as one undoable step and leave the cursor after it.
+//! Replace [start, end) with text as one undoable step and leave the cursor after it. The note
+//! as it was goes to a versions file first: the undo stack is short and gone after a restart,
+//! and autosave will have written the edit over the file within seconds.
 static void apply_edit(size_t start, size_t end, const char* text)
 {
     size_t n = strlen(text);
+    if (!save_note_version(g_version_path, sizeof(g_version_path)))
+        g_version_path[0] = '\0';
     save_undo_state();
     if (end > start)
         gap_delete(&app.text, start, end - start);
@@ -488,8 +518,9 @@ static bool clean_title(const char* raw, char* out, size_t cap)
     return n > 0;
 }
 
-//! Rename the note, in the frontmatter the next save writes and in the window title.
-static bool set_note_title(const char* raw)
+//! Rename the note, in the frontmatter the next save writes and in the window title. A plain
+//! file gets no frontmatter for it unless asked: the title then lives in the history list only.
+static bool set_note_title(const char* raw, bool asked)
 {
     char title[81];
     if (!clean_title(raw, title, sizeof(title)))
@@ -498,6 +529,10 @@ static bool set_note_title(const char* raw)
         app.frontmatter = fm_create();
     fm_set_string(app.frontmatter, "title", title);
     DAWN_BACKEND(app)->set_title(title);
+    if (asked)
+        app.write_fm = true;
+    if (app.write_fm)
+        app.dirty = true;
     return true;
 }
 
@@ -524,9 +559,19 @@ static const char* edit_note(EditKind kind, const char* text)
         return "Missing the \"text\" argument.";
     size_t len = gap_len(&app.text);
     switch (kind) {
-    case EDIT_REPLACE_NOTE:
+    case EDIT_REPLACE_NOTE: {
+        // The whole note may be replaced only by a model that read the whole note, with a note
+        // of its own, and not one that lost most of the text unless that is what was asked for.
+        if (g_turn_note_cut || len > NOTE_CONTEXT_LIMIT)
+            return "The note is too long to replace whole: only its beginning was shown. Ask the user to select the part to change and use replace_selection.";
+        if (!text[0])
+            return "The new note is empty. To empty the note, ask the user to select all and delete.";
+        size_t new_len = strlen(text);
+        if (len > 2000 && new_len < len / 2 && !prompt_asks_to_shorten())
+            return "The new note is less than half the length of the old one and the user did not ask for a shorter note. Ask the user to select the part to change and use replace_selection.";
         apply_edit(0, len, text);
         break;
+    }
     case EDIT_REPLACE_SELECTION: {
         size_t start, end;
         get_selection(&start, &end);
@@ -557,7 +602,7 @@ static const char* edit_note(EditKind kind, const char* text)
         break;
     }
     case EDIT_TITLE:
-        if (!set_note_title(text))
+        if (!set_note_title(text, true))
             return "The title is empty.";
         break;
     default:
@@ -566,24 +611,31 @@ static const char* edit_note(EditKind kind, const char* text)
     return NULL;
 }
 
+//! The chat's line for an edit that was made, or why it was not. Every change the AI makes, or
+//! fails to make, is stated in the chat whether or not the model mentions it.
+static void edit_line(EditKind kind, const char* error, char* line, size_t size)
+{
+    if (error)
+        snprintf(line, size, "✗ Couldn't %s: %s", EDITS[kind].name, error);
+    else if (kind == EDIT_TITLE)
+        snprintf(line, size, "✓ Renamed the note to \"%s\".", note_title());
+    else if (g_version_path[0])
+        snprintf(line, size, "✓ %s The previous version is saved in %s", EDITS[kind].done, g_version_path);
+    else
+        snprintf(line, size, "✓ %s", EDITS[kind].done);
+}
+
 static char* edit_tool(EditKind kind, const char* params_json)
 {
     char* text = edit_text_param(params_json);
     const char* error = edit_note(kind, text);
     char* result;
-    // Every change the AI makes, or fails to make, is stated in the chat whether or not the
-    // model mentions it.
-    char line[256];
+    char line[512 + PATH_MAX];
+    edit_line(kind, error, line, sizeof(line));
+    chat_step(line);
     if (error) {
-        snprintf(line, sizeof(line), "✗ Couldn't %s: %s", EDITS[kind].name, error);
-        chat_step(line);
         result = edit_error(error);
     } else {
-        if (kind == EDIT_TITLE)
-            snprintf(line, sizeof(line), "✓ Renamed the note to \"%s\".", note_title());
-        else
-            snprintf(line, sizeof(line), "✓ %s", EDITS[kind].done);
-        chat_step(line);
         cJSON* response = cJSON_CreateObject();
         cJSON_AddBoolToObject(response, "ok", true);
         result = cJSON_PrintUnformatted(response);
@@ -640,7 +692,7 @@ static void apply_reply_edits(void)
     if (!shown)
         return;
     size_t shown_len = 0;
-    char notes[1024] = "";
+    char notes[4096] = "";
     size_t notes_len = 0;
 
     const char* from = m->text;
@@ -666,13 +718,8 @@ static void apply_reply_edits(void)
             drop_carriage_returns(text);
         }
         const char* error = edit_note(kind, text);
-        char line[256];
-        if (error)
-            snprintf(line, sizeof(line), "✗ Couldn't %s: %s", EDITS[kind].name, error);
-        else if (kind == EDIT_TITLE)
-            snprintf(line, sizeof(line), "✓ Renamed the note to \"%s\".", note_title());
-        else
-            snprintf(line, sizeof(line), "✓ %s", EDITS[kind].done);
+        char line[512 + PATH_MAX];
+        edit_line(kind, error, line, sizeof(line));
         free(text);
         notes_len += (size_t)snprintf(notes + notes_len, sizeof(notes) - notes_len, "%s%s",
             notes_len ? "\n" : "", line);
@@ -752,6 +799,14 @@ void ai_send(const char* prompt)
     g_after_step = false;
     free(g_turn_path);
     g_turn_path = app.session_path ? dawn_strdup(app.session_path) : NULL;
+    // What the model gets to see of the note (note_context() states it exactly when asked for
+    // it; a bridge that never asks gets the same answer from the length).
+    g_turn_note_cut = gap_len(&app.text) > NOTE_CONTEXT_LIMIT;
+    free(g_turn_prompt);
+    g_turn_prompt = dawn_strdup(prompt);
+    if (g_turn_prompt)
+        for (char* p = g_turn_prompt; *p; p++)
+            *p = (char)tolower((unsigned char)*p);
 
     // The bridge attaches the note to the question itself (read_document's "context" action),
     // so this is only the user's own words, and the session history stays small.
@@ -791,7 +846,8 @@ void ai_init_session(void)
                                       "CHANGING THE NOTE\n"
                                       "Only change the note when the user asks you to; otherwise answer in the chat. "
                                       "To change it, put one of these blocks in your reply:\n"
-                                      "<replace_note>the whole new note</replace_note> to rewrite, fix, translate, reformat or reorganize the whole note\n"
+                                      "<replace_note>the whole new note</replace_note> to rewrite, fix, translate, reformat or reorganize the whole note; "
+                                      "only when the whole note was shown to you (it is refused when the note was cut short, and when the new note is much shorter than the old without being asked)\n"
                                       "<replace_selection>the new text</replace_selection> to rewrite only the selected text\n"
                                       "<insert_at_cursor>the new text</insert_at_cursor> to add text where the user's cursor is\n"
                                       "<append_to_note>the new text</append_to_note> to add text at the end of the note\n"
@@ -829,7 +885,7 @@ void ai_init_session(void)
                                     "},"
                                     "{"
                                     "\"name\":\"replace_note\","
-                                    "\"description\":\"Replace the whole note with new text. Use when the user asks to rewrite, fix, translate, reformat or reorganize the whole note.\","
+                                    "\"description\":\"Replace the whole note with new text. Use when the user asks to rewrite, fix, translate, reformat or reorganize the whole note. Only works when the whole note was shown to you: it is refused when the note was cut short, and when the new text is much shorter than the note without the user asking for that. For a part of a long note, ask the user to select it and use replace_selection.\","
                                     "\"input_schema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"The whole new note, in Markdown\"}},\"required\":[\"text\"]}"
                                     "},"
                                     "{"
@@ -932,7 +988,7 @@ static void title_stream_cb(ai_context_t* context, const char* chunk, void* user
         g_title_path = NULL;
         g_title_retry_at = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC) + TITLE_RETRY_SECS;
     } else if (app.session_path && g_title_path && strcmp(app.session_path, g_title_path) == 0
-        && note_is_untitled() && set_note_title(g_title_reply)) {
+        && note_is_untitled() && set_note_title(g_title_reply, false)) {
         save_session();
     }
     free(g_title_reply);

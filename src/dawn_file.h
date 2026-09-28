@@ -25,9 +25,22 @@ char* config_dir(void);
 // #region Session Persistence
 
 //! Save current session to disk
-//! Creates new file if first save, writes markdown with YAML frontmatter
-//! Also saves AI chat history to companion .chat.json file
-void save_session(void);
+//! Writes the note only when it changed since the last successful save (app.dirty), with YAML
+//! frontmatter when the note carries one (app.write_fm); always updates the history entry and
+//! the companion .chat.json file.
+//! @return false when the note could not be written; app.save_failed then stays set until it is
+bool save_session(void);
+
+//! Keep a copy of the note as it is now, under <data dir>/versions/<note name>/<UTC time>.md,
+//! for the AI's edits: Ctrl+Z reaches them only so far. The newest MAX_NOTE_VERSIONS per note
+//! are kept.
+//! @param out receives the copy's path
+//! @param out_size size of out
+//! @return false when the note is empty or has no path, or the copy could not be written
+bool save_note_version(char* out, size_t out_size);
+
+//! Drop the undo history and start it again from the current text (dawn.c)
+void undo_reset(void);
 
 //! Load list of past sessions from history directory
 //! Populates app.history array, sorted newest first
@@ -41,9 +54,16 @@ void load_chat_history(const char* session_path);
 
 // #region File Operations
 
+//! path made absolute: its directory resolved through realpath, its file name kept as given.
+//! History entries hold this form, so they open from any working directory.
+//! @param path path to a file, which need not exist yet
+//! @return newly allocated path, or NULL when the directory it names does not exist
+char* note_path_for(const char* path);
+
 //! Load a file for editing, parsing frontmatter
 //! @param path path to the .md file to open
-void load_file_for_editing(const char* path);
+//! @return false when the file could not be read; the editor is then left as it was
+bool load_file_for_editing(const char* path);
 
 //! Load content from buffer for editing, parsing frontmatter
 //! @param content buffer containing markdown content

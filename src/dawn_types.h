@@ -68,6 +68,12 @@
 //! AI chat panel width in columns
 #define AI_PANEL_WIDTH 45
 
+//! Below this many columns the chat covers the screen instead of sitting beside the note
+#define AI_PANEL_MIN_COLS 80
+
+//! How many pre-edit copies of a note the AI's edits keep, per note
+#define MAX_NOTE_VERSIONS 20
+
 //! Maximum AI response size
 #define MAX_AI_RESPONSE (64 * 1024)
 
@@ -331,6 +337,9 @@ typedef struct {
     } undo_stack[MAX_UNDO];
     int32_t undo_count; //!< Number of undo states
     int32_t undo_pos; //!< Current position in undo stack
+    int32_t undo_typing; //!< The keystroke the open undo step ends with: 0 none, 1 a word character, 2 a space
+    size_t undo_typing_cursor; //!< Where that keystroke left the cursor
+    int64_t undo_typing_ms; //!< When it was typed, DAWN_CLOCK_MS
 
     // State flags
     bool resize_needed; //!< Display resize pending
@@ -339,6 +348,9 @@ typedef struct {
 
     // Auto-save
     int64_t last_save_time; //!< Last auto-save timestamp
+    bool dirty; //!< The note or its frontmatter changed since the last successful save
+    bool save_failed; //!< The last save failed; the status bar says so until one succeeds
+    bool write_fm; //!< Save with frontmatter: dawn's own notes, and files that came with some
 
     // Block cache (forward declared, allocated on demand)
     void* block_cache; //!< BlockCache* - block-based document model

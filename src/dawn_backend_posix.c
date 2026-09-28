@@ -1767,16 +1767,40 @@ static char* posix_read_file(const char* path, size_t* out_len)
     return data;
 }
 
+//! Write the whole file or none of it: the data goes to <path>.tmp beside it, reaches the disk,
+//! and then takes the old file's place in one rename. A failure anywhere leaves the old file as
+//! it was and removes the temporary one.
 static bool posix_write_file(const char* path, const char* data, size_t len)
 {
-    FILE* f = fopen(path, "wb");
-    if (!f)
+    char tmp[PATH_MAX];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
         return false;
 
-    size_t written = fwrite(data, 1, len, f);
-    fclose(f);
+    // A file that exists keeps its permissions through the rename.
+    struct stat st;
+    bool existed = stat(path, &st) == 0;
 
-    return written == len;
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return false;
+    if (existed)
+        fchmod(fd, st.st_mode & 07777);
+
+    FILE* f = fdopen(fd, "wb");
+    if (!f) {
+        close(fd);
+        unlink(tmp);
+        return false;
+    }
+
+    bool ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fd) == 0;
+    if (fclose(f) != 0)
+        ok = false;
+    if (ok && rename(tmp, path) != 0)
+        ok = false;
+    if (!ok)
+        unlink(tmp);
+    return ok;
 }
 
 static bool posix_list_dir(const char* path, char*** out_names, int32_t* out_count)
@@ -2290,6 +2314,22 @@ static bool start_async_download(const char* url, const char* temp_path, const c
     return true;
 }
 
+//! The image cache lives under $XDG_CACHE_HOME (or ~/.cache), never under ~/.dawn: that directory
+//! is what history_dir() takes for a legacy install, and creating it moved the notes out of sight.
+static bool posix_image_cache_dir(char* out, size_t out_size)
+{
+    const char* xdg_cache = getenv("XDG_CACHE_HOME");
+    if (xdg_cache && xdg_cache[0] == '/') {
+        snprintf(out, out_size, "%s/dawn/image-cache", xdg_cache);
+    } else {
+        const char* home = posix_get_home_dir();
+        if (!home)
+            return false;
+        snprintf(out, out_size, "%s/.cache/dawn/image-cache", home);
+    }
+    return posix_mkdir_p(out);
+}
+
 static bool download_url_to_cache(const char* url, char* cached_path, size_t path_size)
 {
     if (!url || !cached_path)
@@ -2298,13 +2338,9 @@ static bool download_url_to_cache(const char* url, char* cached_path, size_t pat
     if (is_failed_url(url))
         return false;
 
-    const char* home = posix_get_home_dir();
-    if (!home)
-        return false;
-
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.dawn/image-cache", home);
-    posix_mkdir_p(cache_dir);
+    if (!posix_image_cache_dir(cache_dir, sizeof(cache_dir)))
+        return false;
 
     char hash_hex[17];
     term_hash_to_hex(url, hash_hex);
@@ -2359,12 +2395,9 @@ static bool ensure_png_cached(const char* src_path, char* out, size_t out_size)
     }
 
     // Need to convert - get cache directory
-    const char* home = posix_get_home_dir();
-    assert(home && "Failed to get home directory");
-
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.dawn/image-cache", home);
-    posix_mkdir_p(cache_dir);
+    if (!posix_image_cache_dir(cache_dir, sizeof(cache_dir)))
+        return false;
 
     // Use absolute path + mtime as cache key
     char abs_path[PATH_MAX];
