@@ -435,7 +435,7 @@ App app = { 0 };
 // #region Undo/Redo
 
 //! Save current text state to undo stack
-static void save_undo_state(void)
+void save_undo_state(void)
 {
     if (app.undo_pos < app.undo_count - 1) {
         for (int32_t i = app.undo_pos + 1; i < app.undo_count; i++) {

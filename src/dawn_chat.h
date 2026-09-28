@@ -19,6 +19,10 @@ void chat_clear(void);
 
 #if HAS_LIBAI
 
+//! Push the current text onto the undo stack (dawn.c). The AI's edit tools call it on both
+//! sides of a change, so one Ctrl+Z lands exactly on the text from before the edit.
+void save_undo_state(void);
+
 // #region AI Session
 
 //! Initialize AI session with system prompt and tools
