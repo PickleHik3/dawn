@@ -386,6 +386,11 @@ static ai_bridge_model_state_t model_state_from(cJSON* root)
 {
     if (!root)
         return AI_BRIDGE_MODEL_UNKNOWN;
+    // TAI's /v1/ai/runtime answers {"ok":true,"runtime":{"loaded":…,"loadedModelId":…,"state":…}}
+    // (TaiManager.runtimeStatus, TaiRuntimeState.toJson): the model state is one level down.
+    cJSON* nested = cJSON_GetObjectItemCaseSensitive(root, "runtime");
+    if (cJSON_IsObject(nested))
+        root = nested;
     static const char* const bool_keys[] = { "loaded", "model_loaded", "is_loaded", "resident" };
     for (size_t i = 0; i < sizeof(bool_keys) / sizeof(bool_keys[0]); i++) {
         cJSON* v = cJSON_GetObjectItemCaseSensitive(root, bool_keys[i]);
