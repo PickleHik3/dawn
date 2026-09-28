@@ -161,9 +161,11 @@ static inline Layout calc_layout(void)
         l.text_width = l.text_area_cols;
     }
     l.top_margin = 2;
-    // Under a sheet there is no status line (the chat has its own input line); one blank row
-    // still separates the note's last line from the sheet's edge.
-    l.text_height = l.ai_sheet ? l.note_rows - l.top_margin - 1 : app.rows - l.top_margin - 2;
+    // Text starts on row top_margin. Without a sheet it ends two rows above the bottom (a blank
+    // row, then the status line). Under a sheet there is no status line (the chat has its own
+    // input line), so it ends one row above the sheet: row note_rows is the one blank row between
+    // the note's last line and the sheet's edge.
+    l.text_height = l.ai_sheet ? l.note_rows - l.top_margin : app.rows - l.top_margin - 2;
     if (l.text_height < 1)
         l.text_height = 1;
     return l;
