@@ -1160,6 +1160,32 @@ static int32_t posix_read_key_raw(void)
                 return DAWN_KEY_NONE;
             }
 
+            // Private replies: CSI ?997;1n / ?997;2n are the launcher's dark/light reports (mode
+            // 2031, and the answer to ?996n). Anything else private is read to its final byte and
+            // dropped, so its tail can't leak into the note as typed text.
+            if (seq[1] == '?') {
+                char rep[32];
+                int32_t ri = 0;
+                while (ri < 30) {
+                    if (read(STDIN_FILENO, &rep[ri], 1) != 1)
+                        break;
+                    if (rep[ri] >= 0x40 && rep[ri] <= 0x7e) {
+                        ri++;
+                        break;
+                    }
+                    ri++;
+                }
+                rep[ri] = '\0';
+                int32_t code = 0, mode = 0;
+                if (sscanf(rep, "%d;%dn", &code, &mode) == 2 && code == 997) {
+                    if (mode == 1)
+                        return DAWN_KEY_THEME_DARK;
+                    if (mode == 2)
+                        return DAWN_KEY_THEME_LIGHT;
+                }
+                return DAWN_KEY_NONE;
+            }
+
             // Kitty keyboard protocol or legacy sequences
             if (seq[1] >= '0' && seq[1] <= '9') {
                 char peek[32];
