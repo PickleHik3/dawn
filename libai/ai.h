@@ -329,6 +329,14 @@ ai_result_t ai_init(void);
 void ai_cleanup(void);
 
 /**
+ * @brief Deliver pending stream chunks and tool calls on the calling thread
+ *
+ * Call once per frame from the UI thread. Stream and tool callbacks run inside
+ * this call. A no-op with the FoundationModels bridge.
+ */
+void ai_pump(void);
+
+/**
  * @brief Get library version string
  *
  * Returns the semantic version of the ai library.

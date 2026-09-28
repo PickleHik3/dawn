@@ -130,6 +130,12 @@ ai_result_t ai_init(void) {
   return AI_SUCCESS;
 }
 
+void ai_pump(void) {
+#ifndef __APPLE__
+  if (atomic_load(&g_state.initialized)) ai_bridge_pump();
+#endif
+}
+
 void ai_cleanup(void) {
   if (!atomic_load(&g_state.initialized)) return;
 

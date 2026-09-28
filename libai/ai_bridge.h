@@ -418,6 +418,15 @@ bool ai_bridge_add_message_to_history(ai_bridge_session_id_t session_id,
  */
 void ai_bridge_free_string(char *ptr);
 
+/**
+ * @brief Deliver queued stream chunks and run tools that touch the caller's state
+ *
+ * The OpenAI-compatible bridge never calls back from its worker threads: chunks
+ * and document tools wait until the caller's own thread calls this, once per
+ * frame. The FoundationModels bridge does not have it.
+ */
+void ai_bridge_pump(void);
+
 #ifdef __cplusplus
 }
 #endif

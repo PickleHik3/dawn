@@ -10,7 +10,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 
-option(USE_LIBAI "Build with Apple Intelligence (macOS 26+)" OFF)
+option(USE_LIBAI "Build the AI chat (Apple Intelligence on macOS 26+, an OpenAI-compatible endpoint elsewhere)" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 set(DAWN_VERSION "dev" CACHE STRING "Version string")
@@ -108,12 +108,25 @@ if(NOT EMSCRIPTEN)
         target_link_libraries(dawn PRIVATE "-framework ApplicationServices")
     endif()
 
-    if(APPLE AND USE_LIBAI)
+    if(USE_LIBAI)
         target_sources(dawn PRIVATE src/search.c)
         target_compile_definitions(dawn PRIVATE USE_LIBAI)
         target_include_directories(dawn PRIVATE libai)
         target_compile_options(dawn PRIVATE -Wno-unused-variable -Wno-unused-but-set-variable)
+    endif()
 
+    # Everywhere but macOS the chat talks to an OpenAI-compatible endpoint (Termux Launcher's
+    # TAI by default) through libai/ai_bridge_openai.c, built into the same libai front end.
+    if(USE_LIBAI AND NOT APPLE)
+        find_package(Threads REQUIRED)
+        add_library(libai_openai STATIC libai/ai.c libai/ai_bridge_openai.c)
+        target_include_directories(libai_openai PRIVATE libai third-party)
+        target_compile_definitions(libai_openai PRIVATE AI_VERSION_STRING="openai-compatible")
+        target_link_libraries(libai_openai PRIVATE CURL::libcurl Threads::Threads)
+        target_link_libraries(dawn PRIVATE libai_openai)
+    endif()
+
+    if(APPLE AND USE_LIBAI)
         add_custom_target(libai_build
             COMMAND make static-rel
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/libai
