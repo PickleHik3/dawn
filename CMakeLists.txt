@@ -123,7 +123,7 @@ if(NOT EMSCRIPTEN)
         target_include_directories(libai_openai PRIVATE libai third-party)
         target_compile_definitions(libai_openai PRIVATE AI_VERSION_STRING="openai-compatible")
         target_link_libraries(libai_openai PRIVATE CURL::libcurl Threads::Threads)
-        target_link_libraries(dawn PRIVATE libai_openai)
+        target_link_libraries(dawn PRIVATE libai_openai Threads::Threads)
     endif()
 
     if(APPLE AND USE_LIBAI)
@@ -177,6 +177,32 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test-block PRIVATE pcre2-8-static utf8proc)
     if(NOT WIN32)
         target_link_libraries(test-block PRIVATE m)
+    endif()
+
+    # Test target for the meaning index's pure half (chunker, index file, ranking)
+    add_executable(test-embed
+        tests/test_embed.c
+        src/dawn_embed_index.c
+    )
+
+    target_include_directories(test-embed PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(test-embed PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-embed PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-embed PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-embed PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
+
+    if(NOT WIN32)
+        target_link_libraries(test-embed PRIVATE m)
     endif()
 else()
     file(GLOB WEB_SRCS src/dawn*.c)
