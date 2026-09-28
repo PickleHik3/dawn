@@ -656,7 +656,9 @@ bool ai_bridge_active_model(char* out, size_t cap, bool* pinned)
 
 int32_t ai_bridge_context_window(void)
 {
-    models_refresh_if_stale(60000);
+    // Asked often (every budget decision): the list only needs fetching once in a while here;
+    // the picker and a model switch refresh it sooner.
+    models_refresh_if_stale(5 * 60000);
     int32_t window = 0;
     pthread_mutex_lock(&g_runtime_lock);
     // The window of the model requests go to: the one configured, else the one TAI has loaded

@@ -1438,7 +1438,9 @@ void session_tick(void)
 
     // Compaction: at 70% of the window, or to re-read the note after the cache was lost.
     int32_t window = ai_ctx_window();
-    if (g_rebuild_after_summary && quiet) {
+    // Step two follows the summary straight away, unless the writer came back meanwhile.
+    bool still_idle = now - g_last_activity_ms >= QUIET_IDLE_MS && app.ai_input_len == 0;
+    if (g_rebuild_after_summary && still_idle) {
         g_rebuild_after_summary = false;
         if (!rebuild_start())
             g_compact_retry_at = now + COMPACT_RETRY_MS;

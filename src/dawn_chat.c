@@ -57,6 +57,9 @@ void chat_clear(void)
 static void apply_reply_edits(void);
 static void mark_stopped(void);
 
+//! Set while a finished reply's tagged edit blocks are being made (see note_is_editable()).
+static bool g_applying_reply;
+
 static void ai_set_status(const char* text)
 {
     snprintf(app.ai_status, sizeof(app.ai_status), "%s", text);
@@ -148,7 +151,9 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
             app.ai_stopping = false;
             mark_stopped();
         } else {
+            g_applying_reply = true;
             apply_reply_edits();
+            g_applying_reply = false;
         }
     }
 }
@@ -427,6 +432,11 @@ static char* edit_error(const char* message)
 static bool note_is_editable(void)
 {
     if (app.mode != MODE_WRITING || app.focus_mode || app.preview_mode)
+        return false;
+    // Only the writer's own question may change the note: priming, a live title or a compaction
+    // share the conversation (and its tools) but never edit, and they only run while no question
+    // is out (app.ai_thinking) and no finished reply is having its edits made.
+    if (!app.ai_thinking && !g_applying_reply)
         return false;
     if (g_turn_path && (!app.session_path || strcmp(g_turn_path, app.session_path) != 0))
         return false;
