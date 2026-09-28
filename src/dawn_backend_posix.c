@@ -532,6 +532,11 @@ static void detect_capabilities(void)
     posix_state.capabilities |= DAWN_CAP_MOUSE;
     posix_state.capabilities |= DAWN_CAP_CLIPBOARD;
 
+    // OSC 8 hyperlinks: every POSIX terminal we run in (Termux included) either passes them
+    // through or ignores them harmlessly, and it's the launcher's confirm strip that acts on
+    // them, so this is unconditional rather than probed.
+    posix_state.capabilities |= DAWN_CAP_HYPERLINKS;
+
     drain_input();
 }
 

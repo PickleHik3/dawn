@@ -2960,6 +2960,15 @@ static bool render_inline_math(const RenderCtx* ctx, RenderState* rs, const Inli
 }
 
 //! Render link element
+//! Only these schemes are worth an OSC 8 wrapper: they're what the launcher's confirm strip
+//! knows how to act on. Anything else (a bare footnote-style reference, a relative path, "ftp:",
+//! ...) renders as before - underlined and accent-colored, just not click-through.
+static bool url_scheme_is_linkable(const char* url)
+{
+    return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0
+        || strncmp(url, "mailto:", 7) == 0;
+}
+
 static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* run)
 {
     size_t link_total = run->byte_end - run->byte_start;
@@ -2977,6 +2986,10 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
     url[ulen] = '\0';
     rs->pos += link_total;
 
+    // OSC 8 has zero width (out_char() is never called for it), so it never disturbs col_width
+    // or the wrap math below; it also costs nothing extra to skip when the backend can't use it.
+    bool use_osc8 = dawn_ctx_has(&app.ctx, DAWN_CAP_HYPERLINKS) && url_scheme_is_linkable(url);
+
     size_t link_pos = run->data.link.text_start;
     size_t link_end = run->data.link.text_start + run->data.link.text_len;
     bool in_code = false;
@@ -2992,7 +3005,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
             if (link_started && IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
                 clear_underline();
                 reset_attrs();
-                DAWN_BACKEND(app)->link_end();
+                if (use_osc8)
+                    DAWN_BACKEND(app)->link_end();
                 set_bg(get_bg());
             }
             link_started = false;
@@ -3018,7 +3032,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
         if (IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
             // Start/restart hyperlink on this line
             if (!link_started) {
-                DAWN_BACKEND(app)->link_begin(url);
+                if (use_osc8)
+                    DAWN_BACKEND(app)->link_begin(url);
                 set_underline(UNDERLINE_STYLE_SINGLE);
                 set_fg(get_accent());
                 if (in_code)
@@ -3061,7 +3076,8 @@ static bool render_link(const RenderCtx* ctx, RenderState* rs, const InlineRun* 
     if (link_started && IS_ROW_VISIBLE(&ctx->L, screen_row, ctx->max_row)) {
         clear_underline();
         reset_attrs();
-        DAWN_BACKEND(app)->link_end();
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_end();
         set_bg(get_bg());
         set_fg(get_fg());
     }
@@ -5808,8 +5824,25 @@ static void render_run_autolink(const RenderCtx* ctx, RenderState* rs, const Inl
         }
         set_fg(get_fg());
     } else {
+        // Build the OSC 8 target: an email autolink's span is just "local@domain" (md_check_autolink
+        // in dawn_md.c), so it needs a "mailto:" prefix to be a real link; a URI autolink's span
+        // already is the full "scheme://..." string.
+        char url[1024];
+        bool is_email = (run->flags & INLINE_FLAG_IS_EMAIL) != 0;
+        size_t prefix_len = is_email ? 7 : 0; // strlen("mailto:")
+        size_t ulen = run->data.autolink.url_len < sizeof(url) - 1 - prefix_len
+            ? run->data.autolink.url_len
+            : sizeof(url) - 1 - prefix_len;
+        if (is_email)
+            memcpy(url, "mailto:", 7);
+        gap_copy_to(&app.text, run->data.autolink.url_start, ulen, url + prefix_len);
+        url[prefix_len + ulen] = '\0';
+        bool use_osc8 = dawn_ctx_has(&app.ctx, DAWN_CAP_HYPERLINKS) && url_scheme_is_linkable(url);
+
         set_fg(get_accent());
         set_underline(UNDERLINE_STYLE_SINGLE);
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_begin(url);
         rs->pos++; // skip <
         size_t url_end = rs->pos + run->data.autolink.url_len;
         while (rs->pos < url_end && rs->pos < ctx->len) {
@@ -5822,6 +5855,8 @@ static void render_run_autolink(const RenderCtx* ctx, RenderState* rs, const Inl
             }
         }
         rs->pos++; // skip >
+        if (use_osc8)
+            DAWN_BACKEND(app)->link_end();
         set_underline(0);
         set_fg(get_fg());
     }
