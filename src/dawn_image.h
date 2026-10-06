@@ -49,9 +49,16 @@ bool image_get_size(const char* path, int32_t* width, int32_t* height);
 // Returns estimated rows the image will take
 int32_t image_calc_rows(int32_t pixel_width, int32_t pixel_height, int32_t max_cols, int32_t max_rows);
 
+// Set the directory relative image paths resolve against first (the open note's directory).
+// A copy is kept; NULL clears it.
+void image_set_base_dir(const char* dir);
+
+// image_set_base_dir() with the directory part of a note's file path (NULL or no slash clears it)
+void image_set_base_dir_for_note(const char* note_path);
+
 // Resolve image path (absolute, relative, or remote URL) and return resolved path
 // raw_path: input path from markdown
-// base_dir: base directory for relative paths (or NULL to use session path)
+// base_dir: base directory for relative paths (or NULL to use the one from image_set_base_dir)
 // out: output buffer for resolved path
 // out_size: size of output buffer
 // Returns true on success

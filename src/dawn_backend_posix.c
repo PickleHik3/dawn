@@ -409,8 +409,21 @@ static bool query_kitty_keyboard(void)
     return len > 0 && strchr(buf, '?') != NULL;
 }
 
+//! Inside tmux or screen: an APC graphics sequence is not understood there and lands in the
+//! window title, so dawn sends none and reports no image capability.
+static bool in_multiplexer(void)
+{
+    const char* tmux = getenv("TMUX");
+    if (tmux && tmux[0])
+        return true;
+    const char* term = getenv("TERM");
+    return term && (strncmp(term, "tmux", 4) == 0 || strncmp(term, "screen", 6) == 0);
+}
+
 static bool query_kitty_graphics(void)
 {
+    if (in_multiplexer())
+        return false;
     query_write(ESC "_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA" ESC "\\",
         sizeof(ESC "_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA" ESC "\\") - 1);
 
@@ -707,7 +720,8 @@ static void posix_shutdown(void)
     }
 
     // Interactive mode cleanup
-    printf(ESC "_Ga=d,d=A,q=2" ESC "\\");
+    if (!in_multiplexer())
+        printf(ESC "_Ga=d,d=A,q=2" ESC "\\");
 
     if (posix_state.kitty_keyboard_enabled) {
         printf(KITTY_KBD_POP);
@@ -2389,6 +2403,8 @@ static bool keep_overlays = false;
 
 static void posix_image_frame_start(void)
 {
+    if (in_multiplexer())
+        return;
     if (keep_overlays) {
         // Only dawn's own layers: document images sit at z=-2 and popup masks at z=-1. Deleting
         // every placement would take the overlays too, and a kitty image left without any
@@ -2425,6 +2441,8 @@ static void posix_image_frame_end(void)
 
 static void posix_image_clear_all(void)
 {
+    if (in_multiplexer())
+        return;
     buf_append_str("\x1b_Ga=d,d=A,q=2\x1b\\");
     buf_flush();
     fflush(stdout);

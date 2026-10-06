@@ -40,6 +40,10 @@ void session_reset(void);
 //! The open note's file was renamed (a live title): the same note, so the conversation stays.
 void session_note_moved(const char* old_path, const char* new_path);
 
+//! Whether the AI can be reached at all: ai.json names the openai provider with a base_url, or the
+//! launcher wrote ~/.launcherctl/endpoint. A cheap file check, for the welcome screen.
+bool session_ai_configured(void);
+
 //! The chat was opened: prime now if the conversation has not read the note yet, loading the
 //! model if it has to (the writer asked for the AI, so a load is expected here).
 void session_chat_opened(void);

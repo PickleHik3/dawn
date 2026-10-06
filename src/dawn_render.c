@@ -7,6 +7,7 @@
 #include "dawn_modal.h"
 #include "dawn_notice.h"
 #include "dawn_search.h"
+#include "dawn_session.h"
 #include "dawn_theme.h"
 #include "dawn_timer.h"
 #include "dawn_toc.h"
@@ -201,7 +202,7 @@ void render_welcome(void)
     render_text_at(row, col2 + 2, " help", get_dim());
 
 #if HAS_LIBAI
-    if (app.ai_ready) {
+    if (app.ai_ready && session_ai_configured()) {
         row += 2;
         render_center_text(row, "✦ ai ready", get_accent());
     }
@@ -469,6 +470,49 @@ void render_help(void)
     platform_write_str("[tab] activity   [esc] close");
 }
 
+//! Display columns of a UTF-8 string, counting each code point as one column
+static int32_t hist_cols(const char* s, size_t len)
+{
+    int32_t n = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (((unsigned char)s[i] & 0xC0) != 0x80)
+            n++;
+    }
+    return n;
+}
+
+//! Write s cut to max_cols columns, ending in an ellipsis when it was cut
+//! @return columns written
+static int32_t hist_write_fit(const char* s, int32_t max_cols)
+{
+    size_t len = strlen(s);
+    if (max_cols <= 0)
+        return 0;
+    if (hist_cols(s, len) <= max_cols) {
+        platform_write_str(s);
+        return hist_cols(s, len);
+    }
+    int32_t keep_cols = max_cols - 1;
+    size_t i = 0;
+    int32_t n = 0;
+    while (i < len) {
+        size_t j = i + 1;
+        while (j < len && ((unsigned char)s[j] & 0xC0) == 0x80)
+            j++;
+        if (n + 1 > keep_cols)
+            break;
+        i = j;
+        n++;
+    }
+    char buf[256];
+    if (i > sizeof(buf) - 4)
+        i = sizeof(buf) - 4;
+    memcpy(buf, s, i);
+    memcpy(buf + i, "\xE2\x80\xA6", 4); // U+2026 and the terminator
+    platform_write_str(buf);
+    return n + 1;
+}
+
 void render_history(void)
 {
     render_clear();
@@ -510,17 +554,67 @@ void render_history(void)
 
         // Display title (or "Untitled") followed by date
         const char* title = entry->title ? entry->title : "Untitled";
-        char title_buf[64];
-        snprintf(title_buf, sizeof(title_buf), "%-30.30s  ", title);
-        platform_write_str(title_buf);
+        // Below ~70 columns the date loses its "at HH:MM", and the title is cut with an ellipsis
+        // so the whole row fits on one line.
+        const char* date = entry->date_str ? entry->date_str : "";
+        char date_short[64];
+        if (app.cols < 70) {
+            const char* at = strstr(date, " at ");
+            size_t dn = at ? (size_t)(at - date) : strlen(date);
+            if (dn >= sizeof(date_short))
+                dn = sizeof(date_short) - 1;
+            memcpy(date_short, date, dn);
+            date_short[dn] = '\0';
+            date = date_short;
+        }
+        int32_t date_w = hist_cols(date, strlen(date));
+        int32_t title_w = 30;
+        int32_t avail = app.cols - 6 - 2 - date_w - 1;
+        if (title_w > avail)
+            title_w = avail;
+        if (title_w < 4) {
+            title_w = 4;
+            date = "";
+        }
+        int32_t shown = hist_write_fit(title, title_w);
+        for (int32_t c = shown; c < title_w; c++)
+            platform_write_char(' ');
+        platform_write_str("  ");
         set_fg(get_dim());
-        platform_write_str(entry->date_str);
+        platform_write_str(date);
         set_bg(get_bg());
     }
 
+    // Key hints, least important first to go when the row would wrap
+    static const char* const hints[] = { "[j/k] select", "[o] open", "[t] title", "[d] delete", "[e] finder", "[esc] back" };
+    bool keep[6] = { true, true, true, true, true, true };
+    int32_t hint_room = app.cols - 4 - 1;
+    for (int32_t drop = 0; drop < 3; drop++) {
+        int32_t total = 0;
+        for (int32_t h = 0; h < 6; h++) {
+            if (keep[h])
+                total += (int32_t)strlen(hints[h]) + 3;
+        }
+        if (total - 3 <= hint_room)
+            break;
+        if (drop == 0)
+            keep[4] = false; // [e] finder
+        else if (drop == 1)
+            keep[2] = false; // [t] title
+        else
+            keep[3] = false; // [d] delete
+    }
+    char hint_buf[128];
+    size_t hn = 0;
+    hint_buf[0] = '\0';
+    for (int32_t h = 0; h < 6; h++) {
+        if (!keep[h])
+            continue;
+        hn += (size_t)snprintf(hint_buf + hn, sizeof(hint_buf) - hn, "%s%s", hn ? "   " : "", hints[h]);
+    }
     move_to(app.rows - 1, 4);
     set_fg(get_dim());
-    platform_write_str("[j/k] select   [o] open   [t] title   [d] delete   [e] finder   [esc] back");
+    hist_write_fit(hint_buf, hint_room);
 }
 
 void render_finished(void)

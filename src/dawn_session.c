@@ -18,6 +18,9 @@
 #include "dawn_utils.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <time.h>
 
@@ -1576,6 +1579,39 @@ void session_header(char* name, size_t name_cap, char* line, size_t line_cap)
     }
     if (g_primed && !g_cache_lost && same_path(g_conv_path, app.session_path))
         snprintf(line, line_cap, "has read this note");
+}
+
+//! Whether path names a file with at least one byte in it
+static bool file_nonempty(const char* path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+bool session_ai_configured(void)
+{
+    const char* home = getenv("HOME");
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    char path[1024];
+
+    // ai.json naming the openai provider with a base_url
+    if (xdg && xdg[0])
+        snprintf(path, sizeof(path), "%s/dawn/ai.json", xdg);
+    else
+        snprintf(path, sizeof(path), "%s/.config/dawn/ai.json", home ? home : ".");
+    FILE* f = fopen(path, "r");
+    if (f) {
+        char buf[4096];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        buf[n] = '\0';
+        if (strstr(buf, "\"openai\"") && strstr(buf, "\"base_url\""))
+            return true;
+    }
+
+    // The launcher's TAI endpoint
+    snprintf(path, sizeof(path), "%s/.launcherctl/endpoint", home ? home : ".");
+    return file_nonempty(path);
 }
 
 bool session_reading(void)
