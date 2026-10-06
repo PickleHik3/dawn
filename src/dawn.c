@@ -4063,7 +4063,7 @@ static bool tap_is_over_chat(const Layout* L, int32_t row, int32_t col)
 static size_t map_header_vrow_to_pos(const Block* block, int32_t target_vrow, int32_t target_col, int32_t wrap_width)
 {
     int32_t level = block->data.header.level;
-    int32_t scale = (level == 1) ? 2 : 1;
+    int32_t scale = (level == 1 && HAS_CAP(DAWN_CAP_TEXT_SIZING)) ? 2 : 1;
     int32_t available = wrap_width / scale;
     if (available < 1)
         available = 1;
@@ -4410,6 +4410,10 @@ static void handle_mouse_click(void)
     touch_state.last_tap_col = col;
 
     size_t pos = map_tap_to_buffer_pos(&L, row, col);
+    // The first tap of a double or triple tap put the cursor on this line, which now shows its
+    // raw syntax and has shifted the text under the finger; the later taps mean the same byte.
+    if (touch_state.tap_run >= 2)
+        pos = touch_state.press_pos;
 
     if (touch_state.tap_run == 2) {
         select_word_at(pos);
@@ -6107,6 +6111,8 @@ static void handle_input(void)
 
 bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 {
+    // Header rows in the block cache follow the terminal: scaled only with OSC 66 text sizing.
+    block_set_text_scaling(HAS_CAP(DAWN_CAP_TEXT_SIZING));
     app.timer_mins = DEFAULT_TIMER_MINUTES;
     app.mode = MODE_WELCOME;
     app.theme = THEME_DARK;

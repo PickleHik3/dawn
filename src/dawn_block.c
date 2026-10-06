@@ -7,6 +7,13 @@
 #include "dawn_utils.h"
 #include "dawn_wrap.h"
 
+static bool g_text_scaling = true; //!< See block_set_text_scaling()
+
+void block_set_text_scaling(bool on)
+{
+    g_text_scaling = on;
+}
+
 // Forward declarations for internal helpers
 static Block* block_cache_add(BlockCache* bc);
 static void block_free(Block* block);
@@ -966,10 +973,10 @@ static int32_t calculate_block_vrows(const Block* block, const GapBuffer* gb, in
     }
 
     case BLOCK_HEADER: {
-        // Headers may use text scaling
+        // Headers may use text scaling (only when the terminal draws them scaled)
         int32_t level = block->data.header.level;
         int32_t scale = 1;
-        if (level == 1)
+        if (level == 1 && g_text_scaling)
             scale = 2;
         else if (level == 2)
             scale = 1; // 1.5x rounds to 2 rows for 1 line

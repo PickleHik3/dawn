@@ -376,6 +376,10 @@ void block_apply_style(MdStyle s);
 //! @return scale factor (1-7, 1=normal)
 int32_t block_get_scale(MdStyle s);
 
+//! Whether headers are drawn scaled (OSC 66 text sizing). Off, an H1 takes one row, not two, so
+//! the cache's row counts match what render_writing() draws and taps map to the right line.
+void block_set_text_scaling(bool on);
+
 //! Get fractional scale info for a style
 //! @param s style flags
 //! @return fractional scale info
