@@ -57,6 +57,10 @@ void settings_load(void)
             app.theme = THEME_DARK;
     }
 
+    cJSON* nerd_j = cJSON_GetObjectItem(root, "nerd_font");
+    if (cJSON_IsBool(nerd_j))
+        app.nerd_font = cJSON_IsTrue(nerd_j);
+
     cJSON* timer_j = cJSON_GetObjectItem(root, "timer_mins");
     if (cJSON_IsNumber(timer_j)) {
         int32_t mins = (int32_t)timer_j->valuedouble;

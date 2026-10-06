@@ -3496,6 +3496,18 @@ static bool render_emoji(const RenderCtx* ctx, RenderState* rs, const InlineRun*
 
 //! Render line prefix elements using pre-parsed Block data
 //! Only renders prefix on FIRST line of block (rs->pos == block->start)
+
+//! The task box and its trailing space, two cells. In Termux Launcher's terminal the bundled Nerd
+//! Font draws nf-md-checkbox_blank_outline / nf-md-checkbox_marked (U+F0131 / U+F0132) two cells
+//! wide over that space, where ☐/☑ come out small; a terminal without the font would show a
+//! missing-glyph box, so the icons are only used when app.nerd_font says the font is there.
+static const char* task_glyph(bool checked)
+{
+    if (app.nerd_font)
+        return checked ? "\xf3\xb0\x84\xb2 " : "\xf3\xb0\x84\xb1 ";
+    return checked ? "☑ " : "☐ ";
+}
+
 static void render_line_prefixes(const RenderCtx* ctx, RenderState* rs,
     const Block* block, size_t line_end,
     size_t* seg_end, int32_t* seg_width)
@@ -3526,10 +3538,7 @@ static void render_line_prefixes(const RenderCtx* ctx, RenderState* rs,
                     out_char(' ');
                     rs->col_width++;
                 }
-                if (task_state == 2)
-                    out_str("☑ ");
-                else
-                    out_str("☐ ");
+                out_str(task_glyph(task_state == 2));
                 set_fg(get_fg());
                 rs->col_width += 2;
             }
@@ -6127,6 +6136,12 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 
     // Apply persisted preferences. CLI overrides win over what's on disk
     // so user-supplied flags are honored even if settings exist.
+    {
+        // Nerd Font icons by default only where the font is known to be installed: the launcher
+        // sets TERM_PROGRAM=termux-launcher. settings.json's "nerd_font" overrides either way.
+        const char* prog = getenv("TERM_PROGRAM");
+        app.nerd_font = prog && strcmp(prog, "termux-launcher") == 0;
+    }
     settings_load();
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;

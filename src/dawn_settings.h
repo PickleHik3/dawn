@@ -7,7 +7,7 @@
 
 //! Load persisted settings into app state.
 //! Reads <config_dir>/settings.json if present and applies any
-//! recognized keys (theme, timer_mins) on top of existing defaults.
+//! recognized keys (theme, timer_mins, nerd_font) on top of existing defaults.
 //! Missing or malformed files leave the defaults in place.
 void settings_load(void);
 
