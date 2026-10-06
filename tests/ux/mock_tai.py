@@ -23,9 +23,10 @@ EMBED_ID = "embeddinggemma-300m"
 
 
 class Knobs:
-    reply_mode = "plain"  # plain | tool | edit | error409 | notools | slow
+    reply_mode = "plain"  # plain | tool | edit | claim | error409 | notools | slow
     active_generation = False
     speak_seconds = 0.4
+    title_reply = "good"  # good | junk: what the quiet-lane title prompt gets back
 
 
 K = Knobs()
@@ -56,9 +57,9 @@ MODELS = {
     "object": "list",
     "data": [
         {"id": CHAT_ID, "object": "model", "_display_name": "Mock Chat 4B",
-         "_endpoint_context_window": 8192, "_size": 2_400_000_000, "_capabilities": ["text_generation"]},
+         "_endpoint_context_window": 8192, "_size": 2_400_000_000, "_capabilities": ["text_chat", "tool_use"]},
         {"id": "mock-tiny-1b", "object": "model", "_display_name": "Mock Tiny 1B",
-         "_endpoint_context_window": 4096, "_size": 700_000_000, "_capabilities": ["text_generation"]},
+         "_endpoint_context_window": 4096, "_size": 700_000_000, "_capabilities": ["text_chat", "tool_use"]},
         {"id": EMBED_ID, "object": "model", "_capabilities": ["text_embeddings"], "_revision": "r1",
          "_endpoint_matryoshka_dims": [128, 256, 512, 768], "_endpoint_max_batch": 16,
          "_endpoint_context_window": 2048},
@@ -166,7 +167,14 @@ class H(BaseHTTPRequestHandler):
             return self._sse([{"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
                 {"index": 0, "id": "call_1", "type": "function",
                  "function": {"name": "get_time", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]}])
-        if last_tool is not None:
+        if "Give the note a title" in user_text:
+            if K.title_reply == "junk":
+                text = "Mock reply to: '(From dawn, not typed by the user.) Give the note a title: two to six words', with \"quotes\" and a colon: here."
+            else:
+                text = "Fox Sentence Notes"
+        elif mode == "claim":
+            text = "I have added the task \"- [ ] buy milk\" to the note."
+        elif last_tool is not None:
             text = f"The tool said: {last_tool.get('content')!s}"[:200]
         elif mode == "edit":
             text = "Adding a line for you.\n<append_to_note>\n- [ ] line appended by the mock model\n</append_to_note>"

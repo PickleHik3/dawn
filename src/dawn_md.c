@@ -223,8 +223,9 @@ MdStyle md_check_delim(const GapBuffer* gb, size_t pos, size_t* dlen)
     }
 
     // Single caret for superscript
-    // Only a pair on one line counts: an opener needs a later ^ with something other than spaces
-    // between; a lone ^ (a "^L" in a table cell) stays literal.
+    // Only a pair on one line counts: an opener needs a later ^ with text and no whitespace
+    // between (Pandoc's rule), so "x^2^" is a superscript while "^L for contents" and a lone
+    // "^L" in a table cell stay literal.
     if (c == '^') {
         size_t ls = pos;
         while (ls > 0 && gap_at(gb, ls - 1) != '\n')
@@ -249,8 +250,9 @@ MdStyle md_check_delim(const GapBuffer* gb, size_t pos, size_t* dlen)
                     pair = text;
                     break;
                 }
-                if (d != ' ' && d != '\t')
-                    text = true;
+                if (d == ' ' || d == '\t')
+                    break; // whitespace inside: not a superscript span
+                text = true;
             }
             if (!pair)
                 continue;

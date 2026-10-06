@@ -383,7 +383,10 @@ static void title_done(const char* reply, void* user_data)
 
     char title[81];
     if (!title_valid(reply, note_untitled() ? NULL : note_title(), title, sizeof(title))) {
-        g_t.retry_at = now + TITLE_RETRY_MS; // keep the old title; try again later
+        // Keep the old title and try again after TITLE_RETRY_MS: a rejected reply does not
+        // count as a title, so it does not start the two-minute spacing either.
+        g_t.last_ms = 0;
+        g_t.retry_at = now + TITLE_RETRY_MS;
         return;
     }
     if (!note_untitled() && nearly_same(title, note_title()))
