@@ -70,7 +70,7 @@ Markdown renders as you write. Headers grow large. Bold becomes **bold**. Code g
 - Links and autolinks
 - Footnotes with jump-to-definition (`Ctrl+N`)
 - Emoji shortcodes (`:wave:`)
-- Smart typography (curly quotes, em-dashes, ellipses)
+- Smart typography (en and em dashes, ellipses; quotes stay as typed)
 
 ---
 
