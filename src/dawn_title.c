@@ -14,6 +14,7 @@
 
 #include <ctype.h>
 #include <string.h>
+#include <strings.h>
 
 #define TITLE_FIRST_CHARS 160 //!< The first title comes once the note has this much text
 #define TITLE_IDLE_MS 8000 //!< … and the writer paused this long
@@ -321,6 +322,47 @@ static void apply_title(const char* title)
     notice_post(NOTICE_AI_CHANGE, msg);
 }
 
+//! Whether the model's reply is usable as a title: one line of 2 to 6 words, at most 60 bytes,
+//! no echo of the prompt and not the current title. Surrounding quotes and a final period are
+//! stripped into out first.
+static bool title_valid(const char* reply, const char* current, char* out, size_t cap)
+{
+    while (isspace((unsigned char)*reply))
+        reply++;
+    size_t n = strlen(reply);
+    while (n > 0 && isspace((unsigned char)reply[n - 1]))
+        n--;
+    static const char* const quotes[][2] = { { "\"", "\"" }, { "'", "'" },
+        { "\xe2\x80\x9c", "\xe2\x80\x9d" }, { "\xe2\x80\x98", "\xe2\x80\x99" } };
+    for (size_t i = 0; i < sizeof(quotes) / sizeof(quotes[0]); i++) {
+        size_t a = strlen(quotes[i][0]), b = strlen(quotes[i][1]);
+        if (n >= a + b && strncmp(reply, quotes[i][0], a) == 0 && strncmp(reply + n - b, quotes[i][1], b) == 0) {
+            reply += a;
+            n -= a + b;
+            break;
+        }
+    }
+    if (n > 0 && reply[n - 1] == '.')
+        n--;
+    if (n == 0 || n > 60 || n >= cap || memchr(reply, '\n', n) || memchr(reply, '\r', n))
+        return false;
+    memcpy(out, reply, n);
+    out[n] = '\0';
+    if (strncasecmp(out, "title:", 6) == 0 || strncmp(out, "(From dawn", 10) == 0)
+        return false;
+    size_t words = 0;
+    bool in_word = false;
+    for (const char* p = out; *p; p++) {
+        bool space = isspace((unsigned char)*p);
+        if (!space && !in_word)
+            words++;
+        in_word = !space;
+    }
+    if (words < 2 || words > 6)
+        return false;
+    return !current || strcmp(out, current) != 0;
+}
+
 static void title_done(const char* reply, void* user_data)
 {
     (void)user_data;
@@ -340,8 +382,10 @@ static void title_done(const char* reply, void* user_data)
     first_heading(g_t.heading_at_last, sizeof(g_t.heading_at_last));
 
     char title[81];
-    if (!ai_clean_title(reply, title, sizeof(title)))
+    if (!title_valid(reply, note_untitled() ? NULL : note_title(), title, sizeof(title))) {
+        g_t.retry_at = now + TITLE_RETRY_MS; // keep the old title; try again later
         return;
+    }
     if (!note_untitled() && nearly_same(title, note_title()))
         return; // nearly the old one: dropped silently
     g_t.count++;

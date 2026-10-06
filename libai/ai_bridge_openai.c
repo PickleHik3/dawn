@@ -594,6 +594,22 @@ static bool is_variant_id(const char* id, cJSON* data)
     return false;
 }
 
+//! Whether a /models entry can chat: when it lists "_capabilities" it must include "text_chat"
+//! (embedding-only models do not); an entry without the field is kept.
+static bool entry_can_chat(cJSON* entry)
+{
+    cJSON* caps = cJSON_GetObjectItemCaseSensitive(entry, "_capabilities");
+    if (!cJSON_IsArray(caps))
+        return true;
+    cJSON* c;
+    cJSON_ArrayForEach(c, caps)
+    {
+        if (cJSON_IsString(c) && strcmp(c->valuestring, "text_chat") == 0)
+            return true;
+    }
+    return false;
+}
+
 static void* fetch_models_thread(void* arg)
 {
     (void)arg;
@@ -613,7 +629,8 @@ static void* fetch_models_thread(void* arg)
                 if (count >= AI_BRIDGE_MAX_MODELS)
                     break;
                 cJSON* id = cJSON_GetObjectItemCaseSensitive(entry, "id");
-                if (!cJSON_IsString(id) || !id->valuestring[0] || is_variant_id(id->valuestring, data))
+                if (!cJSON_IsString(id) || !id->valuestring[0] || is_variant_id(id->valuestring, data)
+                    || !entry_can_chat(entry))
                     continue;
                 ai_bridge_model_info_t* m = &found[count++];
                 memset(m, 0, sizeof(*m));
