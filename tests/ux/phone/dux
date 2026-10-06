@@ -1,0 +1,3 @@
+#!/bin/bash
+# local: dux <<'STEPS' ... STEPS   (steps on stdin)
+S=$(dirname "$0"); cat > $S/steps.txt; adb -s 100.101.173.85:5555 push $S/steps.txt /data/local/tmp/dux-steps.txt >/dev/null; adb -s 100.101.173.85:5555 shell chmod 644 /data/local/tmp/dux-steps.txt; timeout ${DUX_TIMEOUT:-300} adb -s 100.101.173.85:5555 shell run-as com.termux /data/data/com.termux/files/usr/bin/bash /data/local/tmp/dux.sh 2>&1
