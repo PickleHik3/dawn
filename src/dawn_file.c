@@ -481,9 +481,18 @@ static void load_content(char* content, size_t size, const char* path)
     // Reset editor state
     free(app.session_path);
     app.session_path = path ? dawn_strdup(path) : NULL;
+    image_set_base_dir_for_note(app.session_path);
     // Only a file that came with frontmatter gets it back on save; a plain file stays plain.
     app.write_fm = fm != NULL;
     app.cursor = 0;
+    if (fm) {
+        // Past the frontmatter's blank line(s): offset 0 would draw as a bar on an empty row above the title
+        size_t blank = 0;
+        while (blank < gap_len(&app.text) && gap_at(&app.text, blank) == '\n')
+            blank++;
+        if (blank < gap_len(&app.text))
+            app.cursor = blank;
+    }
     app.scroll_y = 0;
     app.selecting = false;
     undo_reset();

@@ -355,8 +355,21 @@ static inline Block* get_image_block_at(size_t pos)
 //! Check if we just typed a list marker and should auto-insert a space
 //! Called after inserting a character. Checks if cursor is right after a list marker.
 //! @param key the character that was just typed
+static size_t auto_list_space_cursor = (size_t)-1; //!< Cursor just after the last auto-inserted marker space
+
 static inline void check_auto_list_space(int32_t key)
 {
+    if (key == ' ') {
+        // The writer typed their own space right after the auto-space: swallow it
+        if (auto_list_space_cursor != (size_t)-1 && auto_list_space_cursor + 1 == app.cursor
+            && app.cursor >= 2 && gap_at(&app.text, app.cursor - 2) == ' ') {
+            gap_delete(&app.text, app.cursor - 1, 1);
+            app.cursor--;
+        }
+        auto_list_space_cursor = (size_t)-1;
+        return;
+    }
+    auto_list_space_cursor = (size_t)-1;
     // Only check for '.' ')' '-' '*' '+'
     if (key != '.' && key != ')' && key != '-' && key != '*' && key != '+')
         return;
@@ -379,6 +392,7 @@ static inline void check_auto_list_space(int32_t key)
         // Unordered list: marker must be at p, cursor right after it
         if (p + 1 == app.cursor && gap_at(&app.text, p) == (char)key) {
             gap_insert(&app.text, app.cursor++, ' ');
+            auto_list_space_cursor = app.cursor;
         }
         // For '-', if user typed '--' but auto-space got in the way, undo it
         // Pattern: "- -" where cursor is after second dash
@@ -399,6 +413,7 @@ static inline void check_auto_list_space(int32_t key)
         // Need at least one digit, and cursor should be right after the marker
         if (p > digit_start && p + 1 == app.cursor && gap_at(&app.text, p) == (char)key) {
             gap_insert(&app.text, app.cursor++, ' ');
+            auto_list_space_cursor = app.cursor;
         }
     }
 }
@@ -845,20 +860,19 @@ static void check_auto_newline(char typed_char)
         if (gap_at(&app.text, app.cursor - 1) == '`' && gap_at(&app.text, app.cursor - 2) == '`' && gap_at(&app.text, app.cursor - 3) == '`') {
             size_t line_start = find_line_start(app.cursor);
             if (line_start + 3 == app.cursor) {
-                bool found_opening = false;
-                size_t pos = line_start;
-                while (pos >= 2) {
-                    pos--;
-                    if (gap_at(&app.text, pos) == '\n' || pos == 0) {
-                        size_t check_pos = (gap_at(&app.text, pos) == '\n') ? pos + 1 : pos;
-                        if (check_pos + 3 <= len && gap_at(&app.text, check_pos) == '`' && gap_at(&app.text, check_pos + 1) == '`' && gap_at(&app.text, check_pos + 2) == '`') {
-                            found_opening = true;
-                            break;
-                        }
-                    }
-                    if (pos == 0)
-                        break;
+                // Only a fence that closes an open block gets the newline: count the fence lines
+                // before this one, an odd count means a block is open. An opening fence stays as is,
+                // so what is typed after it becomes the info string.
+                size_t fences = 0;
+                size_t ls = 0;
+                while (ls < line_start) {
+                    if (ls + 3 <= len && gap_at(&app.text, ls) == '`' && gap_at(&app.text, ls + 1) == '`' && gap_at(&app.text, ls + 2) == '`')
+                        fences++;
+                    while (ls < line_start && gap_at(&app.text, ls) != '\n')
+                        ls++;
+                    ls++;
                 }
+                bool found_opening = (fences % 2) == 1;
                 if (found_opening) {
                     gap_insert(&app.text, app.cursor, '\n');
                     app.cursor++;
@@ -3926,6 +3940,7 @@ static void begin_session(char* path)
 
     free(app.session_path);
     app.session_path = path;
+    image_set_base_dir_for_note(path);
 
     fm_free(app.frontmatter);
     app.frontmatter = NULL;
@@ -4293,6 +4308,18 @@ static void select_word_at(size_t pos)
     if (probe >= len || !is_word_byte(gap_at(&app.text, probe))) {
         if (probe > 0 && is_word_byte(gap_at(&app.text, probe - 1)))
             probe--;
+    }
+    // Hidden inline syntax (`**`, `_`, `~~`, `==`, backticks, brackets) in front of a word is not a
+    // word of its own: start from the first word byte after it.
+    if (probe < len && !is_word_byte(gap_at(&app.text, probe))) {
+        size_t q = probe;
+        if (gap_at(&app.text, q) == ' ')
+            q++;
+        size_t syntax_start = q;
+        while (q < len && strchr("*_~=`[]", gap_at(&app.text, q)) && gap_at(&app.text, q) != '\0')
+            q++;
+        if (q > syntax_start && q < len && is_word_byte(gap_at(&app.text, q)))
+            probe = q;
     }
     if (probe >= len) {
         app.selecting = false;

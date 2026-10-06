@@ -223,9 +223,44 @@ MdStyle md_check_delim(const GapBuffer* gb, size_t pos, size_t* dlen)
     }
 
     // Single caret for superscript
+    // Only a pair on one line counts: an opener needs a later ^ with something other than spaces
+    // between; a lone ^ (a "^L" in a table cell) stays literal.
     if (c == '^') {
-        *dlen = 1;
-        return MD_SUP;
+        size_t ls = pos;
+        while (ls > 0 && gap_at(gb, ls - 1) != '\n')
+            ls--;
+        bool open = false;
+        for (size_t i = ls; i <= pos; i++) {
+            if (gap_at(gb, i) != '^')
+                continue;
+            if (open) {
+                open = false;
+                if (i == pos) {
+                    *dlen = 1;
+                    return MD_SUP;
+                }
+                continue;
+            }
+            bool pair = false;
+            bool text = false;
+            for (size_t j = i + 1; j < len && gap_at(gb, j) != '\n'; j++) {
+                char d = gap_at(gb, j);
+                if (d == '^') {
+                    pair = text;
+                    break;
+                }
+                if (d != ' ' && d != '\t')
+                    text = true;
+            }
+            if (!pair)
+                continue;
+            open = true;
+            if (i == pos) {
+                *dlen = 1;
+                return MD_SUP;
+            }
+        }
+        return 0;
     }
 
     // Backtick for inline code
