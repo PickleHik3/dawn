@@ -3503,9 +3503,15 @@ static bool render_emoji(const RenderCtx* ctx, RenderState* rs, const InlineRun*
 //! missing-glyph box, so the icons are only used when app.nerd_font says the font is there.
 static const char* task_glyph(bool checked)
 {
-    if (app.nerd_font)
-        return checked ? "\xf3\xb0\x84\xb2 " : "\xf3\xb0\x84\xb1 ";
+    if (app.nerd_font) // the icon spreads over the first space; the second keeps a gap to the text
+        return checked ? "\xf3\xb0\x84\xb2  " : "\xf3\xb0\x84\xb1  ";
     return checked ? "☑ " : "☐ ";
+}
+
+//! How many cells task_glyph() takes: the box and its gap.
+static inline int32_t task_glyph_cols(void)
+{
+    return app.nerd_font ? 3 : 2;
 }
 
 static void render_line_prefixes(const RenderCtx* ctx, RenderState* rs,
@@ -3540,7 +3546,7 @@ static void render_line_prefixes(const RenderCtx* ctx, RenderState* rs,
                 }
                 out_str(task_glyph(task_state == 2));
                 set_fg(get_fg());
-                rs->col_width += 2;
+                rs->col_width += task_glyph_cols();
             }
         } else {
             // Regular list item
@@ -4273,7 +4279,7 @@ static bool try_toggle_task_box(const Layout* L, int32_t screen_row, int32_t scr
         return false; // only the first line carries the box
 
     int32_t indent = blk->data.list.indent;
-    if (col < indent || col >= indent + 2)
+    if (col < indent || col >= indent + task_glyph_cols())
         return false;
 
     // The raw marker is "- [ ] "/"- [x] " starting at indent; the check char sits 3 past that
