@@ -69,6 +69,9 @@ static void ai_set_status(const char* text)
 //! paragraph of its own instead of continuing that line.
 static bool g_after_step;
 
+//! Edits made to the note during this reply, by tool or by tagged block.
+static int g_edits_this_reply;
+
 //! Put a line of its own at the end of the reply that is streaming: what a tool did, or that the
 //! user stopped it. The panel draws these dim, by their first character.
 static void chat_step(const char* line)
@@ -592,6 +595,7 @@ static const char* edit_note(EditKind kind, const char* text)
     default:
         return "Unknown edit.";
     }
+    g_edits_this_reply++;
     return NULL;
 }
 
@@ -603,8 +607,12 @@ static void edit_line(EditKind kind, const char* error, char* line, size_t size)
         snprintf(line, size, "✗ Couldn't %s: %s", EDITS[kind].name, error);
     else if (kind == EDIT_TITLE)
         snprintf(line, size, "✓ Renamed the note to \"%s\".", note_title());
-    else if (g_version_path[0])
-        snprintf(line, size, "✓ %s The previous version is saved in %s", EDITS[kind].done, g_version_path);
+    else if (g_version_path[0]) {
+        snprintf(line, size, "✓ %s The previous version is kept.", EDITS[kind].done);
+        char msg[PATH_MAX + 32];
+        snprintf(msg, sizeof(msg), "previous version · %s", g_version_path);
+        notice_post(NOTICE_AI_CHANGE, msg);
+    }
     else
         snprintf(line, size, "✓ %s", EDITS[kind].done);
 }
@@ -661,6 +669,26 @@ static bool find_edit_block(const char* from, EditKind* kind, const char** open,
     return best != NULL;
 }
 
+//! Whether text holds a complete edit block.
+static bool has_edit_block(const char* text)
+{
+    EditKind kind;
+    const char *open, *body, *close, *after;
+    return find_edit_block(text, &kind, &open, &body, &close, &after);
+}
+
+//! Whether a reply says it changed the note ("I have added ...", "appended ..."), case-insensitively.
+static bool claims_an_edit(const char* text)
+{
+    static const char* const phrases[] = { "i have added", "i added", "i've added", "i inserted",
+        "i have inserted", "i replaced", "i have replaced", "added the task", "added a line", "appended" };
+    for (size_t i = 0; i < sizeof(phrases) / sizeof(phrases[0]); i++)
+        for (const char* at = text; *at; at++)
+            if (strncasecmp(at, phrases[i], strlen(phrases[i])) == 0)
+                return true;
+    return false;
+}
+
 //! Models that cannot call tools edit by writing <replace_note>…</replace_note> and the like in
 //! the reply. Once the reply is complete, make those edits and show what was done in their place.
 static void apply_reply_edits(void)
@@ -668,8 +696,13 @@ static void apply_reply_edits(void)
     if (app.chat_count == 0 || app.chat_msgs[app.chat_count - 1].is_user)
         return;
     ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
-    if (!m->text || !strchr(m->text, '<'))
+    if (!m->text)
         return;
+    if (!strchr(m->text, '<') || !has_edit_block(m->text)) {
+        if (g_edits_this_reply == 0 && claims_an_edit(m->text))
+            chat_step("Nothing was changed in the note.");
+        return;
+    }
 
     size_t cap = m->len + 1;
     char* shown = malloc(cap);
@@ -781,6 +814,7 @@ void ai_send(const char* prompt)
     app.ai_turn_started = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
     ai_set_status("thinking…");
     g_after_step = false;
+    g_edits_this_reply = 0;
     free(g_turn_path);
     g_turn_path = app.session_path ? dawn_strdup(app.session_path) : NULL;
     free(g_turn_prompt);
@@ -834,6 +868,8 @@ static const char* const SYSTEM_PROMPT = "You are the writing companion inside D
                                          "<insert_at_cursor>the new text</insert_at_cursor> to add text where the user's cursor is\n"
                                          "<append_to_note>the new text</append_to_note> to add text at the end of the note\n"
                                          "<set_title>a short title</set_title> to rename the note\n"
+                                         "For example, to add a task, reply exactly:\n<append_to_note>\n- [ ] buy milk\n</append_to_note>\n"
+                                         "Never say you changed the note unless you wrote a block like this or called the tool.\n"
                                          "Write the new text in Markdown, and after the block say in one short sentence what you changed. "
                                          "Dawn makes the change and the user can undo it with Ctrl+Z. "
                                          "If tools with these same names are available, you may call them instead of writing blocks.\n\n"
