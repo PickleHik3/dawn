@@ -494,7 +494,8 @@ static char* build_request(const ai_embed_request_t* req, bool base64)
 }
 
 //! Fill *out from a 200 reply; false when it does not hold exactly one well-formed vector per
-//! input, all of one length.
+//! input, all of one length. That length may differ from req->dims: the caller checks, since a
+//! reply of another length means the model was swapped, not that the reply is broken.
 static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_embed_result_t* out)
 {
     cJSON* root = body ? cJSON_Parse(body) : NULL;
@@ -519,7 +520,7 @@ static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_em
         seen[at] = true;
         int32_t n;
         float* v = decode_embedding(cJSON_GetObjectItemCaseSensitive(item, "embedding"), &n);
-        if (!v || (req->dims > 0 && n != req->dims) || (out->dims > 0 && n != out->dims)) {
+        if (!v || (out->dims > 0 && n != out->dims)) {
             free(v);
             ok = false;
             break;

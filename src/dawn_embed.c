@@ -44,6 +44,9 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #define EMBED_DISCOVER_OK_MS (10 * 60 * 1000) //!< Look at /v1/models again (catches `_revision`)
 #define EMBED_DISCOVER_NONE_MS (5 * 60 * 1000) //!< ...and this often while there is no embedder
 #define EMBED_DISCOVER_FAIL_MS (60 * 1000) //!< ...and after the endpoint did not answer
+#define EMBED_SWAP_BACKOFF_MS 5000 //!< First wait before asking again when /v1/embeddings turns the
+                                   //!< embedder away a second time; doubles each time
+#define EMBED_SWAP_BACKOFF_MAX_MS (5 * 60 * 1000) //!< ...up to this
 #define EMBED_RESCAN_MS (5 * 60 * 1000) //!< Rescan the notes directory for changed files
 #define EMBED_IDLE_WAIT_MS 30000 //!< Longest sleep with nothing to do
 #define EMBED_BUSY_POLL_MS 3000 //!< How often to re-check a running chat reply
@@ -410,6 +413,17 @@ static bool set_embedder(const ai_embedder_t* emb)
     return changed;
 }
 
+//! The embedder kept its id and revision but its replies changed length (it lists no sizes, so
+//! the length was learned): a new epoch at the new length.
+static void adopt_dims(int32_t dims)
+{
+    pthread_mutex_lock(&g_lock);
+    g.dims = dims;
+    g.epoch++;
+    pthread_mutex_unlock(&g_lock);
+    atomic_store(&g.news, true);
+}
+
 static void clear_embedder(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -563,6 +577,7 @@ typedef enum { JOB_DONE, JOB_FAILED, JOB_NO_EMBEDDER, JOB_CANCELLED } JobResult;
 typedef struct {
     ai_embedder_t emb;
     int32_t dims; //!< 0 until the first reply when the model lists no Matryoshka sizes
+    int32_t reply_dims; //!< The length of a reply that did not match dims, 0 for none
     float token_scale; //!< The model's tokens over the estimate
     bool calibrated; //!< /v1/tokenize was tried for this embedder
     int64_t last_request_ms;
@@ -647,6 +662,8 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
         switch (st) {
         case AI_EMBED_OK:
             if (res->dims < 1 || res->dims > EMBED_MAX_DIMS || (w->dims > 0 && res->dims != w->dims)) {
+                if (res->dims >= 1 && res->dims <= EMBED_MAX_DIMS)
+                    w->reply_dims = res->dims;
                 ai_embed_result_free(res);
                 return JOB_NO_EMBEDDER; // the model changed under us: look again
             }
@@ -844,6 +861,7 @@ static JobResult index_pass(Worker* w, const char* path, const char* body, size_
             }
         }
         if (res.dims != idx.dims) {
+            w->reply_dims = res.dims;
             ai_embed_result_free(&res);
             result = JOB_NO_EMBEDDER;
             break;
@@ -892,16 +910,19 @@ fail:
     return result;
 }
 
-//! Bring one note's index up to date. body is taken over (NULL: read the file). Pieces whose text
-//! and heading are unchanged keep their vectors; only the rest are embedded. When the server cut a
-//! piece to fit its window, the result is kept but the note is cut again at a token scale 25%
-//! higher (once), so its pieces come out small enough.
-static JobResult index_note(Worker* w, const char* path, char* body, size_t len, const char* live_title,
-    int64_t mtime, uint64_t size)
+//! Bring one note's index up to date. live_body is the note's text when dawn handed it over
+//! (borrowed), or NULL to read the file. Pieces whose text and heading are unchanged keep their
+//! vectors; only the rest are embedded. When the server cut a piece to fit its window, the result
+//! is kept but the note is cut again at a token scale 25% higher (once), so its pieces come out
+//! small enough.
+static JobResult index_note(Worker* w, const char* path, const char* live_body, size_t len,
+    const char* live_title, int64_t mtime, uint64_t size)
 {
     char title[EMBED_TITLE_MAX];
+    char* owned = NULL;
+    const char* body = live_body;
     if (!body) {
-        body = read_note(path, title, sizeof(title), &len);
+        body = owned = read_note(path, title, sizeof(title), &len);
         if (!body)
             return JOB_FAILED;
     } else if (live_title && live_title[0]) {
@@ -910,7 +931,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
         embed_note_title(body, len, path, title, sizeof(title));
     }
     if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
-        free(body);
+        free(owned);
         return JOB_FAILED;
     }
 
@@ -918,7 +939,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     JobResult r = index_pass(w, path, body, len, title, mtime, size, w->token_scale, false, &truncated);
     if (r == JOB_DONE && truncated > 0)
         r = index_pass(w, path, body, len, title, mtime, size, w->token_scale * 1.25f, true, &truncated);
-    free(body);
+    free(owned);
     return r;
 }
 
@@ -954,6 +975,38 @@ static bool take_live(LiveText* out, int64_t now, int64_t* next_ms)
     return found;
 }
 
+static void live_free(LiveText* t)
+{
+    free(t->path);
+    free(t->title);
+    free(t->body);
+    memset(t, 0, sizeof(*t));
+}
+
+//! Put a live text the embedder could not take back at the front of the queue (taken over), unless
+//! a newer text for its path has arrived since or the queue is full: then it is dropped, and the
+//! newer text or the next scan stands in for it.
+static void live_requeue(LiveText* t)
+{
+    bool kept = false;
+    pthread_mutex_lock(&g_lock);
+    bool newer = false;
+    for (int32_t i = 0; i < g.live_count; i++)
+        if (strcmp(g.live[i].path, t->path) == 0)
+            newer = true;
+    if (!newer && g.live_count < EMBED_LIVE_MAX) {
+        memmove(&g.live[1], &g.live[0], sizeof(LiveText) * (size_t)g.live_count);
+        g.live[0] = *t;
+        g.live_count++;
+        kept = true;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (kept)
+        memset(t, 0, sizeof(*t));
+    else
+        live_free(t);
+}
+
 static void* worker_main(void* arg)
 {
     (void)arg;
@@ -962,7 +1015,9 @@ static void* worker_main(void* arg)
 
     Worker w = { .token_scale = 1.0f };
     bool have = false;
+    bool stalled = false; //!< /v1/embeddings turned the embedder away: index nothing until discovery
     int64_t next_discover = 0, next_scan = 0;
+    int64_t swap_backoff = 0; //!< Wait before the next rediscovery after a turn-away (0: at once)
     ScanList scan = { 0 };
 
     while (!atomic_load(&g.stop)) {
@@ -974,26 +1029,39 @@ static void* worker_main(void* arg)
             if (st == AI_EMBED_CANCELLED)
                 break;
             if (st == AI_EMBED_OK) {
-                if (set_embedder(&found) || !have) {
+                // Only a different embedder (or one back from being gone) means a rebuild and a
+                // rescan; the same one listed again just lets the stalled work carry on.
+                bool changed = set_embedder(&found);
+                int32_t dims = embedder_dims(&found);
+                if (!changed && have && dims == 0 && w.reply_dims > 0 && w.reply_dims != w.dims) {
+                    dims = w.reply_dims; // swapped behind the same name: rebuild at the new length
+                    adopt_dims(dims);
+                    changed = true;
+                }
+                w.reply_dims = 0;
+                if (changed || !have) {
                     w.emb = found;
-                    w.dims = embedder_dims(&found);
+                    w.dims = dims;
                     w.calibrated = false;
                     w.token_scale = 1.0f;
                     next_scan = 0;
+                    swap_backoff = 0;
                 }
                 w.emb.max_batch = found.max_batch;
                 w.emb.context_window = found.context_window;
                 have = true;
+                stalled = false;
                 next_discover = now + EMBED_DISCOVER_OK_MS;
             } else if (st == AI_EMBED_NONE) {
                 clear_embedder();
                 have = false;
+                stalled = false;
                 next_discover = now + EMBED_DISCOVER_NONE_MS;
             } else {
                 next_discover = now + EMBED_DISCOVER_FAIL_MS;
             }
         }
-        if (!have) {
+        if (!have || stalled) {
             worker_wait(next_discover - now);
             continue;
         }
@@ -1003,14 +1071,14 @@ static void* worker_main(void* arg)
         }
 
         JobResult r;
-        LiveText live;
+        LiveText live = { 0 };
+        bool is_live = false;
         int64_t live_wait;
         if (take_live(&live, now, &live_wait)) {
             // Live text has no file time: a later scan re-reads the file and, finding the same
             // text, only records its time.
+            is_live = true;
             r = index_note(&w, live.path, live.body, live.len, live.title, 0, 0);
-            free(live.path);
-            free(live.title);
         } else if (scan.next < scan.count) {
             ScanEntry* se = &scan.items[scan.next++];
             r = index_note(&w, se->path, NULL, 0, NULL, se->mtime, se->size);
@@ -1024,12 +1092,28 @@ static void* worker_main(void* arg)
             continue;
         }
 
+        // A note the embedder turned away is not the note's fault: it goes back in line.
+        bool again = r == JOB_NO_EMBEDDER;
+        if (again && is_live)
+            live_requeue(&live);
+        else if (again)
+            scan.next--;
+        else if (is_live)
+            live_free(&live);
+
         if (r == JOB_CANCELLED)
             break;
+        if (r == JOB_DONE)
+            swap_backoff = 0;
         if (r == JOB_NO_EMBEDDER) {
-            clear_embedder();
-            have = false;
-            next_discover = now_ms() + 5000; // look again soon: it may have been replaced
+            // 404 model_not_found, or vectors of another length: the model may have been swapped.
+            // Ask /v1/models at once, then back off 5 s, 10 s, ... 5 min while it keeps happening.
+            // Discovery decides whether this is a new embedder; the notes are not rescanned for it.
+            stalled = true;
+            next_discover = now_ms() + swap_backoff;
+            swap_backoff = swap_backoff == 0             ? EMBED_SWAP_BACKOFF_MS
+                : swap_backoff * 2 > EMBED_SWAP_BACKOFF_MAX_MS ? EMBED_SWAP_BACKOFF_MAX_MS
+                                                         : swap_backoff * 2;
         }
     }
 

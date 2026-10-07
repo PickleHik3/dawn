@@ -85,7 +85,8 @@ ai_embed_status_t ai_embed_tokenize(const char* model, const char* text, size_t 
     const atomic_bool* cancel);
 
 //! Embed a batch (POST /v1/embeddings, base64 vectors, falling back to float arrays). On
-//! AI_EMBED_OK *out holds count vectors in request order, each of one length (dims when asked).
+//! AI_EMBED_OK *out holds count vectors in request order, all of one length: dims when asked, but
+//! the caller checks out->dims, since a model swapped behind the endpoint may answer differently.
 //! On AI_EMBED_RETRY *retry_after_ms says how long to wait (Retry-After, or a default).
 ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_result_t* out,
     int32_t* retry_after_ms, const atomic_bool* cancel);
