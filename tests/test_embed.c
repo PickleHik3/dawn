@@ -81,8 +81,16 @@ static void test_body_offset_and_title(void)
     embed_note_title(h1, strlen(h1), "/n/x.md", title, sizeof(title));
     CHECK(strcmp(title, "Real title") == 0);
 
-    const char* plain = "no headings here\n";
-    embed_note_title(plain, strlen(plain), "/home/u/notes/20260928-1012.md", title, sizeof(title));
+    // No title and no heading: the first line names the note.
+    const char* plain = "\n\nno headings here\n";
+    CHECK(embed_note_title(plain, strlen(plain), "/home/u/notes/20260928-1012.md", title, sizeof(title))
+        == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "no headings here") == 0);
+
+    // Nothing at all: the file name.
+    const char* blank = "---\ntitle: Untitled\n---\n\n  \n";
+    CHECK(embed_note_title(blank, strlen(blank), "/home/u/notes/20260928-1012.md", title, sizeof(title))
+        == EMBED_TITLE_FILE_NAME);
     CHECK(strcmp(title, "20260928-1012") == 0);
 
     // No closing delimiter: not frontmatter.
@@ -96,6 +104,44 @@ static void test_body_offset_and_title(void)
     const char* arabic = "---\ntitle: مرحبا\n---\n";
     embed_note_title(arabic, strlen(arabic), NULL, small, sizeof(small));
     CHECK(strlen(small) == 4); // two 2-byte letters fit in 5 bytes, not a half third
+}
+
+static void test_untitled_named_by_content(void)
+{
+    char title[EMBED_TITLE_MAX];
+    // dawn's placeholder title gives way to the heading...
+    const char* h = "---\ntitle: Untitled\n---\nIntro line.\n\n# Visa appointment\n\nBring the passport.\n";
+    CHECK(embed_note_title(h, strlen(h), "/n/Untitled.md", title, sizeof(title)) == EMBED_TITLE_HEADING);
+    CHECK(strcmp(title, "Visa appointment") == 0);
+
+    // ...or, without one, to the first line with text, markdown markers dropped.
+    const char* task = "---\ntitle: \"Untitled\"\n---\n\n```\n- [ ] Buy milk and eggs before Friday\n";
+    CHECK(embed_note_title(task, strlen(task), "/n/Untitled.md", title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "Buy milk and eggs before Friday") == 0);
+    const char* quote = "> ## Ideas for the trip\n";
+    embed_note_title(quote, strlen(quote), NULL, title, sizeof(title));
+    CHECK(strcmp(title, "Ideas for the trip") == 0);
+
+    // An empty title counts as none too; a "# Untitled" heading is skipped like the placeholder.
+    const char* empty = "---\ntitle: \"\"\n---\n# Untitled\nFirst real words\n";
+    CHECK(embed_note_title(empty, strlen(empty), "/n/x.md", title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "First real words") == 0);
+
+    // A long first line is cut to 48 bytes, never inside a character.
+    const char* longline = "مرحبا بكم في الملاحظة الطويلة جدا التي لا تنتهي أبدا\n";
+    CHECK(embed_note_title(longline, strlen(longline), NULL, title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    size_t n = strlen(title);
+    CHECK(n > 0 && n <= EMBED_TITLE_LINE_MAX);
+    CHECK(((unsigned char)longline[n] & 0xC0) != 0x80);
+    CHECK(strncmp(title, longline, n) == 0);
+    const char* latin = "This first line goes on for well over forty-eight bytes of text\n";
+    embed_note_title(latin, strlen(latin), NULL, title, sizeof(title));
+    CHECK(strlen(title) <= EMBED_TITLE_LINE_MAX && strncmp(title, "This first line goes on", 23) == 0);
+
+    // A real frontmatter title is kept as it is.
+    const char* named = "---\ntitle: Untitled draft\n---\nbody\n";
+    CHECK(embed_note_title(named, strlen(named), NULL, title, sizeof(title)) == EMBED_TITLE_FRONTMATTER);
+    CHECK(strcmp(title, "Untitled draft") == 0);
 }
 
 static void test_normalize_and_estimate(void)
@@ -503,6 +549,7 @@ static void test_topk_and_cosine(void)
 int main(void)
 {
     test_body_offset_and_title();
+    test_untitled_named_by_content();
     test_normalize_and_estimate();
     test_chunk_headings_and_merge();
     test_chunk_merge_limit();

@@ -25,6 +25,7 @@
 #define EMBED_REVISION_MAX 64 //!< `_revision`, bytes including the NUL
 #define EMBED_PATH_MAX 1024 //!< Note path, bytes including the NUL; longer paths are not indexed
 #define EMBED_TITLE_MAX 160 //!< Note title, bytes including the NUL
+#define EMBED_TITLE_LINE_MAX 48 //!< A title taken from a note's first line is cut to this many bytes
 #define EMBED_HEADING_MAX 160 //!< A piece's heading, bytes including the NUL
 #define EMBED_FILE_MAX (32u << 20) //!< Largest index file read back; anything bigger is discarded
 #define EMBED_NOTE_MAX (8u << 20) //!< Largest note indexed, in bytes
@@ -48,10 +49,22 @@ size_t embed_body_offset(const char* text, size_t len);
 //! CRLF and lone CR to LF, in place, as normalize_line_endings() does. Returns the new length.
 size_t embed_normalize_newlines(char* buf, size_t len);
 
+//! Where embed_note_title() found the title.
+typedef enum {
+    EMBED_TITLE_NONE, //!< Nowhere: out is ""
+    EMBED_TITLE_FRONTMATTER, //!< The frontmatter's `title:`
+    EMBED_TITLE_HEADING, //!< The first `# ` heading
+    EMBED_TITLE_FIRST_LINE, //!< The first line with text
+    EMBED_TITLE_FILE_NAME, //!< The file name
+} EmbedTitleSource;
+
 //! The note's title: the frontmatter's `title:` when text (the whole file) has one, else the
-//! body's first `# ` heading, else the file name without its directory and `.md`. Always
-//! NUL-terminates out, cut at a UTF-8 boundary.
-void embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size);
+//! body's first `# ` heading, else its first line with text (fence lines skipped, without leading
+//! markdown such as '#', '>', a list or task marker) cut to EMBED_TITLE_LINE_MAX bytes, else the
+//! file name without its directory and `.md`. "Untitled", which dawn calls every new note, and ""
+//! count as no title at the first three steps. Always NUL-terminates out, cut at a UTF-8 boundary.
+//! Returns which step gave the title.
+EmbedTitleSource embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size);
 
 //! Roughly how many tokens text costs: chars/3.6 for mostly-Latin text, chars/2.5 when it is
 //! mostly Arabic script (the same estimate as dawn_ai_tokens.c). 0 for empty text.

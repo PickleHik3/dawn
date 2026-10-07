@@ -178,10 +178,50 @@ static bool is_blank_line(const char* text, size_t ls, size_t le)
     return true;
 }
 
-void embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size)
+//! Whether [s, e) is no title at all: empty, or dawn's placeholder for a new note.
+static bool is_placeholder_title(const char* text, size_t s, size_t e)
+{
+    return e <= s || (e - s == 8 && memcmp(text + s, "Untitled", 8) == 0);
+}
+
+//! A line's text without its leading markdown: heading hashes, a quote's '>', a list or task
+//! marker. Trimmed; [*s, *e) is left empty when nothing is left.
+static void strip_line_markup(const char* text, size_t* s, size_t* e)
+{
+    trim_range(text, s, e);
+    for (int32_t round = 0; round < 4 && *s < *e; round++) {
+        size_t p = *s, ts = 0, te = 0;
+        if (parse_heading(text, *s, *e, NULL, &ts, &te)) {
+            *s = ts;
+            *e = te;
+            return;
+        }
+        if (text[p] == '>') {
+            p++;
+        } else if ((text[p] == '-' || text[p] == '*' || text[p] == '+') && p + 1 < *e
+            && (text[p + 1] == ' ' || text[p + 1] == '\t')) {
+            p++;
+        } else if (text[p] >= '0' && text[p] <= '9') {
+            while (p < *e && text[p] >= '0' && text[p] <= '9')
+                p++;
+            if (p + 1 >= *e || (text[p] != '.' && text[p] != ')') || (text[p + 1] != ' ' && text[p + 1] != '\t'))
+                break;
+            p++;
+        } else if (text[p] == '[' && p + 2 < *e && text[p + 2] == ']'
+            && (text[p + 1] == ' ' || text[p + 1] == 'x' || text[p + 1] == 'X')) {
+            p += 3;
+        } else {
+            break;
+        }
+        *s = p;
+        trim_range(text, s, e);
+    }
+}
+
+EmbedTitleSource embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size)
 {
     if (!out || out_size == 0)
-        return;
+        return EMBED_TITLE_NONE;
     out[0] = '\0';
     if (!text)
         len = 0;
@@ -200,44 +240,73 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
                     s++;
                     e--;
                 }
-                if (e > s) {
+                if (!is_placeholder_title(text, s, e)) {
                     copy_utf8(out, out_size, text + s, e - s);
-                    return;
+                    return EMBED_TITLE_FRONTMATTER;
                 }
             }
             pos = le + 1;
         }
     }
 
-    // 2) The first level-one heading outside code.
+    // 2) The first level-one heading outside code. On the way, 3)'s candidate: the first line
+    // with any text, fence lines aside, without its markdown.
     size_t pos = body;
     bool in_fence = false;
     char fch = 0;
     size_t fn = 0;
+    size_t line_s = 0, line_e = 0;
     while (pos < len) {
         const char* nl = memchr(text + pos, '\n', len - pos);
         size_t le = nl ? (size_t)(nl - text) : len;
         char c = 0;
         size_t k = 0;
+        bool fence_line = false;
         if (in_fence) {
-            if (closes_fence(text, pos, le, fch, fn))
+            if (closes_fence(text, pos, le, fch, fn)) {
                 in_fence = false;
+                fence_line = true;
+            }
         } else if (parse_fence(text, pos, le, &c, &k)) {
             in_fence = true;
+            fence_line = true;
             fch = c;
             fn = k;
         } else {
             int32_t level = 0;
             size_t ts = 0, te = 0;
-            if (parse_heading(text, pos, le, &level, &ts, &te) && level == 1 && te > ts) {
+            if (parse_heading(text, pos, le, &level, &ts, &te) && level == 1
+                && !is_placeholder_title(text, ts, te)) {
                 copy_utf8(out, out_size, text + ts, te - ts);
-                return;
+                return EMBED_TITLE_HEADING;
+            }
+        }
+        if (!fence_line && line_e == line_s) {
+            size_t s = pos, e = le;
+            strip_line_markup(text, &s, &e);
+            if (!is_placeholder_title(text, s, e)) {
+                line_s = s;
+                line_e = e;
             }
         }
         pos = le + 1;
     }
 
-    // 3) The file name.
+    // 3) The first line, cut to EMBED_TITLE_LINE_MAX bytes at a character boundary.
+    if (line_e > line_s) {
+        size_t n = line_e - line_s;
+        if (n > EMBED_TITLE_LINE_MAX) {
+            n = EMBED_TITLE_LINE_MAX;
+            while (n > 0 && is_utf8_cont((unsigned char)text[line_s + n]))
+                n--;
+            while (n > 0 && is_space(text[line_s + n - 1]))
+                n--;
+        }
+        copy_utf8(out, out_size, text + line_s, n);
+        return EMBED_TITLE_FIRST_LINE;
+    }
+
+    // 4) The file name.
     if (path) {
         const char* base = path;
         for (const char* p = path; *p; p++)
@@ -247,7 +316,10 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
         if (n > 3 && strcmp(base + n - 3, ".md") == 0)
             n -= 3;
         copy_utf8(out, out_size, base, n);
+        if (out[0])
+            return EMBED_TITLE_FILE_NAME;
     }
+    return EMBED_TITLE_NONE;
 }
 
 int32_t embed_estimate_tokens(const char* text, size_t len)

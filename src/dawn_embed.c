@@ -650,7 +650,10 @@ static void scan_build(ScanList* out, const ai_embedder_t* emb, int32_t dims)
         int32_t at = store_find(se->path);
         if (at >= 0) {
             const EmbedIndex* idx = &g.notes[at]->idx;
-            if (index_is_current(idx, emb, dims) && idx->mtime == se->mtime && idx->size == se->size) {
+            // A note stored as "Untitled" (before such notes were named by their content) is
+            // listed once more; its text is unchanged, so that costs no request.
+            if (index_is_current(idx, emb, dims) && idx->mtime == se->mtime && idx->size == se->size
+                && strcmp(idx->title, "Untitled") != 0) {
                 free(se->path);
                 continue;
             }
@@ -817,7 +820,8 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
 }
 
 //! Read a note file: its title and its body (frontmatter removed, LF endings), malloc'd.
-static char* read_note(const char* path, char* title, size_t title_size, size_t* body_len)
+static char* read_note(const char* path, char* title, size_t title_size, EmbedTitleSource* source,
+    size_t* body_len)
 {
     *body_len = 0;
     FILE* f = fopen(path, "rb");
@@ -837,7 +841,7 @@ static char* read_note(const char* path, char* title, size_t title_size, size_t*
         free(raw);
         return NULL;
     }
-    embed_note_title(raw, n, path, title, title_size);
+    *source = embed_note_title(raw, n, path, title, title_size);
     size_t off = embed_body_offset(raw, n);
     size_t len = n - off;
     memmove(raw, raw + off, len);
@@ -859,10 +863,11 @@ static int32_t piece_token_cap(const Worker* w)
 
 //! One pass over a note's body (borrowed): cut it into pieces at token scale `scale`, keep the
 //! vectors of pieces whose text and heading are unchanged, embed the rest and store the result.
-//! force skips the shortcut for an unchanged body. *truncated gets how many pieces the server cut
-//! to fit its window.
+//! title is what hits show; note_heading is the `title` sent with pieces above the first heading
+//! ("" for none). force skips the shortcut for an unchanged body. *truncated gets how many pieces
+//! the server cut to fit its window.
 static JobResult index_pass(Worker* w, const char* path, const char* body, size_t len, const char* title,
-    int64_t mtime, uint64_t size, float scale, bool force, int32_t* truncated)
+    const char* note_heading, int64_t mtime, uint64_t size, float scale, bool force, int32_t* truncated)
 {
     *truncated = 0;
     uint64_t body_hash = embed_hash(body, len);
@@ -945,9 +950,7 @@ static JobResult index_pass(Worker* w, const char* path, const char* body, size_
     }
 
     // Embed the rest, in batches of consecutive pieces that share one heading (a request carries
-    // one `title`). Pieces above the first heading go under the note's title, unless it is dawn's
-    // placeholder, which would only add noise ("none" is what the model was trained with).
-    const char* note_heading = strcmp(title, "Untitled") == 0 ? "" : title;
+    // one `title`). Pieces above the first heading go under note_heading.
     for (int32_t i = 0; i < idx.count && result == JOB_DONE;) {
         if (have[i]) {
             i++;
@@ -1050,28 +1053,34 @@ fail:
 static JobResult index_note(Worker* w, const char* path, const char* live_body, size_t len,
     const char* live_title, int64_t mtime, uint64_t size)
 {
+    // dawn names every new note "Untitled": that is no title, so it falls through to the note's
+    // heading, its first line or its file name (embed_note_title()).
     char title[EMBED_TITLE_MAX];
+    EmbedTitleSource source = EMBED_TITLE_FRONTMATTER;
     char* owned = NULL;
     const char* body = live_body;
     if (!body) {
-        body = owned = read_note(path, title, sizeof(title), &len);
+        body = owned = read_note(path, title, sizeof(title), &source, &len);
         if (!body)
             return JOB_FAILED;
-    } else if (live_title && live_title[0]) {
+    } else if (live_title && live_title[0] && strcmp(live_title, "Untitled") != 0) {
         snprintf(title, sizeof(title), "%s", live_title);
     } else {
-        embed_note_title(body, len, path, title, sizeof(title));
+        source = embed_note_title(body, len, path, title, sizeof(title));
     }
     if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
         free(owned);
         return JOB_FAILED;
     }
     status_title(title);
+    // A title made from the first line would only repeat that line to the model.
+    const char* note_heading = source == EMBED_TITLE_FIRST_LINE ? "" : title;
 
     int32_t truncated = 0;
-    JobResult r = index_pass(w, path, body, len, title, mtime, size, w->token_scale, false, &truncated);
+    JobResult r = index_pass(w, path, body, len, title, note_heading, mtime, size, w->token_scale, false, &truncated);
     if (r == JOB_DONE && truncated > 0)
-        r = index_pass(w, path, body, len, title, mtime, size, w->token_scale * 1.25f, true, &truncated);
+        r = index_pass(w, path, body, len, title, note_heading, mtime, size, w->token_scale * 1.25f, true,
+            &truncated);
     free(owned);
     return r;
 }
