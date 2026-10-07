@@ -48,6 +48,7 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #define EMBED_IDLE_WAIT_MS 30000 //!< Longest sleep with nothing to do
 #define EMBED_BUSY_POLL_MS 3000 //!< How often to re-check a running chat reply
 #define EMBED_MAX_RETRIES 6 //!< Retries of one batch before the note waits for the next scan
+#define EMBED_PREFIX_TOKENS 64 //!< Room left in the model's window for its prefix and the title
 #define EMBED_QUERY_MAX 512 //!< Query bytes kept (longer queries are cut)
 #define EMBED_QUERY_DEBOUNCE_MS 250 //!< A query goes out once typing pauses this long
 #define EMBED_QUERY_CACHE 4 //!< Query vectors remembered
@@ -697,26 +698,24 @@ static char* read_note(const char* path, char* title, size_t title_size, size_t*
     return raw;
 }
 
-//! Bring one note's index up to date. body is taken over (NULL: read the file). Pieces whose text
-//! and heading are unchanged keep their vectors; only the rest are embedded.
-static JobResult index_note(Worker* w, const char* path, char* body, size_t len, const char* live_title,
-    int64_t mtime, uint64_t size)
+//! The most tokens a piece may hold for the embedder in use: room for the prefix and title inside
+//! `_endpoint_context_window` when that is below the chunker's default cap, else 0 (the default).
+static int32_t piece_token_cap(const Worker* w)
 {
-    char title[EMBED_TITLE_MAX];
-    if (!body) {
-        body = read_note(path, title, sizeof(title), &len);
-        if (!body)
-            return JOB_FAILED;
-    } else if (live_title && live_title[0]) {
-        snprintf(title, sizeof(title), "%s", live_title);
-    } else {
-        embed_note_title(body, len, path, title, sizeof(title));
-    }
-    if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
-        free(body);
-        return JOB_FAILED;
-    }
+    int32_t window = w->emb.context_window;
+    if (window <= 0 || window - EMBED_PREFIX_TOKENS >= EMBED_MAX_TOKENS)
+        return 0;
+    return window - EMBED_PREFIX_TOKENS > 1 ? window - EMBED_PREFIX_TOKENS : 1;
+}
 
+//! One pass over a note's body (borrowed): cut it into pieces at token scale `scale`, keep the
+//! vectors of pieces whose text and heading are unchanged, embed the rest and store the result.
+//! force skips the shortcut for an unchanged body. *truncated gets how many pieces the server cut
+//! to fit its window.
+static JobResult index_pass(Worker* w, const char* path, const char* body, size_t len, const char* title,
+    int64_t mtime, uint64_t size, float scale, bool force, int32_t* truncated)
+{
+    *truncated = 0;
     uint64_t body_hash = embed_hash(body, len);
     int32_t at = store_find(path);
     const EmbedIndex* old = at >= 0 ? &g.notes[at]->idx : NULL;
@@ -733,8 +732,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     idx.size = size;
 
     // Same text, same model: only the file's metadata (or the title) moved. No request needed.
-    if (reusable && old->body_hash == body_hash && old->body_len == len) {
-        free(body);
+    if (!force && reusable && old->body_hash == body_hash && old->body_len == len) {
         idx.dims = old->dims;
         idx.count = old->count;
         if (idx.count > 0) {
@@ -753,11 +751,9 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     calibrate(w, body, len);
     int32_t cap = (int32_t)(len / 4 + 8 < EMBED_MAX_PIECES ? len / 4 + 8 : EMBED_MAX_PIECES);
     idx.chunks = malloc(sizeof(EmbedChunk) * (size_t)cap);
-    if (!idx.chunks) {
-        free(body);
+    if (!idx.chunks)
         return JOB_FAILED;
-    }
-    idx.count = embed_chunk(body, len, w->token_scale, idx.chunks, cap);
+    idx.count = embed_chunk(body, len, scale, piece_token_cap(w), idx.chunks, cap);
     idx.dims = w->dims;
 
     JobResult result = JOB_DONE;
@@ -858,6 +854,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
             embed_normalize(dst, idx.dims);
             have[slots[k]] = true;
         }
+        *truncated += res.truncated;
         // The model's count includes the prefix; close enough to steer the next split.
         if (res.tokens > 0 && est > 0) {
             float s = (float)res.tokens / (float)est;
@@ -875,7 +872,6 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
         goto fail;
     }
     free(have);
-    free(body);
 
 store: {
     char name[32], file[EMBED_PATH_MAX];
@@ -892,9 +888,38 @@ store: {
 
 fail:
     free(have);
-    free(body);
     embed_index_free(&idx);
     return result;
+}
+
+//! Bring one note's index up to date. body is taken over (NULL: read the file). Pieces whose text
+//! and heading are unchanged keep their vectors; only the rest are embedded. When the server cut a
+//! piece to fit its window, the result is kept but the note is cut again at a token scale 25%
+//! higher (once), so its pieces come out small enough.
+static JobResult index_note(Worker* w, const char* path, char* body, size_t len, const char* live_title,
+    int64_t mtime, uint64_t size)
+{
+    char title[EMBED_TITLE_MAX];
+    if (!body) {
+        body = read_note(path, title, sizeof(title), &len);
+        if (!body)
+            return JOB_FAILED;
+    } else if (live_title && live_title[0]) {
+        snprintf(title, sizeof(title), "%s", live_title);
+    } else {
+        embed_note_title(body, len, path, title, sizeof(title));
+    }
+    if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
+        free(body);
+        return JOB_FAILED;
+    }
+
+    int32_t truncated = 0;
+    JobResult r = index_pass(w, path, body, len, title, mtime, size, w->token_scale, false, &truncated);
+    if (r == JOB_DONE && truncated > 0)
+        r = index_pass(w, path, body, len, title, mtime, size, w->token_scale * 1.25f, true, &truncated);
+    free(body);
+    return r;
 }
 
 // #endregion
@@ -957,6 +982,7 @@ static void* worker_main(void* arg)
                     next_scan = 0;
                 }
                 w.emb.max_batch = found.max_batch;
+                w.emb.context_window = found.context_window;
                 have = true;
                 next_discover = now + EMBED_DISCOVER_OK_MS;
             } else if (st == AI_EMBED_NONE) {

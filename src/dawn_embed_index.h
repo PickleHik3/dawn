@@ -31,6 +31,7 @@
 
 #define EMBED_TARGET_TOKENS 400 //!< Pieces grow up to about this many tokens
 #define EMBED_MAX_TOKENS 480 //!< A paragraph above this is split at sentence boundaries
+#define EMBED_MIN_TOKENS 32 //!< Smallest cap embed_chunk() accepts
 
 // #endregion
 
@@ -70,12 +71,15 @@ typedef struct {
 
 //! Split a body into pieces, markdown-aware: a heading always starts a new piece (and is part of
 //! it); small paragraphs merge until about EMBED_TARGET_TOKENS; a paragraph longer than
-//! EMBED_MAX_TOKENS is split at sentence ends (and, failing that, at a space); a fenced code block
+//! max_tokens is split at sentence ends (and, failing that, at a space); a fenced code block
 //! is never split, however long. Pieces are trimmed of surrounding blank space, and a piece that
 //! holds nothing but a heading is dropped. token_scale multiplies embed_estimate_tokens() (1.0
-//! when uncalibrated; the model's real count over the estimate otherwise). Returns the number of
-//! pieces written, at most max.
-int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk* out, int32_t max);
+//! when uncalibrated; the model's real count over the estimate otherwise). max_tokens caps a
+//! piece, for a model whose window is small: 0 (or anything above EMBED_MAX_TOKENS) means
+//! EMBED_MAX_TOKENS, values below EMBED_MIN_TOKENS count as EMBED_MIN_TOKENS, and the merge target
+//! shrinks in the same proportion. Returns the number of pieces written, at most max.
+int32_t embed_chunk(const char* body, size_t len, float token_scale, int32_t max_tokens, EmbedChunk* out,
+    int32_t max);
 
 // #endregion
 

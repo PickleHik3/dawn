@@ -309,6 +309,8 @@ typedef struct {
     EmbedChunk* out;
     int32_t max;
     int32_t count;
+    int32_t max_tokens; //!< A paragraph above this is split
+    int32_t target_tokens; //!< Pieces grow up to this
     char heading[EMBED_HEADING_MAX];
     // The piece still open, if any.
     bool open;
@@ -410,14 +412,14 @@ static void chunk_split_paragraph(Chunker* c, size_t first, size_t s, size_t e)
     while (a < e && c->count < c->max) {
         size_t b = sentence_end(c->body, a, e);
         int32_t st = chunk_tokens(c, a, b);
-        if (st > EMBED_MAX_TOKENS) {
+        if (st > c->max_tokens) {
             size_t from = a;
             if (acc_has)
                 chunk_emit(c, acc_start, acc_end);
             else
                 from = acc_start;
             size_t per = (size_t)st > 0 ? (b - a) / (size_t)st : 4;
-            size_t limit = per * EMBED_TARGET_TOKENS;
+            size_t limit = per * (size_t)c->target_tokens;
             if (limit < 64)
                 limit = 64;
             size_t p = a;
@@ -430,7 +432,7 @@ static void chunk_split_paragraph(Chunker* c, size_t first, size_t s, size_t e)
             acc_end = b;
             acc_tokens = chunk_tokens(c, from, b);
             acc_has = true;
-        } else if (acc_has && acc_tokens + st > EMBED_TARGET_TOKENS) {
+        } else if (acc_has && acc_tokens + st > c->target_tokens) {
             chunk_emit(c, acc_start, acc_end);
             acc_start = a;
             acc_end = b;
@@ -533,7 +535,8 @@ fail:
     return NULL;
 }
 
-int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk* out, int32_t max)
+int32_t embed_chunk(const char* body, size_t len, float token_scale, int32_t max_tokens, EmbedChunk* out,
+    int32_t max)
 {
     if (!body || !out || max <= 0 || len == 0 || len > EMBED_NOTE_MAX)
         return 0;
@@ -545,6 +548,11 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
 
     Chunker c = { .body = body, .len = len, .out = out, .max = max };
     c.scale = (token_scale > 0.05f && token_scale < 20.0f) ? token_scale : 1.0f;
+    // A smaller cap shrinks the merge target in proportion (400 of 480 by default).
+    c.max_tokens = max_tokens <= 0 || max_tokens > EMBED_MAX_TOKENS ? EMBED_MAX_TOKENS
+        : max_tokens < EMBED_MIN_TOKENS                             ? EMBED_MIN_TOKENS
+                                                                    : max_tokens;
+    c.target_tokens = c.max_tokens * EMBED_TARGET_TOKENS / EMBED_MAX_TOKENS;
 
     for (int32_t i = 0; i < nblocks && c.count < c.max; i++) {
         const Blk* b = &blocks[i];
@@ -563,7 +571,7 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
 
         int32_t t = chunk_tokens(&c, b->start, b->end);
         size_t first = (c.open && c.heading_only) ? c.start : b->start;
-        if (t > EMBED_MAX_TOKENS && b->kind == BLK_FENCE) {
+        if (t > c.max_tokens && b->kind == BLK_FENCE) {
             // Code is never split: it goes whole, as a piece of its own (with its heading).
             if (c.open && !c.heading_only) {
                 chunk_flush(&c);
@@ -571,14 +579,14 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
             }
             chunk_emit(&c, first, b->end);
             c.open = false;
-        } else if (t > EMBED_MAX_TOKENS) {
+        } else if (t > c.max_tokens) {
             if (c.open && !c.heading_only) {
                 chunk_flush(&c);
                 first = b->start;
             }
             chunk_split_paragraph(&c, first, b->start, b->end);
         } else {
-            if (c.open && !c.heading_only && c.tokens + t > EMBED_TARGET_TOKENS)
+            if (c.open && !c.heading_only && c.tokens + t > c.target_tokens)
                 chunk_flush(&c);
             if (c.open) {
                 c.end = b->end;
