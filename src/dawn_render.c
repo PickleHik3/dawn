@@ -1050,6 +1050,56 @@ void render_toc(void)
     platform_set_cursor_visible(true);
 }
 
+//! Where render_search() drew its result rows last, for render_search_hit().
+static struct {
+    int32_t first_row, rows; //!< The list's first screen row and how many rows it filled
+    int32_t left, width; //!< The box's columns
+} search_geo;
+
+//! One "by meaning" row's text after its indent, in max_cols columns: this note's piece is its
+//! heading or first line; another note's is that note's title, then " · " and the same.
+static void render_meaning_row(const SearchState* search, int32_t m, bool sel, int32_t max_cols)
+{
+    const char* text = search->meaning_text[m];
+    if (m < search->meaning_here) {
+        hist_write_fit(text, max_cols);
+        return;
+    }
+    // The title keeps at least half the row when both don't fit, so the row says which note.
+    const char* title = search->meaning[m].note_title;
+    int32_t title_cols = hist_cols(title, strlen(title));
+    int32_t text_cols = hist_cols(text, strlen(text));
+    int32_t title_max = max_cols;
+    if (text_cols > 0 && title_cols + 3 + text_cols > max_cols) {
+        title_max = max_cols - 3 - text_cols;
+        if (title_max < max_cols / 2)
+            title_max = max_cols / 2;
+    }
+    int32_t used = hist_write_fit(title, title_max);
+    int32_t sep = used > 0 ? 3 : 0;
+    if (text_cols > 0 && max_cols - used - sep >= 2) {
+        if (sep) {
+            set_fg(get_dim());
+            platform_write_str(" · ");
+            set_fg(sel ? get_fg() : get_dim());
+        }
+        hist_write_fit(text, max_cols - used - sep);
+    }
+}
+
+int32_t render_search_hit(int32_t row, int32_t col)
+{
+    const SearchState* search = (const SearchState*)app.search_state;
+    if (!search || row < search_geo.first_row || row >= search_geo.first_row + search_geo.rows
+        || col <= search_geo.left || col >= search_geo.left + search_geo.width - 1)
+        return -1;
+    int32_t idx = search->scroll + row - search_geo.first_row;
+    if (idx < search->count)
+        return idx;
+    int32_t m = idx - search->count - 1; // past the "by meaning" label, which is no result
+    return m >= 0 && m < search->meaning_count ? search->count + m : -1;
+}
+
 void render_search(void)
 {
     SearchState* search = (SearchState*)app.search_state;
@@ -1093,12 +1143,13 @@ void render_search(void)
     set_fg(get_fg());
     platform_write_char('_');
 
-    // Results count
+    // Results count: the exact matches and the "by meaning" rows
     char count_str[32];
+    int32_t found = search->count + search->meaning_count;
     if (search->count >= SEARCH_MAX_RESULTS) {
-        snprintf(count_str, sizeof(count_str), "%d+ matches", search->count);
+        snprintf(count_str, sizeof(count_str), "%d+ matches", found);
     } else {
-        snprintf(count_str, sizeof(count_str), "%d match%s", search->count, search->count == 1 ? "" : "es");
+        snprintf(count_str, sizeof(count_str), "%d match%s", found, found == 1 ? "" : "es");
     }
     move_to(search_row, content_right - (int32_t)strlen(count_str));
     set_fg(get_dim());
@@ -1122,6 +1173,11 @@ void render_search(void)
         search->scroll = sel_row;
     if (sel_row >= search->scroll + visible)
         search->scroll = sel_row - visible + 1;
+
+    search_geo.first_row = list_start;
+    search_geo.rows = total_rows - search->scroll < visible ? total_rows - search->scroll : visible;
+    search_geo.left = left;
+    search_geo.width = width;
 
     for (int32_t i = 0; i < visible; i++) {
         int32_t idx = search->scroll + i;
@@ -1147,10 +1203,7 @@ void render_search(void)
             set_fg(get_accent());
             platform_write_str(sel ? "▸       " : "        "); // under the line numbers
             set_fg(sel ? get_fg() : get_dim());
-            const char* text = search->meaning_text[m];
-            int32_t max_ctx = content_width - 10;
-            for (int32_t j = 0; text[j] && j < max_ctx; j++)
-                platform_write_char(text[j]);
+            render_meaning_row(search, m, sel, content_width - 10);
             set_bg(get_modal_bg());
             continue;
         }

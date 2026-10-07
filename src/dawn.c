@@ -3831,14 +3831,54 @@ static void render_writing_plain(void)
 //! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
 static bool embed_news = false;
 
+//! A "by meaning" row's text: the piece's heading, or the first non-blank line of slice (the
+//! piece's text, NUL-terminated), cut to fit out at a UTF-8 boundary.
+static void meaning_row_text(char* out, size_t cap, const char* heading, const char* slice)
+{
+    const char* from = heading;
+    size_t len = strlen(from);
+    if (len == 0 && slice) {
+        from = slice;
+        while (*from == '\n' || *from == ' ')
+            from++;
+        len = strcspn(from, "\n");
+    }
+    if (len >= cap) {
+        len = cap - 1;
+        while (len > 0 && ((unsigned char)from[len] & 0xC0) == 0x80)
+            len--; // not in the middle of a character
+    }
+    memcpy(out, from, len);
+    out[len] = '\0';
+}
+
+//! Another note's body as load_file_for_editing() puts it in app.text (frontmatter removed, LF
+//! endings), malloc'd and NUL-terminated, or NULL when the file can't be read.
+static char* meaning_note_body(const char* path, size_t* len)
+{
+    size_t n = 0;
+    char* raw = DAWN_BACKEND(app)->read_file(path, &n);
+    if (!raw)
+        return NULL;
+    size_t off = embed_body_offset(raw, n);
+    size_t body = n - off;
+    memmove(raw, raw + off, body);
+    body = embed_normalize_newlines(raw, body);
+    raw[body] = '\0';
+    *len = body;
+    return raw;
+}
+
 //! Rank Ctrl+S's "by meaning" group for the current query: pieces of this note close in meaning,
 //! minus pieces the user has edited since they were indexed and pieces an exact match already
-//! covers. Asks again only when the query, the exact results or the index changed; a query still
-//! being embedded shows nothing until embed_poll() says it landed.
+//! covers, then the best piece of each other note, minus ones whose file changed since. Asks again
+//! only when the query, the exact results or the index changed; a query still being embedded
+//! shows nothing until embed_poll() says it landed.
 static void refresh_meaning(SearchState* s, bool exact_changed)
 {
     if (!embed_ready() || s->query_len < 3 || !app.session_path) {
         s->meaning_count = 0;
+        s->meaning_here = 0;
         s->meaning_query[0] = '\0';
         return;
     }
@@ -3848,7 +3888,7 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
     snprintf(s->meaning_query, sizeof(s->meaning_query), "%s", s->query);
     EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE };
     int32_t n = 0;
-    if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_MAX, &n) != EMBED_READY)
+    if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_HERE, &n) != EMBED_READY)
         n = 0;
     int32_t kept = 0;
     size_t doc_len = gap_len(&app.text);
@@ -3862,27 +3902,30 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
             if (s->results[k].pos >= h->start && s->results[k].pos < (size_t)h->start + h->len)
                 ok = false;
         if (ok) {
-            // The row: the piece's heading, or its first non-blank line.
-            char* text = s->meaning_text[kept];
-            size_t cap = sizeof(s->meaning_text[kept]);
-            const char* from = h->heading;
-            size_t len = strlen(from);
-            if (len == 0) {
-                from = slice;
-                while (*from == '\n' || *from == ' ')
-                    from++;
-                len = strcspn(from, "\n");
-            }
-            if (len >= cap) {
-                len = cap - 1;
-                while (len > 0 && ((unsigned char)from[len] & 0xC0) == 0x80)
-                    len--; // not in the middle of a character
-            }
-            memcpy(text, from, len);
-            text[len] = '\0';
+            meaning_row_text(s->meaning_text[kept], sizeof(s->meaning_text[kept]), h->heading, slice);
             s->meaning[kept++] = *h;
         }
         free(slice);
+    }
+    s->meaning_here = kept;
+
+    // Other notes, one row each: the piece is read back from its file to check it is still there.
+    EmbedHit other[SEARCH_MEANING_ELSEWHERE];
+    EmbedSearchOpts elsewhere = {
+        .only_path = NULL, .exclude_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE, .one_per_note = true
+    };
+    if (embed_search(s->query, (size_t)s->query_len, &elsewhere, other, SEARCH_MEANING_ELSEWHERE, &n) != EMBED_READY)
+        n = 0;
+    for (int32_t i = 0; i < n && kept < SEARCH_MEANING_MAX; i++) {
+        const EmbedHit* h = &other[i];
+        size_t body_len = 0;
+        char* body = meaning_note_body(h->path, &body_len);
+        if (body && (size_t)h->start + h->len <= body_len && embed_hit_matches(h, body + h->start, h->len)) {
+            body[(size_t)h->start + h->len] = '\0';
+            meaning_row_text(s->meaning_text[kept], sizeof(s->meaning_text[kept]), h->heading, body + h->start);
+            s->meaning[kept++] = *h;
+        }
+        free(body);
     }
     s->meaning_count = kept;
     if (s->selected >= s->count + kept)
@@ -4063,6 +4106,22 @@ static bool open_from_history(const char* path)
         notice_post(NOTICE_ERROR, msg);
     }
     return false;
+}
+
+//! Open another note at byte pos of its body, from a meaning hit (Ctrl+S's "by meaning" group, the
+//! chat's "also in:" line). The open note is saved first; one that can't be saved stays open, the
+//! status bar saying why (or the conflict dialog asking), and so does one when the other can't be
+//! opened (open_from_history() posts the notice). Either way the mode is MODE_WRITING after.
+static bool open_note_at(const char* path, size_t pos)
+{
+    char target[EMBED_PATH_MAX];
+    snprintf(target, sizeof(target), "%s", path);
+    bool opened = save_session() && open_from_history(target);
+    if (opened)
+        restore_cursor_position(pos);
+    app.mode = MODE_WRITING;
+    clear_screen();
+    return opened;
 }
 
 // #endregion
@@ -6145,6 +6204,15 @@ static void handle_input(void)
             break;
         }
 
+        // A tap on a result row picks it as Enter would; anywhere else does nothing.
+        if (key == DAWN_KEY_MOUSE_CLICK) {
+            int32_t hit = render_search_hit(input_last_mouse_row(), input_last_mouse_col());
+            if (hit < 0)
+                break;
+            search->selected = hit;
+            key = '\r';
+        }
+
         switch (key) {
         case '\x1b':
             MODE_POP();
@@ -6156,6 +6224,10 @@ static void handle_input(void)
             if (r) {
                 app.cursor = r->pos;
                 app.selecting = false;
+            } else if (m >= search->meaning_here && m < search->meaning_count) {
+                // Another note's row: that note opens at the piece.
+                open_note_at(search->meaning[m].path, search->meaning[m].start);
+                break;
             } else if (m >= 0 && m < search->meaning_count) {
                 // A "by meaning" row: the piece's start, checked still current when ranked.
                 size_t at = search->meaning[m].start;
