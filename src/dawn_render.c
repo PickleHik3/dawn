@@ -203,28 +203,16 @@ void render_welcome(void)
     render_text_at(row, col2, "?", get_accent());
     render_text_at(row, col2 + 2, " help", get_dim());
 
-    // The status panel (dawn_status) goes in the bottom right of the space under the actions:
-    // below the "ai ready" line where there are rows enough, else straight under the actions, at
-    // most three rows, taking the place of that line while it is out.
+    // The status panel (dawn_status) goes in the bottom right of the space under the actions, a
+    // blank row below them where there is room, at most four rows. It also says "ai ready" here.
     int32_t panel_last = bottom_row - 1;
-    int32_t panel_first = row + 3;
-    bool panel_short = panel_last - panel_first + 1 < 2;
-    if (panel_short) {
+    int32_t panel_first = row + 2;
+    if (panel_first > panel_last)
         panel_first = row + 1;
-        if (panel_first < panel_last - 2)
-            panel_first = panel_last - 2;
-    } else if (panel_first < panel_last - 3) {
+    if (panel_first < panel_last - 3)
         panel_first = panel_last - 3;
-    }
     int32_t panel_cols = app.cols - 2 < 48 ? app.cols - 2 : 48;
     status_area(panel_first, panel_last, app.cols, panel_cols, true);
-
-#if HAS_LIBAI
-    if (app.ai_ready && session_ai_configured() && !(panel_short && status_visible())) {
-        row += 2;
-        render_center_text(row, "✦ ai ready", get_accent());
-    }
-#endif
 
     // Bottom status bar - like editor status bar
     move_to(bottom_row, content_left);
