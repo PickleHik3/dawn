@@ -452,7 +452,7 @@ static bool note_is_editable(void)
 static void apply_edit(size_t start, size_t end, const char* text)
 {
     size_t n = strlen(text);
-    if (!save_note_version(g_version_path, sizeof(g_version_path)))
+    if (!save_note_version(NULL, 0, g_version_path, sizeof(g_version_path)))
         g_version_path[0] = '\0';
     save_undo_state();
     if (end > start)

@@ -27,6 +27,7 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #if DAWN_EMBED_LIVE
 
 #include "ai_embed.h"
+#include "dawn_notice.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -61,6 +62,7 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #define EMBED_QUERY_RETRY_MS 10000 //!< A failed query may be tried again after this (or Retry-After)
 #define EMBED_QUERY_WAIT_MAX_MS 15000 //!< Longest Retry-After a query waits out before resending
 #define EMBED_RELATED_CACHE 8 //!< embed_related() answers remembered for the current note
+#define EMBED_TEMP_STALE_SEC (10 * 60) //!< An index temp file this old is a write that died
 
 // #endregion
 
@@ -104,6 +106,7 @@ static struct {
     atomic_bool disabled; //!< embed_set_enabled(false)
     atomic_bool halt; //!< stop || disabled: the worker's cancel flag for its HTTP calls
     atomic_bool rebuild; //!< embed_rebuild() asked; the worker clears it
+    atomic_int cache_errno; //!< The cache directory could not be made (its errno); embed_poll() tells
 
     // Set once by embed_start(), read-only afterwards.
     char notes_dir[EMBED_PATH_MAX];
@@ -205,12 +208,15 @@ static bool join_path(char* out, size_t out_size, const char* dir, const char* n
     return n > 0 && (size_t)n < out_size;
 }
 
-static void mkdir_p(const char* path)
+//! mkdir -p with mode 0700; false (errno set) when path is not a directory afterwards.
+static bool mkdir_p(const char* path)
 {
     char buf[EMBED_PATH_MAX];
     size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(buf))
-        return;
+    if (n == 0 || n >= sizeof(buf)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
     memcpy(buf, path, n + 1);
     for (size_t i = 1; i < n; i++) {
         if (buf[i] != '/')
@@ -219,7 +225,45 @@ static void mkdir_p(const char* path)
         mkdir(buf, 0700);
         buf[i] = '/';
     }
-    mkdir(buf, 0700);
+    if (mkdir(buf, 0700) == 0)
+        return true;
+    int e = errno;
+    struct stat st;
+    if (stat(buf, &st) == 0 && S_ISDIR(st.st_mode))
+        return true;
+    errno = e == EEXIST ? ENOTDIR : e;
+    return false;
+}
+
+//! A temp file an index write leaves while it runs: <16 hex>.idx.tmp (older builds) or
+//! <16 hex>.idx.<pid>-<n>.tmp (embed_index_write()).
+static bool is_index_temp(const char* name)
+{
+    size_t n = strlen(name);
+    if (n < 24 || strcmp(name + n - 4, ".tmp") != 0 || strncmp(name + 16, ".idx.", 5) != 0)
+        return false;
+    for (size_t i = 0; i < 16; i++) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    if (n == 24)
+        return true; // <hex>.idx.tmp
+    // <hex>.idx.<pid>-<n>.tmp
+    const char* p = name + 21;
+    const char* end = name + n - 4;
+    bool dash = false, digits = false;
+    for (; p < end; p++) {
+        if (*p == '-' && digits && !dash) {
+            dash = true;
+            digits = false;
+        } else if (*p >= '0' && *p <= '9') {
+            digits = true;
+        } else {
+            return false;
+        }
+    }
+    return dash && digits;
 }
 
 // #endregion
@@ -430,10 +474,16 @@ static void store_clear(void)
         while ((e = readdir(dir)) != NULL) {
             size_t n = strlen(e->d_name);
             char file[EMBED_PATH_MAX];
-            bool ours = (n > 4 && strcmp(e->d_name + n - 4, ".idx") == 0)
-                || (n > 8 && strcmp(e->d_name + n - 8, ".idx.tmp") == 0);
-            if (ours && join_path(file, sizeof(file), g.cache_dir, e->d_name))
+            if (!join_path(file, sizeof(file), g.cache_dir, e->d_name))
+                continue;
+            if (is_index_temp(e->d_name)) {
+                // Same rule as load_cache(): a young temp file may be another dawn's write.
+                struct stat st;
+                if (stat(file, &st) == 0 && time(NULL) - st.st_mtime > EMBED_TEMP_STALE_SEC)
+                    remove(file);
+            } else if (n == 20 && strcmp(e->d_name + 16, ".idx") == 0) {
                 remove(file);
+            }
         }
         closedir(dir);
     }
@@ -441,7 +491,8 @@ static void store_clear(void)
 }
 
 //! Read every index file in the cache into the store; a file that fails to read (truncated,
-//! corrupt, another version, misnamed) is deleted and its note rebuilt later.
+//! corrupt, another version, misnamed) is deleted and its note rebuilt later. A temp file is
+//! deleted only once it is EMBED_TEMP_STALE_SEC old.
 static void load_cache(void)
 {
     DIR* dir = opendir(g.cache_dir);
@@ -453,8 +504,11 @@ static void load_cache(void)
         char file[EMBED_PATH_MAX];
         if (!join_path(file, sizeof(file), g.cache_dir, e->d_name))
             continue;
-        if (n > 4 && strcmp(e->d_name + n - 4, ".tmp") == 0) {
-            remove(file); // a write that never finished
+        if (is_index_temp(e->d_name)) {
+            // A write that never finished, unless it is young: another dawn may be writing it now.
+            struct stat st;
+            if (stat(file, &st) == 0 && time(NULL) - st.st_mtime > EMBED_TEMP_STALE_SEC)
+                remove(file);
             continue;
         }
         if (n != 20 || strcmp(e->d_name + 16, ".idx") != 0)
@@ -1152,7 +1206,8 @@ static void live_requeue(LiveText* t)
 static void* worker_main(void* arg)
 {
     (void)arg;
-    mkdir_p(g.cache_dir);
+    if (!mkdir_p(g.cache_dir))
+        atomic_store(&g.cache_errno, errno ? errno : EIO); // indexing goes on, kept in memory only
     load_cache();
 
     Worker w = { .token_scale = 1.0f };
@@ -1633,6 +1688,13 @@ bool embed_poll(void)
 {
     if (!g.started)
         return false;
+    // The worker cannot post notices (dawn's thread only): its cache failure is told from here.
+    int e = atomic_exchange(&g.cache_errno, 0);
+    if (e) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "meaning index can't keep its cache · %s", strerror(e));
+        notice_post(NOTICE_ERROR, msg);
+    }
     // A failed query whose retry time has come: a caller showing nothing for it should ask again.
     int64_t now = now_ms();
     bool due = false;

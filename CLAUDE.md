@@ -2,6 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Read `docs/HANDOFF.md` first.** It is the rolling list of open work left by earlier sessions; update it
+before you end yours (move finished items out, add what you left open).
+
 ## What this is
 
 A fork of [andrewmd5/dawn](https://github.com/andrewmd5/dawn), a C23 terminal markdown drafter, adapted for
@@ -38,18 +41,20 @@ Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`). `USE_LIBAI` is OFF by 
 so build with it ON before claiming a change compiles. Source files are globbed (`src/dawn*.c`,
 `src/highlight/lang/*.c`), so re-run cmake after adding a file.
 
-Tests are two plain executables, no framework, no ctest:
+Tests are three plain executables, no framework, no ctest:
 
 ```sh
 ./build/test-block                                 # block + inline parsing; exits non-zero on failure
 ./build/test-block tests/commonmark_spec.json -v   # CommonMark spec pass rate (about 92%); a report, exit is always 0
 ./build/test-embed                                 # chunker, index file, cosine top-k (pure half only); exits non-zero on failure
+./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
 ```
 
 `test-block` links `dawn_block`, `dawn_gap`, `dawn_md`, `dawn_wrap` alone and stubs the theme/image/tex
 getters at the top of `tests/test_block.c`. When `dawn_md.c` starts calling a new palette getter, add a stub
 there or the test stops linking. `test-embed` links only `dawn_embed_index.c`; keep that file free of
-globals, backend calls, threads and network so it stays that way.
+globals, backend calls, threads and network so it stays that way. `test-store` (not on Windows) links
+`dawn_fsio.c`, `dawn_crdt.c`, `dawn_notepath.c` and cJSON with stubs; keep those three pure too.
 
 Format with `.clang-format` (WebKit base, 4 spaces, `char* p`, no column limit, function brace on its own line).
 
@@ -155,6 +160,10 @@ UI rule: show nothing unless `embed_ready()` returned true and the query returne
 - Clipboard is OSC 52 under `__ANDROID__`; the xclip/xsel path must stay compiled out there.
 - OSC 8 hyperlinks are gated on `DAWN_CAP_HYPERLINKS`.
 - Notes live in `$XDG_DATA_HOME/dawn` (fallback `~/.dawn`); settings in `<config>/dawn/settings.json`.
+- Storage: every write goes through `dawn_fsio` (temp file, fsync, rename, then a directory fsync).
+  `save_session` in `dawn_file.c` compares the file with what dawn last saw and never overwrites
+  a change made elsewhere: it writes a `.conflict-<time>.md` copy and opens `MODE_CONFLICT`.
+  Files that fail to parse are set aside as `*.corrupt-<time>`, never overwritten.
 
 ### Syntax highlighting
 

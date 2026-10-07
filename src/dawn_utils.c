@@ -104,16 +104,27 @@ int32_t current_frac_denom = 0;
 
 // #region Path Utilities
 
-void get_chat_path(const char* session_path, char* chat_path, size_t bufsize)
+bool get_chat_path(const char* session_path, char* chat_path, size_t bufsize)
 {
+    if (!chat_path || bufsize == 0)
+        return false;
+    chat_path[0] = '\0';
+    if (!session_path)
+        return false;
     size_t len = strlen(session_path);
+    int w;
     if (len > 3 && strcmp(session_path + len - 3, ".md") == 0) {
         // Replace .md with .chat.json
         size_t base_len = len - 3;
-        snprintf(chat_path, bufsize, "%.*s.chat.json", (int32_t)base_len, session_path);
+        w = snprintf(chat_path, bufsize, "%.*s.chat.json", (int32_t)base_len, session_path);
     } else {
-        snprintf(chat_path, bufsize, "%s.chat.json", session_path);
+        w = snprintf(chat_path, bufsize, "%s.chat.json", session_path);
     }
+    if (w < 0 || (size_t)w >= bufsize) {
+        chat_path[0] = '\0'; // never a cut-short path
+        return false;
+    }
+    return true;
 }
 
 // #endregion

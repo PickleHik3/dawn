@@ -21,6 +21,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#define index_pid() ((long)_getpid())
+#define index_sync(f) (_commit(_fileno(f)) == 0)
+#else
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#define index_pid() ((long)getpid())
+#define index_sync(f) (fsync(fileno(f)) == 0)
+#endif
+#if !defined(__STDC_NO_ATOMICS__)
+#include <stdatomic.h>
+#endif
+
 #define EMBED_MAGIC "DAWNEMBD"
 #define EMBED_MAGIC_LEN 8
 
@@ -927,6 +943,33 @@ bool embed_index_decode(const uint8_t* data, size_t len, EmbedIndex* out)
     return true;
 }
 
+//! Make the rename that put path in place durable by syncing its directory (POSIX). A
+//! filesystem that cannot sync a directory counts as done: the rename has already happened.
+static void sync_parent_dir(const char* path)
+{
+#ifndef _WIN32
+    const char* slash = strrchr(path, '/');
+    size_t n = !slash ? 0 : slash == path ? 1 : (size_t)(slash - path);
+    char* dir = malloc(n + 2);
+    if (!dir)
+        return;
+    if (n == 0)
+        memcpy(dir, ".", 2);
+    else {
+        memcpy(dir, path, n);
+        dir[n] = '\0';
+    }
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    free(dir);
+    if (fd < 0)
+        return;
+    while (fsync(fd) != 0 && errno == EINTR) { }
+    close(fd);
+#else
+    (void)path;
+#endif
+}
+
 bool embed_index_write(const char* file_path, const EmbedIndex* idx)
 {
     if (!file_path || !file_path[0])
@@ -936,20 +979,36 @@ bool embed_index_write(const char* file_path, const EmbedIndex* idx)
     if (!embed_index_encode(idx, &data, &len))
         return false;
 
-    size_t n = strlen(file_path);
-    char* tmp = malloc(n + 5);
+    // A temp name of this process and this call, <file>.<pid>-<n>.tmp: two dawns (or two writes)
+    // never share one, and dawn_embed.c's cleanup knows the pattern.
+#if !defined(__STDC_NO_ATOMICS__)
+    static atomic_uint counter;
+    unsigned seq = atomic_fetch_add(&counter, 1u);
+#else
+    static unsigned counter; // no C11 atomics (MSVC): there is no index worker on Windows anyway
+    unsigned seq = counter++;
+#endif
+    size_t cap = strlen(file_path) + 48;
+    char* tmp = malloc(cap);
     if (!tmp) {
         free(data);
         return false;
     }
-    memcpy(tmp, file_path, n);
-    memcpy(tmp + n, ".tmp", 5);
+    int w = snprintf(tmp, cap, "%s.%ld-%u.tmp", file_path, index_pid(), seq);
+    if (w < 0 || (size_t)w >= cap) {
+        free(tmp);
+        free(data);
+        return false;
+    }
 
+    // The bytes reach the disk before the rename and the directory after it, as for notes: a
+    // power cut then leaves the old index or the new one, never an empty file under its name.
     bool ok = false;
     FILE* f = fopen(tmp, "wb");
     if (f) {
         ok = fwrite(data, 1, len, f) == len;
         ok = (fflush(f) == 0) && ok;
+        ok = ok && index_sync(f);
         ok = (fclose(f) == 0) && ok;
     }
     if (ok) {
@@ -958,7 +1017,9 @@ bool embed_index_write(const char* file_path, const EmbedIndex* idx)
 #endif
         ok = rename(tmp, file_path) == 0;
     }
-    if (!ok)
+    if (ok)
+        sync_parent_dir(file_path);
+    else
         remove(tmp);
     free(tmp);
     free(data);

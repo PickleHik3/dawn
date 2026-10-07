@@ -8,6 +8,7 @@
 #include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_gap.h"
+#include "dawn_notepath.h"
 #include "dawn_notice.h"
 #include "dawn_session.h"
 #include "dawn_utils.h"
@@ -240,20 +241,16 @@ static const char* base_name(const char* path, size_t* stem_len)
 }
 
 //! Whether dawn named the note's file itself: in dawn's notes directory, and named either the way
-//! a new note is (2026-09-28_143005.md) or after its current title the way a live title does
-//! (eid-plans.md, eid-plans-2.md). A file the writer named stays as it is.
+//! a new note is (2026-09-28_143005.md, or 2026-09-28_143005-2.md when that one was taken) or
+//! after its current title the way a live title does (eid-plans.md, eid-plans-2.md). A file the
+//! writer named stays as it is.
 static bool file_named_by_dawn(void)
 {
     if (!app.session_path || !note_in_history_dir(app.session_path))
         return false;
     size_t n;
     const char* base = base_name(app.session_path, &n);
-    // YYYY-MM-DD_HHMMSS
-    static const char pattern[] = "dddd-dd-dd_dddddd";
-    bool stamp = n == sizeof(pattern) - 1;
-    for (size_t i = 0; stamp && i < n; i++)
-        stamp = pattern[i] == 'd' ? isdigit((unsigned char)base[i]) != 0 : base[i] == pattern[i];
-    if (stamp)
+    if (notepath_is_stamp_name(base, n))
         return true;
     const char* title = note_title();
     if (!title || note_untitled() || !title_is_ai())

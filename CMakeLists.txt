@@ -208,12 +208,14 @@ if(NOT EMSCRIPTEN)
     endif()
 
     # Test target for the storage layer: dawn_fsio (atomic writes, reads, mkdir -p, no-replace
-    # moves, quarantine) and the history CRDT, each linked alone with stubs for app and its helpers
+    # moves, quarantine), the note naming rules (dawn_notepath) and the history CRDT, each linked
+    # alone with stubs for app and its helpers
     if(NOT WIN32)
         add_executable(test-store
             tests/test_store.c
             src/dawn_fsio.c
             src/dawn_crdt.c
+            src/dawn_notepath.c
             third-party/cJSON.c
         )
 

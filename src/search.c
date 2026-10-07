@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+//! Most of one past session the past_sessions tool hands the model
+#define SESSION_READ_MAX 32768
+
 // #region Curl Helpers
 
 typedef struct {
@@ -287,7 +290,7 @@ char* time_tool_callback(const char* params_json, void* user_data)
 char* sessions_tool_callback(const char* params_json, void* user_data)
 {
     const char* history_dir = (const char*)user_data;
-    if (!history_dir) {
+    if (!history_dir || !history_dir[0]) {
         return dawn_strdup("{\"error\": \"History directory not configured\"}");
     }
 
@@ -324,10 +327,10 @@ char* sessions_tool_callback(const char* params_json, void* user_data)
                     cJSON* session = cJSON_CreateObject();
                     cJSON_AddStringToObject(session, "filename", entry->d_name);
 
-                    char filepath[1024];
-                    snprintf(filepath, sizeof(filepath), "%s/%s", history_dir, entry->d_name);
+                    char filepath[PATH_MAX];
+                    int w = snprintf(filepath, sizeof(filepath), "%s/%s", history_dir, entry->d_name);
                     struct stat st;
-                    if (stat(filepath, &st) == 0) {
+                    if (w > 0 && (size_t)w < sizeof(filepath) && stat(filepath, &st) == 0) {
                         char date[64];
                         strftime(date, sizeof(date), "%Y-%m-%d %H:%M", localtime(&st.st_mtime));
                         cJSON_AddStringToObject(session, "modified", date);
@@ -341,30 +344,28 @@ char* sessions_tool_callback(const char* params_json, void* user_data)
         }
     } else if (strcmp(action, "read") == 0 && filename) {
         // Read a specific session
-        char filepath[1024];
-        snprintf(filepath, sizeof(filepath), "%s/%s", history_dir, filename);
+        char filepath[PATH_MAX];
+        int w = snprintf(filepath, sizeof(filepath), "%s/%s", history_dir ? history_dir : "", filename);
 
         // Security: prevent path traversal
-        if (strstr(filename, "..") || filename[0] == '/') {
+        if (!history_dir || !history_dir[0] || strstr(filename, "..") || filename[0] == '/') {
             cJSON_AddStringToObject(response, "error", "Invalid filename");
+        } else if (w < 0 || (size_t)w >= sizeof(filepath)) {
+            cJSON_AddStringToObject(response, "error", "Filename too long");
         } else {
-            FILE* f = fopen(filepath, "r");
-            if (!f) {
+            // The whole file through the backend (no ftell/malloc guesswork), then at most 32 KB of
+            // it, cut where a character starts.
+            size_t size = 0;
+            char* content = DAWN_BACKEND(app)->read_file(filepath, &size);
+            if (!content) {
                 cJSON_AddStringToObject(response, "error", "Could not open file");
             } else {
-                fseek(f, 0, SEEK_END);
-                long size = ftell(f);
-                fseek(f, 0, SEEK_SET);
-
-                // Limit to 32KB
-                if (size > 32768)
-                    size = 32768;
-
-                char* content = malloc(size + 1);
-                size_t nread = fread(content, 1, size, f);
-                content[nread] = '\0';
-                fclose(f);
-
+                if (size > SESSION_READ_MAX) {
+                    size = SESSION_READ_MAX;
+                    while (size > 0 && ((unsigned char)content[size] & 0xC0) == 0x80)
+                        size--;
+                    content[size] = '\0';
+                }
                 cJSON_AddStringToObject(response, "filename", filename);
                 cJSON_AddStringToObject(response, "content", content);
                 free(content);
