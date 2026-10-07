@@ -194,10 +194,50 @@ static bool is_blank_line(const char* text, size_t ls, size_t le)
     return true;
 }
 
-void embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size)
+//! Whether [s, e) is no title at all: empty, or dawn's placeholder for a new note.
+static bool is_placeholder_title(const char* text, size_t s, size_t e)
+{
+    return e <= s || (e - s == 8 && memcmp(text + s, "Untitled", 8) == 0);
+}
+
+//! A line's text without its leading markdown: heading hashes, a quote's '>', a list or task
+//! marker. Trimmed; [*s, *e) is left empty when nothing is left.
+static void strip_line_markup(const char* text, size_t* s, size_t* e)
+{
+    trim_range(text, s, e);
+    for (int32_t round = 0; round < 4 && *s < *e; round++) {
+        size_t p = *s, ts = 0, te = 0;
+        if (parse_heading(text, *s, *e, NULL, &ts, &te)) {
+            *s = ts;
+            *e = te;
+            return;
+        }
+        if (text[p] == '>') {
+            p++;
+        } else if ((text[p] == '-' || text[p] == '*' || text[p] == '+') && p + 1 < *e
+            && (text[p + 1] == ' ' || text[p + 1] == '\t')) {
+            p++;
+        } else if (text[p] >= '0' && text[p] <= '9') {
+            while (p < *e && text[p] >= '0' && text[p] <= '9')
+                p++;
+            if (p + 1 >= *e || (text[p] != '.' && text[p] != ')') || (text[p + 1] != ' ' && text[p + 1] != '\t'))
+                break;
+            p++;
+        } else if (text[p] == '[' && p + 2 < *e && text[p + 2] == ']'
+            && (text[p + 1] == ' ' || text[p + 1] == 'x' || text[p + 1] == 'X')) {
+            p += 3;
+        } else {
+            break;
+        }
+        *s = p;
+        trim_range(text, s, e);
+    }
+}
+
+EmbedTitleSource embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size)
 {
     if (!out || out_size == 0)
-        return;
+        return EMBED_TITLE_NONE;
     out[0] = '\0';
     if (!text)
         len = 0;
@@ -216,44 +256,73 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
                     s++;
                     e--;
                 }
-                if (e > s) {
+                if (!is_placeholder_title(text, s, e)) {
                     copy_utf8(out, out_size, text + s, e - s);
-                    return;
+                    return EMBED_TITLE_FRONTMATTER;
                 }
             }
             pos = le + 1;
         }
     }
 
-    // 2) The first level-one heading outside code.
+    // 2) The first level-one heading outside code. On the way, 3)'s candidate: the first line
+    // with any text, fence lines aside, without its markdown.
     size_t pos = body;
     bool in_fence = false;
     char fch = 0;
     size_t fn = 0;
+    size_t line_s = 0, line_e = 0;
     while (pos < len) {
         const char* nl = memchr(text + pos, '\n', len - pos);
         size_t le = nl ? (size_t)(nl - text) : len;
         char c = 0;
         size_t k = 0;
+        bool fence_line = false;
         if (in_fence) {
-            if (closes_fence(text, pos, le, fch, fn))
+            if (closes_fence(text, pos, le, fch, fn)) {
                 in_fence = false;
+                fence_line = true;
+            }
         } else if (parse_fence(text, pos, le, &c, &k)) {
             in_fence = true;
+            fence_line = true;
             fch = c;
             fn = k;
         } else {
             int32_t level = 0;
             size_t ts = 0, te = 0;
-            if (parse_heading(text, pos, le, &level, &ts, &te) && level == 1 && te > ts) {
+            if (parse_heading(text, pos, le, &level, &ts, &te) && level == 1
+                && !is_placeholder_title(text, ts, te)) {
                 copy_utf8(out, out_size, text + ts, te - ts);
-                return;
+                return EMBED_TITLE_HEADING;
+            }
+        }
+        if (!fence_line && line_e == line_s) {
+            size_t s = pos, e = le;
+            strip_line_markup(text, &s, &e);
+            if (!is_placeholder_title(text, s, e)) {
+                line_s = s;
+                line_e = e;
             }
         }
         pos = le + 1;
     }
 
-    // 3) The file name.
+    // 3) The first line, cut to EMBED_TITLE_LINE_MAX bytes at a character boundary.
+    if (line_e > line_s) {
+        size_t n = line_e - line_s;
+        if (n > EMBED_TITLE_LINE_MAX) {
+            n = EMBED_TITLE_LINE_MAX;
+            while (n > 0 && is_utf8_cont((unsigned char)text[line_s + n]))
+                n--;
+            while (n > 0 && is_space(text[line_s + n - 1]))
+                n--;
+        }
+        copy_utf8(out, out_size, text + line_s, n);
+        return EMBED_TITLE_FIRST_LINE;
+    }
+
+    // 4) The file name.
     if (path) {
         const char* base = path;
         for (const char* p = path; *p; p++)
@@ -263,7 +332,10 @@ void embed_note_title(const char* text, size_t len, const char* path, char* out,
         if (n > 3 && strcmp(base + n - 3, ".md") == 0)
             n -= 3;
         copy_utf8(out, out_size, base, n);
+        if (out[0])
+            return EMBED_TITLE_FILE_NAME;
     }
+    return EMBED_TITLE_NONE;
 }
 
 int32_t embed_estimate_tokens(const char* text, size_t len)
@@ -325,6 +397,8 @@ typedef struct {
     EmbedChunk* out;
     int32_t max;
     int32_t count;
+    int32_t max_tokens; //!< A paragraph above this is split
+    int32_t target_tokens; //!< Pieces grow up to this
     char heading[EMBED_HEADING_MAX];
     // The piece still open, if any.
     bool open;
@@ -426,14 +500,14 @@ static void chunk_split_paragraph(Chunker* c, size_t first, size_t s, size_t e)
     while (a < e && c->count < c->max) {
         size_t b = sentence_end(c->body, a, e);
         int32_t st = chunk_tokens(c, a, b);
-        if (st > EMBED_MAX_TOKENS) {
+        if (st > c->max_tokens) {
             size_t from = a;
             if (acc_has)
                 chunk_emit(c, acc_start, acc_end);
             else
                 from = acc_start;
             size_t per = (size_t)st > 0 ? (b - a) / (size_t)st : 4;
-            size_t limit = per * EMBED_TARGET_TOKENS;
+            size_t limit = per * (size_t)c->target_tokens;
             if (limit < 64)
                 limit = 64;
             size_t p = a;
@@ -446,7 +520,7 @@ static void chunk_split_paragraph(Chunker* c, size_t first, size_t s, size_t e)
             acc_end = b;
             acc_tokens = chunk_tokens(c, from, b);
             acc_has = true;
-        } else if (acc_has && acc_tokens + st > EMBED_TARGET_TOKENS) {
+        } else if (acc_has && acc_tokens + st > c->target_tokens) {
             chunk_emit(c, acc_start, acc_end);
             acc_start = a;
             acc_end = b;
@@ -549,7 +623,8 @@ fail:
     return NULL;
 }
 
-int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk* out, int32_t max)
+int32_t embed_chunk(const char* body, size_t len, float token_scale, int32_t max_tokens, EmbedChunk* out,
+    int32_t max)
 {
     if (!body || !out || max <= 0 || len == 0 || len > EMBED_NOTE_MAX)
         return 0;
@@ -561,6 +636,11 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
 
     Chunker c = { .body = body, .len = len, .out = out, .max = max };
     c.scale = (token_scale > 0.05f && token_scale < 20.0f) ? token_scale : 1.0f;
+    // A smaller cap shrinks the merge target in proportion (400 of 480 by default).
+    c.max_tokens = max_tokens <= 0 || max_tokens > EMBED_MAX_TOKENS ? EMBED_MAX_TOKENS
+        : max_tokens < EMBED_MIN_TOKENS                             ? EMBED_MIN_TOKENS
+                                                                    : max_tokens;
+    c.target_tokens = c.max_tokens * EMBED_TARGET_TOKENS / EMBED_MAX_TOKENS;
 
     for (int32_t i = 0; i < nblocks && c.count < c.max; i++) {
         const Blk* b = &blocks[i];
@@ -579,7 +659,7 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
 
         int32_t t = chunk_tokens(&c, b->start, b->end);
         size_t first = (c.open && c.heading_only) ? c.start : b->start;
-        if (t > EMBED_MAX_TOKENS && b->kind == BLK_FENCE) {
+        if (t > c.max_tokens && b->kind == BLK_FENCE) {
             // Code is never split: it goes whole, as a piece of its own (with its heading).
             if (c.open && !c.heading_only) {
                 chunk_flush(&c);
@@ -587,14 +667,14 @@ int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk*
             }
             chunk_emit(&c, first, b->end);
             c.open = false;
-        } else if (t > EMBED_MAX_TOKENS) {
+        } else if (t > c.max_tokens) {
             if (c.open && !c.heading_only) {
                 chunk_flush(&c);
                 first = b->start;
             }
             chunk_split_paragraph(&c, first, b->start, b->end);
         } else {
-            if (c.open && !c.heading_only && c.tokens + t > EMBED_TARGET_TOKENS)
+            if (c.open && !c.heading_only && c.tokens + t > c.target_tokens)
                 chunk_flush(&c);
             if (c.open) {
                 c.end = b->end;
@@ -1012,6 +1092,45 @@ void embed_topk_push(EmbedScored* top, int32_t* count, int32_t k, EmbedScored ca
     top[pos] = cand;
     if (n < k)
         *count = n + 1;
+}
+
+int32_t embed_cut(const EmbedScored* top, int32_t count, float min_score, float near_best)
+{
+    if (!top || count <= 0)
+        return 0;
+    float bar = min_score;
+    if (near_best > 0.0f && top[0].score - near_best > bar)
+        bar = top[0].score - near_best;
+    int32_t n = 0;
+    while (n < count && top[n].score >= bar)
+        n++;
+    return n;
+}
+
+//! Score floors per embedder family, matched as a substring of the model id; the first match
+//! wins and the last row (no match) covers the rest. Measured 2026-10-07 on the phone (A065), 256
+//! dims, cosine with the launcher's task prefixes. EmbeddingGemma 2 440M sits high: a question
+//! scores 0.84-0.86 against the notes that answer it but still 0.55-0.73 against unrelated ones,
+//! and unrelated notes score 0.65 against each other, same-topic 0.74, near-duplicates 0.89.
+//! EmbeddingGemma 300M (v1) scores 0.62-0.65 for the answer and 0.11-0.37 for the rest.
+static const struct {
+    const char* match;
+    float search;
+    float related;
+} embed_floor_table[] = {
+    { "embeddinggemma-2", 0.70f, 0.80f },
+    { NULL, 0.35f, 0.60f }, // EmbeddingGemma v1, Qwen3 and anything else
+};
+
+void embed_floors(const char* model_id, float* search, float* related)
+{
+    size_t i = 0;
+    while (embed_floor_table[i].match && !(model_id && strstr(model_id, embed_floor_table[i].match)))
+        i++;
+    if (search)
+        *search = embed_floor_table[i].search;
+    if (related)
+        *related = embed_floor_table[i].related;
 }
 
 // #endregion

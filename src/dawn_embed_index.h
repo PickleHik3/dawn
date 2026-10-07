@@ -25,12 +25,14 @@
 #define EMBED_REVISION_MAX 64 //!< `_revision`, bytes including the NUL
 #define EMBED_PATH_MAX 1024 //!< Note path, bytes including the NUL; longer paths are not indexed
 #define EMBED_TITLE_MAX 160 //!< Note title, bytes including the NUL
+#define EMBED_TITLE_LINE_MAX 48 //!< A title taken from a note's first line is cut to this many bytes
 #define EMBED_HEADING_MAX 160 //!< A piece's heading, bytes including the NUL
 #define EMBED_FILE_MAX (32u << 20) //!< Largest index file read back; anything bigger is discarded
 #define EMBED_NOTE_MAX (8u << 20) //!< Largest note indexed, in bytes
 
 #define EMBED_TARGET_TOKENS 400 //!< Pieces grow up to about this many tokens
 #define EMBED_MAX_TOKENS 480 //!< A paragraph above this is split at sentence boundaries
+#define EMBED_MIN_TOKENS 32 //!< Smallest cap embed_chunk() accepts
 
 // #endregion
 
@@ -47,10 +49,22 @@ size_t embed_body_offset(const char* text, size_t len);
 //! CRLF and lone CR to LF, in place, as normalize_line_endings() does. Returns the new length.
 size_t embed_normalize_newlines(char* buf, size_t len);
 
+//! Where embed_note_title() found the title.
+typedef enum {
+    EMBED_TITLE_NONE, //!< Nowhere: out is ""
+    EMBED_TITLE_FRONTMATTER, //!< The frontmatter's `title:`
+    EMBED_TITLE_HEADING, //!< The first `# ` heading
+    EMBED_TITLE_FIRST_LINE, //!< The first line with text
+    EMBED_TITLE_FILE_NAME, //!< The file name
+} EmbedTitleSource;
+
 //! The note's title: the frontmatter's `title:` when text (the whole file) has one, else the
-//! body's first `# ` heading, else the file name without its directory and `.md`. Always
-//! NUL-terminates out, cut at a UTF-8 boundary.
-void embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size);
+//! body's first `# ` heading, else its first line with text (fence lines skipped, without leading
+//! markdown such as '#', '>', a list or task marker) cut to EMBED_TITLE_LINE_MAX bytes, else the
+//! file name without its directory and `.md`. "Untitled", which dawn calls every new note, and ""
+//! count as no title at the first three steps. Always NUL-terminates out, cut at a UTF-8 boundary.
+//! Returns which step gave the title.
+EmbedTitleSource embed_note_title(const char* text, size_t len, const char* path, char* out, size_t out_size);
 
 //! Roughly how many tokens text costs: chars/3.6 for mostly-Latin text, chars/2.5 when it is
 //! mostly Arabic script (the same estimate as dawn_ai_tokens.c). 0 for empty text.
@@ -70,12 +84,15 @@ typedef struct {
 
 //! Split a body into pieces, markdown-aware: a heading always starts a new piece (and is part of
 //! it); small paragraphs merge until about EMBED_TARGET_TOKENS; a paragraph longer than
-//! EMBED_MAX_TOKENS is split at sentence ends (and, failing that, at a space); a fenced code block
+//! max_tokens is split at sentence ends (and, failing that, at a space); a fenced code block
 //! is never split, however long. Pieces are trimmed of surrounding blank space, and a piece that
 //! holds nothing but a heading is dropped. token_scale multiplies embed_estimate_tokens() (1.0
-//! when uncalibrated; the model's real count over the estimate otherwise). Returns the number of
-//! pieces written, at most max.
-int32_t embed_chunk(const char* body, size_t len, float token_scale, EmbedChunk* out, int32_t max);
+//! when uncalibrated; the model's real count over the estimate otherwise). max_tokens caps a
+//! piece, for a model whose window is small: 0 (or anything above EMBED_MAX_TOKENS) means
+//! EMBED_MAX_TOKENS, values below EMBED_MIN_TOKENS count as EMBED_MIN_TOKENS, and the merge target
+//! shrinks in the same proportion. Returns the number of pieces written, at most max.
+int32_t embed_chunk(const char* body, size_t len, float token_scale, int32_t max_tokens, EmbedChunk* out,
+    int32_t max);
 
 // #endregion
 
@@ -140,6 +157,15 @@ typedef struct {
 //! Offer a candidate to a top-k list kept sorted by score, best first. *count is the list's
 //! current length (start at 0) and k its capacity; a candidate no better than the k-th is dropped.
 void embed_topk_push(EmbedScored* top, int32_t* count, int32_t k, EmbedScored cand);
+
+//! How many of a best-first list survive: the leading entries scoring at least min_score and, when
+//! near_best > 0, no more than near_best below top[0]. The rest are cut off, never reordered.
+int32_t embed_cut(const EmbedScored* top, int32_t count, float min_score, float near_best);
+
+//! The score floors for an embedder (its /v1/models id; NULL or "" when there is none): *search
+//! for a query against pieces (Ctrl+S's "by meaning"), *related for note against note (the chat's
+//! "also in:"). Cosine baselines differ a lot between models, so each family has its own pair.
+void embed_floors(const char* model_id, float* search, float* related);
 
 // #endregion
 

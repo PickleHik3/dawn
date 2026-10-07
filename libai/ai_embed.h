@@ -24,6 +24,7 @@
 #define AI_EMBED_ID_MAX 128 //!< Model id, bytes including the NUL
 #define AI_EMBED_REVISION_MAX 64 //!< `_revision`, bytes including the NUL
 #define AI_EMBED_BATCH_MAX 64 //!< Most inputs one request may carry
+#define AI_EMBED_ERROR_MAX 64 //!< An error reply's code, bytes including the NUL
 
 //! How a call ended.
 typedef enum {
@@ -31,6 +32,8 @@ typedef enum {
     AI_EMBED_NONE, //!< No embedder: none listed, 404 model_not_found or 501; look again later
     AI_EMBED_RETRY, //!< 429, 503 or no connection: try again after *retry_after_ms
     AI_EMBED_REJECTED, //!< 400 or 413: this request will never succeed as it is
+    AI_EMBED_REFUSED, //!< 401/403, or (embeddings) a 400 naming the model's setup: no request will
+                      //!< succeed until the endpoint changes; the code is in ai_embed_result_t.error
     AI_EMBED_CANCELLED, //!< The cancel flag was set
     AI_EMBED_ERROR, //!< Anything else (a 5xx, a reply that does not parse)
 } ai_embed_status_t;
@@ -40,6 +43,7 @@ typedef struct {
     char id[AI_EMBED_ID_MAX];
     char revision[AI_EMBED_REVISION_MAX]; //!< "" when the entry has none
     int32_t dims; //!< What to ask for: 256 when the model lists it, 0 to leave `dimensions` out
+    int32_t native_dims; //!< `_endpoint_dimensions` (what a reply holds when dims is 0), 0 if absent
     int32_t max_batch; //!< `_endpoint_max_batch`, clamped to 1..AI_EMBED_BATCH_MAX (16 if absent)
     int32_t context_window; //!< `_endpoint_context_window`, 0 if absent
 } ai_embedder_t;
@@ -62,6 +66,7 @@ typedef struct {
     int32_t count;
     int32_t tokens; //!< Sum of `data[i].tokens` (the model's own count, prefix included), -1 if absent
     int32_t truncated; //!< How many inputs the server cut to fit its window
+    char error[AI_EMBED_ERROR_MAX]; //!< When the call failed: the reply's `error.code`, or "" for none
 } ai_embed_result_t;
 
 //! The endpoint the chat talks to: *base_url ends in /v1, *api_key is NULL when none is set. Both
@@ -69,8 +74,9 @@ typedef struct {
 //! Implemented in ai_bridge_openai.c, which owns the configuration.
 bool ai_openai_endpoint(char** base_url, char** api_key);
 
-//! Find the embedder in GET /v1/models: the first entry whose `_capabilities` include
-//! "text_embeddings", preferring an EmbeddingGemma. AI_EMBED_NONE when there is none.
+//! Find the embedder in GET /v1/models: among the entries whose `_capabilities` include
+//! "text_embeddings", the first whose id holds "embeddinggemma-2", else the first holding
+//! "embeddinggemma", else the first. AI_EMBED_NONE when there is none.
 ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* cancel);
 
 //! Whether a chat reply is being generated now (`runtime.activeGeneration` in GET /v1/ai/runtime).
@@ -83,8 +89,12 @@ ai_embed_status_t ai_embed_tokenize(const char* model, const char* text, size_t 
     const atomic_bool* cancel);
 
 //! Embed a batch (POST /v1/embeddings, base64 vectors, falling back to float arrays). On
-//! AI_EMBED_OK *out holds count vectors in request order, each of one length (dims when asked).
-//! On AI_EMBED_RETRY *retry_after_ms says how long to wait (Retry-After, or a default).
+//! AI_EMBED_OK *out holds count vectors in request order, all of one length: dims when asked, but
+//! the caller checks out->dims, since a model swapped behind the endpoint may answer differently.
+//! On AI_EMBED_RETRY *retry_after_ms says how long to wait (Retry-After, or a default). A 400
+//! whose code is embedding_tokenizer_missing, invalid_dimensions or capability_not_supported, and
+//! any 401/403, is AI_EMBED_REFUSED with out->error set ("unauthorized" when the reply
+//! names no code); out->error holds the code of every other failed reply that has one.
 ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_result_t* out,
     int32_t* retry_after_ms, const atomic_bool* cancel);
 

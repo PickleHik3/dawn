@@ -25,6 +25,7 @@
 #include "dawn_scrollind.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
+#include "dawn_status.h"
 #include "dawn_tex.h"
 #include "dawn_theme.h"
 #include "dawn_title.h"
@@ -176,6 +177,14 @@ static inline Layout calc_layout(void)
     if (l.text_height < 1)
         l.text_height = 1;
     return l;
+}
+
+//! How wide the status panel (dawn_status) may be over the note: 40 columns, less on a phone,
+//! leaving the note's left side clear.
+static inline int32_t status_panel_cols(const Layout* L)
+{
+    int32_t cols = L->text_area_cols - 4;
+    return cols < 40 ? cols : 40;
 }
 
 //! Calculate screen row from virtual row
@@ -2512,6 +2521,14 @@ static int32_t chat_max_scroll = 0;
 //! 0 when not drawn), so a tap on it opens the model picker.
 static int32_t chat_name_row = 0, chat_name_col0 = 0, chat_name_col1 = 0;
 
+//! Where the last render drew the chat's "also in:" line (row 0 when not drawn) and the note piece
+//! it names, so a tap on that row opens it.
+static struct {
+    int32_t row, col0, col1; //!< Its row and columns [col0, col1)
+    char path[EMBED_PATH_MAX];
+    uint32_t start;
+} also_in;
+
 #if HAS_LIBAI
 //! The model picker: a small list over the chat's messages, opened by tapping the model's name in
 //! the header or Ctrl+L in the chat. Choosing switches at once; esc or Ctrl+L closes it.
@@ -2989,17 +3006,25 @@ skip_chat:
     // "also in: <title>" (dawn_embed): another note that covers the same ground, dim, on the gap
     // row between the messages and the input. Only when an index exists and a message row is left
     // above it (the header's rows stay the header's), and never in focus mode.
+    // A tap on it opens that note there; the arrow (nf-md-open_in_new with a Nerd Font, which
+    // spreads over the first of its two spaces) says so.
     EmbedHit rel[1];
+    also_in.row = 0;
     if (!app.focus_mode && msg_area_end > msg_area_start && embed_ready() && app.session_path
-        && embed_related(app.session_path, EMBED_RELATED_MIN_SCORE, rel, 1) == 1) {
-        char line[EMBED_TITLE_MAX + 16];
-        snprintf(line, sizeof(line), "also in: %s", rel[0].note_title);
+        && embed_related(app.session_path, embed_related_floor(), rel, 1) == 1) {
+        char line[EMBED_TITLE_MAX + 24];
+        snprintf(line, sizeof(line), "%salso in: %s", app.nerd_font ? "\xf3\xb0\x8f\x8c  " : "-> ", rel[0].note_title);
         int32_t fit = chat_wrap_line(line, strlen(line), 0, content_width);
         move_to(msg_area_end, content_start);
         set_bg(get_ai_bg());
         set_fg(get_dim());
         for (int32_t c = 0; c < fit; c++)
             out_char(line[c]);
+        also_in.row = msg_area_end;
+        also_in.col0 = content_start;
+        also_in.col1 = content_start + content_width;
+        snprintf(also_in.path, sizeof(also_in.path), "%s", rel[0].path);
+        also_in.start = rel[0].start;
     }
 
     // Input area: one rung up the tonal ladder (surface_container_high) from the chat, which is
@@ -3057,6 +3082,7 @@ skip_chat:
     if (app.ai_focused) {
         move_to(cursor_row, cursor_col);
         cursor_visible(true);
+        status_cursor(cursor_row, cursor_col);
     }
     reset_attrs();
 }
@@ -3824,21 +3850,80 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
+    // The status panel's corner (dawn_status): the two blank rows under the text.
+    status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, cursor_screen_col);
 }
 
 //! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
 static bool embed_news = false;
 
+//! After embed_poll() said something moved: a meaning index that has just stopped for good (a
+//! permanent error) says why once, as a sticky notice, each time it enters that state.
+static void embed_tell_failure(void)
+{
+    static bool failed = false;
+    EmbedStatus st;
+    embed_status(&st);
+    bool now = st.phase == EMBED_PHASE_FAILED;
+    if (now && !failed) {
+        char msg[EMBED_ERROR_MAX + 24];
+        snprintf(msg, sizeof(msg), "meaning index: %s", st.error[0] ? st.error : "failed");
+        notice_post(NOTICE_ERROR, msg);
+    }
+    failed = now;
+}
+
+//! A "by meaning" row's text: the piece's heading, or the first non-blank line of slice (the
+//! piece's text, NUL-terminated), cut to fit out at a UTF-8 boundary.
+static void meaning_row_text(char* out, size_t cap, const char* heading, const char* slice)
+{
+    const char* from = heading;
+    size_t len = strlen(from);
+    if (len == 0 && slice) {
+        from = slice;
+        while (*from == '\n' || *from == ' ')
+            from++;
+        len = strcspn(from, "\n");
+    }
+    if (len >= cap) {
+        len = cap - 1;
+        while (len > 0 && ((unsigned char)from[len] & 0xC0) == 0x80)
+            len--; // not in the middle of a character
+    }
+    memcpy(out, from, len);
+    out[len] = '\0';
+}
+
+//! Another note's body as load_file_for_editing() puts it in app.text (frontmatter removed, LF
+//! endings), malloc'd and NUL-terminated, or NULL when the file can't be read.
+static char* meaning_note_body(const char* path, size_t* len)
+{
+    size_t n = 0;
+    char* raw = DAWN_BACKEND(app)->read_file(path, &n);
+    if (!raw)
+        return NULL;
+    size_t off = embed_body_offset(raw, n);
+    size_t body = n - off;
+    memmove(raw, raw + off, body);
+    body = embed_normalize_newlines(raw, body);
+    raw[body] = '\0';
+    *len = body;
+    return raw;
+}
+
 //! Rank Ctrl+S's "by meaning" group for the current query: pieces of this note close in meaning,
 //! minus pieces the user has edited since they were indexed and pieces an exact match already
-//! covers. Asks again only when the query, the exact results or the index changed; a query still
-//! being embedded shows nothing until embed_poll() says it landed.
+//! covers, then the best piece of each other note, minus ones whose file changed since. Asks again
+//! only when the query, the exact results or the index changed; a query still being embedded
+//! shows nothing until embed_poll() says it landed.
 static void refresh_meaning(SearchState* s, bool exact_changed)
 {
     if (!embed_ready() || s->query_len < 3 || !app.session_path) {
         s->meaning_count = 0;
+        s->meaning_here = 0;
         s->meaning_query[0] = '\0';
         return;
     }
@@ -3846,9 +3931,9 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
         return;
     embed_news = false;
     snprintf(s->meaning_query, sizeof(s->meaning_query), "%s", s->query);
-    EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE };
+    EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = embed_search_floor(), .near_best = EMBED_NEAR_BEST };
     int32_t n = 0;
-    if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_MAX, &n) != EMBED_READY)
+    if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_HERE, &n) != EMBED_READY)
         n = 0;
     int32_t kept = 0;
     size_t doc_len = gap_len(&app.text);
@@ -3862,27 +3947,30 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
             if (s->results[k].pos >= h->start && s->results[k].pos < (size_t)h->start + h->len)
                 ok = false;
         if (ok) {
-            // The row: the piece's heading, or its first non-blank line.
-            char* text = s->meaning_text[kept];
-            size_t cap = sizeof(s->meaning_text[kept]);
-            const char* from = h->heading;
-            size_t len = strlen(from);
-            if (len == 0) {
-                from = slice;
-                while (*from == '\n' || *from == ' ')
-                    from++;
-                len = strcspn(from, "\n");
-            }
-            if (len >= cap) {
-                len = cap - 1;
-                while (len > 0 && ((unsigned char)from[len] & 0xC0) == 0x80)
-                    len--; // not in the middle of a character
-            }
-            memcpy(text, from, len);
-            text[len] = '\0';
+            meaning_row_text(s->meaning_text[kept], sizeof(s->meaning_text[kept]), h->heading, slice);
             s->meaning[kept++] = *h;
         }
         free(slice);
+    }
+    s->meaning_here = kept;
+
+    // Other notes, one row each: the piece is read back from its file to check it is still there.
+    EmbedHit other[SEARCH_MEANING_ELSEWHERE];
+    EmbedSearchOpts elsewhere = {
+        .only_path = NULL, .exclude_path = app.session_path, .min_score = embed_search_floor(), .near_best = EMBED_NEAR_BEST, .one_per_note = true
+    };
+    if (embed_search(s->query, (size_t)s->query_len, &elsewhere, other, SEARCH_MEANING_ELSEWHERE, &n) != EMBED_READY)
+        n = 0;
+    for (int32_t i = 0; i < n && kept < SEARCH_MEANING_MAX; i++) {
+        const EmbedHit* h = &other[i];
+        size_t body_len = 0;
+        char* body = meaning_note_body(h->path, &body_len);
+        if (body && (size_t)h->start + h->len <= body_len && embed_hit_matches(h, body + h->start, h->len)) {
+            body[(size_t)h->start + h->len] = '\0';
+            meaning_row_text(s->meaning_text[kept], sizeof(s->meaning_text[kept]), h->heading, body + h->start);
+            s->meaning[kept++] = *h;
+        }
+        free(body);
     }
     s->meaning_count = kept;
     if (s->selected >= s->count + kept)
@@ -3953,6 +4041,9 @@ static void render(void)
         break;
     }
 
+    // The status panel slides out over the note (not in focus mode) or the welcome screen, never
+    // over a dialog.
+    status_frame(app.mode == MODE_WELCOME || (app.mode == MODE_WRITING && !app.focus_mode));
     scrollind_frame_end();
     sync_end();
     out_flush();
@@ -4063,6 +4154,22 @@ static bool open_from_history(const char* path)
         notice_post(NOTICE_ERROR, msg);
     }
     return false;
+}
+
+//! Open another note at byte pos of its body, from a meaning hit (Ctrl+S's "by meaning" group, the
+//! chat's "also in:" line). The open note is saved first; one that can't be saved stays open, the
+//! status bar saying why (or the conflict dialog asking), and so does one when the other can't be
+//! opened (open_from_history() posts the notice). Either way the mode is MODE_WRITING after.
+static bool open_note_at(const char* path, size_t pos)
+{
+    char target[EMBED_PATH_MAX];
+    snprintf(target, sizeof(target), "%s", path);
+    bool opened = save_session() && open_from_history(target);
+    if (opened)
+        restore_cursor_position(pos);
+    app.mode = MODE_WRITING;
+    clear_screen();
+    return opened;
 }
 
 // #endregion
@@ -4448,6 +4555,9 @@ static void handle_mouse_click(void)
         if (chat_name_row > 0 && row == chat_name_row && col >= chat_name_col0 && col <= chat_name_col1)
             chat_picker_open();
 #endif
+        // A tap on "also in:" opens that note at the piece it names.
+        if (also_in.row > 0 && row == also_in.row && col >= also_in.col0 && col < also_in.col1)
+            open_note_at(also_in.path, also_in.start);
         return;
     }
 
@@ -5322,6 +5432,47 @@ static void handle_ai_input(int32_t key)
     }
 }
 
+//! A key on MODE_HELP's meaning page: m switches the index off or on (and remembers it in
+//! settings.json), r arms a rebuild and a second r within HELP_REBUILD_CONFIRM_MS starts it; a tap
+//! on either row does the same. A tap elsewhere in the box, and the release, drag and scroll that
+//! come with taps, do nothing (the release after a tap on a row would otherwise close help).
+//! @return false for any other key, which closes help
+static bool help_meaning_key(int32_t key)
+{
+    if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_SCROLL_UP
+        || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
+        return true;
+    if (key == DAWN_KEY_MOUSE_CLICK) {
+        int32_t hit = render_help_hit(input_last_mouse_row(), input_last_mouse_col());
+        if (hit == HELP_HIT_OUTSIDE)
+            return false;
+        if (hit == HELP_HIT_BOX)
+            return true;
+        key = hit == HELP_HIT_TOGGLE ? 'm' : 'r';
+    }
+    if (key == 'm') {
+        app.meaning_index = !app.meaning_index;
+        embed_set_enabled(app.meaning_index);
+        settings_save();
+        app.help_rebuild_armed = 0;
+        return true;
+    }
+    if (key == 'r') {
+        if (!embed_enabled())
+            return true; // the row says to turn it on first
+        int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (app.help_rebuild_armed && now - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS) {
+            app.help_rebuild_armed = 0;
+            embed_rebuild();
+            notice_post(NOTICE_INFO, "rebuilding the meaning index");
+        } else {
+            app.help_rebuild_armed = now;
+        }
+        return true;
+    }
+    return false;
+}
+
 static void handle_input(void)
 {
     int32_t key = input_read_key();
@@ -6064,16 +6215,25 @@ static void handle_input(void)
         break;
     }
 
-    case MODE_HELP:
+    case MODE_HELP: {
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
-        if (key == '\t' || key == DAWN_KEY_RIGHT)
-            app.help_page = 1;
-        else if (key == DAWN_KEY_LEFT)
-            app.help_page = 0;
-        else
+        // A third, where the meaning index is compiled in, shows what it is doing and has its
+        // switch and its rebuild. Any other key closes help.
+        int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
+        if (key == '\t' || key == DAWN_KEY_RIGHT) {
+            if (app.help_page < last_page)
+                app.help_page++;
+        } else if (key == DAWN_KEY_LEFT) {
+            if (app.help_page > 0)
+                app.help_page--;
+        } else if (app.help_page != 2 || !help_meaning_key(key)) {
             MODE_POP();
+        }
+        if (app.help_page != 2)
+            app.help_rebuild_armed = 0;
         break;
+    }
 
     case MODE_TOC: {
         TocState* toc = (TocState*)app.toc_state;
@@ -6145,6 +6305,15 @@ static void handle_input(void)
             break;
         }
 
+        // A tap on a result row picks it as Enter would; anywhere else does nothing.
+        if (key == DAWN_KEY_MOUSE_CLICK) {
+            int32_t hit = render_search_hit(input_last_mouse_row(), input_last_mouse_col());
+            if (hit < 0)
+                break;
+            search->selected = hit;
+            key = '\r';
+        }
+
         switch (key) {
         case '\x1b':
             MODE_POP();
@@ -6156,6 +6325,10 @@ static void handle_input(void)
             if (r) {
                 app.cursor = r->pos;
                 app.selecting = false;
+            } else if (m >= search->meaning_here && m < search->meaning_count) {
+                // Another note's row: that note opens at the piece.
+                open_note_at(search->meaning[m].path, search->meaning[m].start);
+                break;
             } else if (m >= 0 && m < search->meaning_count) {
                 // A "by meaning" row: the piece's start, checked still current when ranked.
                 size_t at = search->meaning[m].start;
@@ -6232,12 +6405,18 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     // Apply persisted preferences. CLI overrides win over what's on disk
     // so user-supplied flags are honored even if settings exist.
     {
-        // Nerd Font icons by default only where the font is known to be installed: the launcher
-        // sets TERM_PROGRAM=termux-launcher. settings.json's "nerd_font" overrides either way.
+        // The launcher sets TERM_PROGRAM=termux-launcher; inside tmux TERM_PROGRAM is "tmux", but
+        // TERMUX_LAUNCHER_PANE (set by the launcher alone) survives. Nerd Font icons default on
+        // only there, where the font is known to be installed; settings.json's "nerd_font"
+        // overrides that either way, and never launcher_term.
         const char* prog = getenv("TERM_PROGRAM");
-        app.nerd_font = prog && strcmp(prog, "termux-launcher") == 0;
+        const char* pane = getenv("TERMUX_LAUNCHER_PANE");
+        app.launcher_term = (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
+        app.nerd_font = app.launcher_term;
     }
+    app.meaning_index = true; // on unless settings.json says "meaning_index": false
     settings_load();
+    embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;
     }
@@ -6333,10 +6512,8 @@ static bool on_note_screen(void)
 
 void dawn_engine_shutdown(void)
 {
-    embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
-    DAWN_BACKEND(app)->set_title(NULL);
-    scrollind_shutdown();
-
+    // The save comes first: closing a Termux session sends SIGHUP and then SIGKILL 150 ms later
+    // (the launcher's ShellTerminator), and stopping the meaning index can take up to a second.
     // save_session writes only what changed; an empty note that was emptied on purpose counts.
     // A note changed elsewhere is not written over: no one is left to ask, so the writer's text
     // goes to (or refreshes) the conflict copy beside it and the terminal is told where.
@@ -6352,6 +6529,9 @@ void dawn_engine_shutdown(void)
             exit_message("dawn: could not save %s\n", app.session_path);
         }
     }
+    embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
+    DAWN_BACKEND(app)->set_title(NULL);
+    scrollind_shutdown();
 
     gap_free(&app.text);
     free(app.session_path);
@@ -6442,8 +6622,10 @@ bool dawn_frame(void)
     ai_tick();
 #endif
     voice_tick();
-    if (embed_poll())
+    if (embed_poll()) {
         embed_news = true;
+        embed_tell_failure();
+    }
     handle_input();
     render();
 
@@ -7028,6 +7210,13 @@ static void render_writing(void)
     if (!L.ai_sheet)
         render_status_bar(&L);
 
+    // The status panel's corner (dawn_status): the two blank rows between the text and the status
+    // line, or the one between the text and a chat sheet.
+    if (L.ai_sheet)
+        status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
+    else
+        status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+
     if (app.ai_open) {
         render_ai_panel(&L);
         if (app.ai_focused) {
@@ -7050,6 +7239,7 @@ static void render_writing(void)
         voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, rs.cursor_col);
 }
 
 //! Render a single block - dispatches to type-specific renderer

@@ -308,6 +308,8 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
             buf_append_str(&passages, text);
             buf_append_str(&passages, cut ? "\n(cut short)\n\n" : "\n\n");
             taken[i] = true;
+            if (!cut && info->relevant_whole < 16)
+                info->relevant_hashes[info->relevant_whole++] = relevant[i].text_hash;
         }
         free(text);
     }

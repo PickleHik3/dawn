@@ -17,11 +17,12 @@ void chat_clear(void);
 
 // #endregion
 
-#if HAS_LIBAI
-
 //! Push the current text onto the undo stack (dawn.c). The AI's edit tools call it on both
-//! sides of a change, so one Ctrl+Z lands exactly on the text from before the edit.
+//! sides of a change, so one Ctrl+Z lands exactly on the text from before the edit; so does a
+//! reload of a note changed elsewhere (dawn_file.c), on every build.
 void save_undo_state(void);
+
+#if HAS_LIBAI
 
 // #region AI Session
 

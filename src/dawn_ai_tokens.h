@@ -38,6 +38,8 @@ typedef struct {
     char section_heading[160]; //!< The section's heading text, or "" when the note has no headings
     bool has_outline; //!< The outline was included
     bool has_relevant; //!< Passages picked by relevance to the question were included
+    uint64_t relevant_hashes[16]; //!< text_hash of each relevant passage included whole (not cut short)
+    int32_t relevant_whole; //!< How many of relevant_hashes are filled
     int32_t neighbours_before; //!< Whole paragraphs included before the section
     int32_t neighbours_after; //!< Whole paragraphs included after the section
 } AiSnapshotInfo;
@@ -48,7 +50,8 @@ typedef struct {
 //! alternating before/after the section until the budget is spent. relevant (may be NULL) are
 //! pieces of the note ranked by relevance to the question (dawn_embed, best first, already checked
 //! against the current text): between the outline and the neighbours, each one not inside the
-//! selection or the section is added while the budget lasts. gb is the document, bc its
+//! selection or the section is added while the budget lasts (info->relevant_hashes names the ones
+//! that went in whole). An empty relevant list adds no passages block at all. gb is the document, bc its
 //! parsed blocks (NULL is treated as "no headings"), cursor the cursor position, sel_start/
 //! sel_end the selection (equal when there is none). Returns a malloc'd string (never NULL,
 //! "" for an empty note) and fills *info; caller frees the string.

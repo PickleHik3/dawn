@@ -460,6 +460,8 @@ void title_tick(void)
 
 // #region Undo and the writer's own titles
 
+bool title_busy(void) { return g_t.busy; }
+
 bool title_undo(void)
 {
     if (!g_undo.valid)

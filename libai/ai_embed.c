@@ -190,6 +190,8 @@ static ai_embed_status_t http_call(const char* path, const char* body, long time
         return AI_EMBED_OK;
     if (status == 404 || status == 501)
         return AI_EMBED_NONE;
+    if (status == 401 || status == 403)
+        return AI_EMBED_REFUSED;
     if (status == 429 || status == 503) {
         if (retry_after_ms)
             *retry_after_ms = (retry_after_s ? retry_after_s : (status == 429 ? 10 : 20)) * 1000;
@@ -269,7 +271,9 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
 {
     memset(out, 0, sizeof(*out));
     resp_t resp;
-    ai_embed_status_t st = http_call("/models", NULL, 8L, cancel, &resp, NULL);
+    // 30 s, not 8: with twenty-odd models installed the launcher takes about 12 s to list them,
+    // and this runs on the indexer's own thread, so waiting costs nothing.
+    ai_embed_status_t st = http_call("/models", NULL, 30L, cancel, &resp, NULL);
     if (st != AI_EMBED_OK) {
         resp_free(&resp);
         return st;
@@ -279,8 +283,10 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
     if (!root)
         return AI_EMBED_ERROR;
 
+    // EmbeddingGemma 2 beats EmbeddingGemma beats any other embedder; the first of a rank wins.
     cJSON* list = cJSON_IsArray(root) ? root : cJSON_GetObjectItemCaseSensitive(root, "data");
     cJSON* chosen = NULL;
+    int32_t chosen_rank = -1;
     cJSON* entry;
     cJSON_ArrayForEach(entry, list)
     {
@@ -288,12 +294,15 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
         if (!cJSON_IsString(id) || !id->valuestring || !id->valuestring[0]
             || strlen(id->valuestring) >= sizeof(out->id) || !has_embedding_capability(entry))
             continue;
-        if (!chosen)
+        int32_t rank = contains_ci(id->valuestring, "embeddinggemma-2") ? 2
+            : contains_ci(id->valuestring, "embeddinggemma")            ? 1
+                                                                        : 0;
+        if (rank > chosen_rank) {
             chosen = entry;
-        if (contains_ci(id->valuestring, "embeddinggemma")) {
-            chosen = entry;
-            break;
+            chosen_rank = rank;
         }
+        if (rank == 2)
+            break;
     }
     if (!chosen) {
         cJSON_Delete(root);
@@ -305,6 +314,9 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
     if (cJSON_IsString(rev) && rev->valuestring && strlen(rev->valuestring) < sizeof(out->revision))
         snprintf(out->revision, sizeof(out->revision), "%s", rev->valuestring);
     out->dims = pick_dims(chosen);
+    cJSON* native = cJSON_GetObjectItemCaseSensitive(chosen, "_endpoint_dimensions");
+    if (cJSON_IsNumber(native) && native->valuedouble >= 1 && native->valuedouble <= MAX_DIMS)
+        out->native_dims = (int32_t)native->valuedouble;
     cJSON* batch = cJSON_GetObjectItemCaseSensitive(chosen, "_endpoint_max_batch");
     out->max_batch = DEFAULT_BATCH;
     if (cJSON_IsNumber(batch) && batch->valuedouble >= 1)
@@ -486,7 +498,8 @@ static char* build_request(const ai_embed_request_t* req, bool base64)
 }
 
 //! Fill *out from a 200 reply; false when it does not hold exactly one well-formed vector per
-//! input, all of one length.
+//! input, all of one length. That length may differ from req->dims: the caller checks, since a
+//! reply of another length means the model was swapped, not that the reply is broken.
 static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_embed_result_t* out)
 {
     cJSON* root = body ? cJSON_Parse(body) : NULL;
@@ -511,7 +524,7 @@ static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_em
         seen[at] = true;
         int32_t n;
         float* v = decode_embedding(cJSON_GetObjectItemCaseSensitive(item, "embedding"), &n);
-        if (!v || (req->dims > 0 && n != req->dims) || (out->dims > 0 && n != out->dims)) {
+        if (!v || (out->dims > 0 && n != out->dims)) {
             free(v);
             ok = false;
             break;
@@ -544,6 +557,14 @@ static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_em
 
 //! Set once the server refuses base64; from then on vectors come as float arrays.
 static atomic_bool g_float_only;
+
+//! A 400 code that names the model's setup rather than the request: asking again with other text
+//! will not help until the endpoint changes.
+static bool is_setup_error(const char* code)
+{
+    return strcmp(code, "embedding_tokenizer_missing") == 0 || strcmp(code, "invalid_dimensions") == 0
+        || strcmp(code, "capability_not_supported") == 0;
+}
 
 ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_result_t* out,
     int32_t* retry_after_ms, const atomic_bool* cancel)
@@ -578,6 +599,14 @@ ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_resul
         if (st == AI_EMBED_OK && !parse_vectors(resp.data, req, out)) {
             ai_embed_result_free(out);
             st = AI_EMBED_ERROR;
+        } else if (st != AI_EMBED_OK && st != AI_EMBED_CANCELLED) {
+            cJSON* root = resp.data ? cJSON_Parse(resp.data) : NULL;
+            snprintf(out->error, sizeof(out->error), "%s", error_code(root));
+            cJSON_Delete(root);
+            if (st == AI_EMBED_REJECTED && is_setup_error(out->error))
+                st = AI_EMBED_REFUSED;
+            if (st == AI_EMBED_REFUSED && !out->error[0])
+                snprintf(out->error, sizeof(out->error), "%s", "unauthorized");
         }
         resp_free(&resp);
         return st;

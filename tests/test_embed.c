@@ -1,5 +1,6 @@
 // test_embed.c - host tests for the pure half of the meaning index (dawn_embed_index.c):
-// the chunker, the index file round trip and its corruption handling, and cosine top-k.
+// the chunker, the index file round trip and its corruption handling, cosine top-k and the score
+// floors and near-best cut.
 
 #include "dawn_embed_index.h"
 
@@ -81,8 +82,16 @@ static void test_body_offset_and_title(void)
     embed_note_title(h1, strlen(h1), "/n/x.md", title, sizeof(title));
     CHECK(strcmp(title, "Real title") == 0);
 
-    const char* plain = "no headings here\n";
-    embed_note_title(plain, strlen(plain), "/home/u/notes/20260928-1012.md", title, sizeof(title));
+    // No title and no heading: the first line names the note.
+    const char* plain = "\n\nno headings here\n";
+    CHECK(embed_note_title(plain, strlen(plain), "/home/u/notes/20260928-1012.md", title, sizeof(title))
+        == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "no headings here") == 0);
+
+    // Nothing at all: the file name.
+    const char* blank = "---\ntitle: Untitled\n---\n\n  \n";
+    CHECK(embed_note_title(blank, strlen(blank), "/home/u/notes/20260928-1012.md", title, sizeof(title))
+        == EMBED_TITLE_FILE_NAME);
     CHECK(strcmp(title, "20260928-1012") == 0);
 
     // No closing delimiter: not frontmatter.
@@ -96,6 +105,44 @@ static void test_body_offset_and_title(void)
     const char* arabic = "---\ntitle: مرحبا\n---\n";
     embed_note_title(arabic, strlen(arabic), NULL, small, sizeof(small));
     CHECK(strlen(small) == 4); // two 2-byte letters fit in 5 bytes, not a half third
+}
+
+static void test_untitled_named_by_content(void)
+{
+    char title[EMBED_TITLE_MAX];
+    // dawn's placeholder title gives way to the heading...
+    const char* h = "---\ntitle: Untitled\n---\nIntro line.\n\n# Visa appointment\n\nBring the passport.\n";
+    CHECK(embed_note_title(h, strlen(h), "/n/Untitled.md", title, sizeof(title)) == EMBED_TITLE_HEADING);
+    CHECK(strcmp(title, "Visa appointment") == 0);
+
+    // ...or, without one, to the first line with text, markdown markers dropped.
+    const char* task = "---\ntitle: \"Untitled\"\n---\n\n```\n- [ ] Buy milk and eggs before Friday\n";
+    CHECK(embed_note_title(task, strlen(task), "/n/Untitled.md", title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "Buy milk and eggs before Friday") == 0);
+    const char* quote = "> ## Ideas for the trip\n";
+    embed_note_title(quote, strlen(quote), NULL, title, sizeof(title));
+    CHECK(strcmp(title, "Ideas for the trip") == 0);
+
+    // An empty title counts as none too; a "# Untitled" heading is skipped like the placeholder.
+    const char* empty = "---\ntitle: \"\"\n---\n# Untitled\nFirst real words\n";
+    CHECK(embed_note_title(empty, strlen(empty), "/n/x.md", title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    CHECK(strcmp(title, "First real words") == 0);
+
+    // A long first line is cut to 48 bytes, never inside a character.
+    const char* longline = "مرحبا بكم في الملاحظة الطويلة جدا التي لا تنتهي أبدا\n";
+    CHECK(embed_note_title(longline, strlen(longline), NULL, title, sizeof(title)) == EMBED_TITLE_FIRST_LINE);
+    size_t n = strlen(title);
+    CHECK(n > 0 && n <= EMBED_TITLE_LINE_MAX);
+    CHECK(((unsigned char)longline[n] & 0xC0) != 0x80);
+    CHECK(strncmp(title, longline, n) == 0);
+    const char* latin = "This first line goes on for well over forty-eight bytes of text\n";
+    embed_note_title(latin, strlen(latin), NULL, title, sizeof(title));
+    CHECK(strlen(title) <= EMBED_TITLE_LINE_MAX && strncmp(title, "This first line goes on", 23) == 0);
+
+    // A real frontmatter title is kept as it is.
+    const char* named = "---\ntitle: Untitled draft\n---\nbody\n";
+    CHECK(embed_note_title(named, strlen(named), NULL, title, sizeof(title)) == EMBED_TITLE_FRONTMATTER);
+    CHECK(strcmp(title, "Untitled draft") == 0);
 }
 
 static void test_normalize_and_estimate(void)
@@ -123,7 +170,7 @@ static void test_chunk_headings_and_merge(void)
                        "## Budget ##\n\nAbout 900 KWD.\n";
     size_t len = strlen(body);
     EmbedChunk c[16];
-    int32_t n = embed_chunk(body, len, 1.0f, c, 16);
+    int32_t n = embed_chunk(body, len, 1.0f, 0, c, 16);
     check_pieces_sane(body, len, c, n);
     CHECK(n == 4);
     // Small paragraphs merge; each heading starts a piece and is part of it.
@@ -135,9 +182,9 @@ static void test_chunk_headings_and_merge(void)
     CHECK(strcmp(c[3].heading, "Budget") == 0 && contains(body, &c[3], "900"));
 
     // max bounds the output.
-    CHECK(embed_chunk(body, len, 1.0f, c, 2) == 2);
-    CHECK(embed_chunk(body, 0, 1.0f, c, 16) == 0);
-    CHECK(embed_chunk("   \n\n  \n", 8, 1.0f, c, 16) == 0);
+    CHECK(embed_chunk(body, len, 1.0f, 0, c, 2) == 2);
+    CHECK(embed_chunk(body, 0, 1.0f, 0, c, 16) == 0);
+    CHECK(embed_chunk("   \n\n  \n", 8, 1.0f, 0, c, 16) == 0);
 }
 
 static void test_chunk_merge_limit(void)
@@ -152,13 +199,13 @@ static void test_chunk_merge_limit(void)
             "with enough words to weigh about sixty tokens or so.\n\n",
             i);
     EmbedChunk c[32];
-    int32_t n = embed_chunk(body, len, 1.0f, c, 32);
+    int32_t n = embed_chunk(body, len, 1.0f, 0, c, 32);
     check_pieces_sane(body, len, c, n);
     CHECK(n == 4);
     for (int32_t i = 0; i < n; i++)
         CHECK(piece_tokens(body, &c[i]) <= EMBED_TARGET_TOKENS);
     // A token scale of 2 (the model counts twice the estimate) halves what fits: eight pieces.
-    int32_t n2 = embed_chunk(body, len, 2.0f, c, 32);
+    int32_t n2 = embed_chunk(body, len, 2.0f, 0, c, 32);
     CHECK(n2 == 8);
 }
 
@@ -169,7 +216,7 @@ static void test_chunk_long_paragraph(void)
     int len = snprintf(body, sizeof(body), "# Long\n%s\n", para);
     free(para);
     EmbedChunk c[32];
-    int32_t n = embed_chunk(body, (size_t)len, 1.0f, c, 32);
+    int32_t n = embed_chunk(body, (size_t)len, 1.0f, 0, c, 32);
     check_pieces_sane(body, (size_t)len, c, n);
     CHECK(n >= 3);
     for (int32_t i = 0; i < n; i++) {
@@ -180,6 +227,37 @@ static void test_chunk_long_paragraph(void)
     CHECK(strncmp(body + c[0].start, "# Long", 6) == 0); // the heading rides with the first piece
 }
 
+static void test_chunk_max_tokens(void)
+{
+    // A model with a small window: a cap of 100 tokens cuts the same paragraph much finer.
+    char* para = make_sentences(120);
+    char body[16384];
+    int len = snprintf(body, sizeof(body), "# Long\n%s\n", para);
+    free(para);
+    EmbedChunk c[128];
+    int32_t n_default = embed_chunk(body, (size_t)len, 1.0f, 0, c, 128);
+    CHECK(embed_chunk(body, (size_t)len, 1.0f, EMBED_MAX_TOKENS, c, 128) == n_default);
+    CHECK(embed_chunk(body, (size_t)len, 1.0f, 100000, c, 128) == n_default); // only ever lowers
+    int32_t n = embed_chunk(body, (size_t)len, 1.0f, 100, c, 128);
+    check_pieces_sane(body, (size_t)len, c, n);
+    CHECK(n > n_default * 3);
+    for (int32_t i = 0; i < n; i++) {
+        CHECK(piece_tokens(body, &c[i]) <= 100);
+        CHECK(body[c[i].start + c[i].len - 1] == '.'); // still cut at sentence ends
+    }
+    // Small paragraphs merge only up to the shrunken target (100 * 400 / 480 = 83 tokens).
+    char small[8192];
+    size_t slen = 0;
+    for (int32_t i = 0; i < 20; i++)
+        slen += (size_t)snprintf(small + slen, sizeof(small) - slen,
+            "Paragraph %02d is a short line about the morning train.\n\n", i);
+    n = embed_chunk(small, slen, 1.0f, 100, c, 128);
+    check_pieces_sane(small, slen, c, n);
+    CHECK(n > 1);
+    for (int32_t i = 0; i < n; i++)
+        CHECK(piece_tokens(small, &c[i]) <= 100 * EMBED_TARGET_TOKENS / EMBED_MAX_TOKENS);
+}
+
 static void test_chunk_no_punctuation(void)
 {
     // One enormous "sentence" of Arabic words: hard cuts, at spaces, never inside a character.
@@ -188,7 +266,7 @@ static void test_chunk_no_punctuation(void)
     while (len + 16 < sizeof(body))
         len += (size_t)snprintf(body + len, sizeof(body) - len, "كلمة ");
     EmbedChunk c[64];
-    int32_t n = embed_chunk(body, len, 1.0f, c, 64);
+    int32_t n = embed_chunk(body, len, 1.0f, 0, c, 64);
     check_pieces_sane(body, len, c, n);
     CHECK(n >= 2);
     for (int32_t i = 0; i < n; i++) {
@@ -207,7 +285,7 @@ static void test_chunk_fence_not_split(void)
         len += (size_t)snprintf(body + len, sizeof(body) - len, "int value_%d = %d; // x\n\n", i, i);
     len += (size_t)snprintf(body + len, sizeof(body) - len, "```\n\nAfter the code.\n");
     EmbedChunk c[16];
-    int32_t n = embed_chunk(body, len, 1.0f, c, 16);
+    int32_t n = embed_chunk(body, len, 1.0f, 0, c, 16);
     check_pieces_sane(body, len, c, n);
     int32_t fences = 0;
     for (int32_t i = 0; i < n; i++) {
@@ -223,7 +301,7 @@ static void test_chunk_fence_not_split(void)
 
     // An unclosed fence runs to the end without swallowing anything before it.
     const char* open = "Before.\n\n```\ncode\n# not heading\n";
-    n = embed_chunk(open, strlen(open), 1.0f, c, 16);
+    n = embed_chunk(open, strlen(open), 1.0f, 0, c, 16);
     CHECK(n == 1 && contains(open, &c[0], "not heading") && strcmp(c[0].heading, "") == 0);
 }
 
@@ -235,8 +313,8 @@ static void test_chunk_stable_hashes(void)
     snprintf(a, sizeof(a), tmpl, "original");
     snprintf(b, sizeof(b), tmpl, "edited");
     EmbedChunk ca[8], cb[8];
-    int32_t na = embed_chunk(a, strlen(a), 1.0f, ca, 8);
-    int32_t nb = embed_chunk(b, strlen(b), 1.0f, cb, 8);
+    int32_t na = embed_chunk(a, strlen(a), 1.0f, 0, ca, 8);
+    int32_t nb = embed_chunk(b, strlen(b), 1.0f, 0, cb, 8);
     CHECK(na == 3 && nb == 3);
     CHECK(ca[0].text_hash != cb[0].text_hash);
     CHECK(ca[1].text_hash == cb[1].text_hash && ca[2].text_hash == cb[2].text_hash);
@@ -467,21 +545,90 @@ static void test_topk_and_cosine(void)
     CHECK(n == 2);
 }
 
+//! Rank (note, score) pairs best first, cut them with model's search floor and EMBED_NEAR_BEST's
+//! 0.10, and return a bitmask of the notes kept.
+static uint32_t kept_notes(const char* model, const float* scores, int32_t count)
+{
+    EmbedScored top[16];
+    int32_t n = 0;
+    for (int32_t i = 0; i < count; i++)
+        embed_topk_push(top, &n, 16, (EmbedScored) { i, 0, scores[i] });
+    float min_score = 0.0f;
+    embed_floors(model, &min_score, NULL);
+    n = embed_cut(top, n, min_score, 0.10f);
+    uint32_t mask = 0;
+    for (int32_t i = 0; i < n; i++)
+        mask |= 1u << top[i].note;
+    return mask;
+}
+
+static void test_floors_and_margin(void)
+{
+    // The cut keeps a prefix: floor, then the margin under the best, whichever is higher.
+    EmbedScored top[4] = { { 0, 0, 0.9f }, { 1, 0, 0.85f }, { 2, 0, 0.7f }, { 3, 0, 0.5f } };
+    CHECK(embed_cut(top, 4, 0.6f, 0.0f) == 3);
+    CHECK(embed_cut(top, 4, 0.6f, 0.1f) == 2);
+    CHECK(embed_cut(top, 4, -2.0f, 0.0f) == 4);
+    CHECK(embed_cut(top, 4, 0.95f, 0.1f) == 0);
+    CHECK(embed_cut(top, 0, 0.0f, 0.1f) == 0);
+    CHECK(embed_cut(NULL, 4, 0.0f, 0.1f) == 0);
+
+    float search = 0.0f, related = 0.0f;
+    embed_floors(NULL, &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+    embed_floors("", &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+    embed_floors("qwen3-embedding-0.6b", &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+
+    // Measured on the phone, 2026-10-07, 256 dims. Notes: 0 tomato watering, 1 garden journal
+    // (watering), 2 sourdough starter, 3 compost, 4 kubectl, 5 meeting (budget).
+    const char* v2 = "embeddinggemma-2-text-vision-440m";
+    const char* v1 = "embeddinggemma-300m";
+    embed_floors(v2, &search, &related);
+    CHECK(search == 0.70f && related == 0.80f);
+    embed_floors(v1, &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+
+    float v2_tomatoes[] = { 0.86f, 0.84f, 0.73f, 0.65f, 0.63f, 0.55f };
+    CHECK(kept_notes(v2, v2_tomatoes, 6) == 0x3); // starter 0.73 is under 0.86 - 0.10
+    float v2_bread[] = { 0.59f, 0.60f, 0.75f, 0.64f, 0.62f, 0.55f };
+    CHECK(kept_notes(v2, v2_bread, 6) == 0x4);
+    float v2_kube[] = { -1.0f, -1.0f, 0.60f, 0.61f, 0.84f, 0.63f };
+    CHECK(kept_notes(v2, v2_kube, 6) == 0x10);
+    float v2_money[] = { -1.0f, -1.0f, 0.61f, 0.60f, -1.0f, 0.73f };
+    CHECK(kept_notes(v2, v2_money, 6) == 0x20);
+
+    float v1_tomatoes[] = { 0.62f, 0.62f, 0.37f, 0.33f, 0.22f, 0.11f };
+    CHECK(kept_notes(v1, v1_tomatoes, 6) == 0x3);
+    float v1_bread[] = { 0.21f, 0.22f, 0.43f, 0.30f, -1.0f, -1.0f };
+    CHECK(kept_notes(v1, v1_bread, 6) == 0x4);
+    float v1_kube[] = { -1.0f, -1.0f, -1.0f, 0.24f, 0.65f, 0.23f };
+    CHECK(kept_notes(v1, v1_kube, 6) == 0x10);
+
+    // Note against note under EmbeddingGemma 2: only the near-duplicate is related.
+    embed_floors(v2, NULL, &related);
+    CHECK(0.89f >= related && 0.74f < related && 0.65f < related);
+}
+
 // #endregion
 
 int main(void)
 {
     test_body_offset_and_title();
+    test_untitled_named_by_content();
     test_normalize_and_estimate();
     test_chunk_headings_and_merge();
     test_chunk_merge_limit();
     test_chunk_long_paragraph();
+    test_chunk_max_tokens();
     test_chunk_no_punctuation();
     test_chunk_fence_not_split();
     test_chunk_stable_hashes();
     test_index_round_trip();
     test_index_corruption();
     test_topk_and_cosine();
+    test_floors_and_margin();
 
     printf("test-embed: %d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

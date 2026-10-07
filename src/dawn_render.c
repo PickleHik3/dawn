@@ -9,6 +9,7 @@
 #include "dawn_notice.h"
 #include "dawn_search.h"
 #include "dawn_session.h"
+#include "dawn_status.h"
 #include "dawn_theme.h"
 #include "dawn_timer.h"
 #include "dawn_toc.h"
@@ -202,12 +203,16 @@ void render_welcome(void)
     render_text_at(row, col2, "?", get_accent());
     render_text_at(row, col2 + 2, " help", get_dim());
 
-#if HAS_LIBAI
-    if (app.ai_ready && session_ai_configured()) {
-        row += 2;
-        render_center_text(row, "✦ ai ready", get_accent());
-    }
-#endif
+    // The status panel (dawn_status) goes in the bottom right of the space under the actions, a
+    // blank row below them where there is room, at most four rows. It also says "ai ready" here.
+    int32_t panel_last = bottom_row - 1;
+    int32_t panel_first = row + 2;
+    if (panel_first > panel_last)
+        panel_first = row + 1;
+    if (panel_first < panel_last - 3)
+        panel_first = panel_last - 3;
+    int32_t panel_cols = app.cols - 2 < 48 ? app.cols - 2 : 48;
+    status_area(panel_first, panel_last, app.cols, panel_cols, true);
 
     // Bottom status bar - like editor status bar
     move_to(bottom_row, content_left);
@@ -347,14 +352,191 @@ static void render_help_activity(int32_t top, int32_t left, int32_t width, int32
     }
     #undef NOTICE_HELP_MAX
 
-    move_to(top + height - 2, left + (width - 26) / 2);
+    // Where there is a meaning page, this footer points on to it as the first page's points here.
+    const char* footer = DAWN_EMBED_LIVE ? "[<-] keys [tab] meaning [esc] close" : "[<-] shortcuts   [esc] close";
+    move_to(top + height - 2, left + (width - (int32_t)strlen(footer)) / 2);
     set_fg(get_dim());
-    platform_write_str("[<-] shortcuts   [esc] close");
+    platform_write_str(footer);
+}
+
+static int32_t hist_write_fit(const char* s, int32_t max_cols);
+static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, size_t* lens, int32_t max);
+
+//! Where MODE_HELP's meaning page drew its box and its two actions last, for render_help_hit().
+static struct {
+    bool shown;
+    int32_t top, left, width, height; //!< The box
+    int32_t toggle_row, rebuild_row; //!< The actions' rows
+} help_geo;
+
+//! What the meaning index is doing, in words, for the help page the writer went to: unlike the
+//! search box it also says when there is no embedder yet and how to get one.
+static void help_meaning_phase(const EmbedStatus* st, char* out, size_t cap)
+{
+    switch (st->phase) {
+    case EMBED_PHASE_OFF:
+        snprintf(out, cap, "%s", embed_enabled() ? "starting" : "off");
+        break;
+    case EMBED_PHASE_DISCOVERING:
+        snprintf(out, cap, "looking for an embedder");
+        break;
+    case EMBED_PHASE_NO_EMBEDDER:
+        snprintf(out, cap, "no embedder installed \xE2\x80\x94 get EmbeddingGemma in Termux Launcher's AI settings");
+        break;
+    case EMBED_PHASE_INDEXING:
+        if (st->current_title[0])
+            snprintf(out, cap, "indexing %d/%d \xC2\xB7 %s", st->notes_done, st->notes_total, st->current_title);
+        else
+            snprintf(out, cap, "indexing %d/%d", st->notes_done, st->notes_total);
+        break;
+    case EMBED_PHASE_PAUSED:
+        snprintf(out, cap, "paused (chat busy)");
+        break;
+    case EMBED_PHASE_WAITING: {
+        int64_t wait = st->retry_at_ms - DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (wait > 0)
+            snprintf(out, cap, "waiting for TAI \xC2\xB7 %llds", (long long)((wait + 999) / 1000));
+        else
+            snprintf(out, cap, "waiting for TAI");
+    } break;
+    case EMBED_PHASE_IDLE:
+        snprintf(out, cap, "index ready \xC2\xB7 %d note%s", st->notes_indexed, st->notes_indexed == 1 ? "" : "s");
+        break;
+    case EMBED_PHASE_FAILED:
+        snprintf(out, cap, "failed: %s", st->error[0] ? st->error : "unknown error");
+        break;
+    }
+}
+
+//! MODE_HELP's third page (only where DAWN_EMBED_LIVE): the meaning index's state, model and
+//! size, then its switch (m) and its rebuild (r, twice), each also a row to tap. It has its own
+//! height; short screens lose the blank rows around the actions first.
+static void render_help_meaning(int32_t width)
+{
+    EmbedStatus st;
+    embed_status(&st);
+    bool on = embed_enabled();
+
+    int32_t text_w = width - 6;
+    int32_t label_w = 7; // "status " / "model  " / "notes  "
+    int32_t value_w = text_w - label_w > 8 ? text_w - label_w : 8;
+
+    char phase[192];
+    if (on)
+        help_meaning_phase(&st, phase, sizeof(phase));
+    else
+        snprintf(phase, sizeof(phase), "off");
+    enum { PHASE_LINES = 4 };
+    size_t starts[PHASE_LINES], lens[PHASE_LINES];
+    int32_t phase_n = conflict_wrap(phase, value_w, starts, lens, PHASE_LINES);
+    if (phase_n < 1) {
+        phase_n = 1;
+        starts[0] = lens[0] = 0;
+    }
+
+    // Rows: border, blank, title, blank, status lines, model, notes, blank, toggle, gap, rebuild,
+    // blank, footer, border.
+    int32_t gap = 1, tail = 1;
+    int32_t height = 12 + phase_n + gap + tail;
+    if (height > app.rows) {
+        gap = tail = 0;
+        height = 12 + phase_n;
+    }
+
+    int32_t top, left;
+    render_popup_box(width, height, &top, &left);
+    set_bg(get_modal_bg());
+
+    int32_t col = left + 3;
+    move_to(top + 2, left + (width - 13) / 2);
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str("MEANING INDEX");
+    platform_reset_attrs();
+    set_bg(get_modal_bg());
+
+    int32_t row = top + 4;
+    for (int32_t i = 0; i < phase_n; i++) {
+        if (i == 0) {
+            move_to(row, col);
+            set_fg(get_dim());
+            platform_write_str("status");
+        }
+        move_to(row++, col + label_w);
+        set_fg(get_fg());
+        DAWN_BACKEND(app)->write_str(phase + starts[i], lens[i]);
+    }
+
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str("model");
+    move_to(row++, col + label_w);
+    set_fg(st.model[0] ? get_fg() : get_dim());
+    hist_write_fit(st.model[0] ? st.model : "none yet", value_w);
+
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str("notes");
+    move_to(row++, col + label_w);
+    set_fg(get_fg());
+    char notes[32];
+    snprintf(notes, sizeof(notes), "%d indexed", st.notes_indexed);
+    platform_write_str(notes);
+    row++;
+
+    help_geo.toggle_row = row;
+    move_to(row, col);
+    set_fg(get_accent());
+    platform_write_str("[m] ");
+    set_fg(get_fg());
+    platform_write_str(on ? "meaning search: on" : "meaning search: off");
+    row += 1 + gap;
+
+    // Off, a rebuild would wait unseen until the index is switched on again, so it is not offered.
+    help_geo.rebuild_row = row;
+    bool armed = app.help_rebuild_armed
+        && DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS;
+    move_to(row, col);
+    set_fg(on ? get_accent() : get_dim());
+    platform_write_str("[r] ");
+    set_fg(!on ? get_dim() : armed ? get_accent() : get_fg());
+    hist_write_fit(!on ? "rebuild (turn it on first)" : armed ? "press r again to rebuild" : "rebuild the index", text_w - 4);
+
+    move_to(top + height - 2, left + (width - 27) / 2);
+    set_fg(get_dim());
+    platform_write_str("[<-] activity   [esc] close");
+
+    help_geo.shown = true;
+    help_geo.top = top;
+    help_geo.left = left;
+    help_geo.width = width;
+    help_geo.height = height;
+}
+
+int32_t render_help_hit(int32_t row, int32_t col)
+{
+    if (!help_geo.shown || row < help_geo.top || row >= help_geo.top + help_geo.height
+        || col < help_geo.left || col >= help_geo.left + help_geo.width)
+        return HELP_HIT_OUTSIDE;
+    if (row == help_geo.toggle_row)
+        return HELP_HIT_TOGGLE;
+    if (row == help_geo.rebuild_row)
+        return HELP_HIT_REBUILD;
+    return HELP_HIT_BOX;
 }
 
 void render_help(void)
 {
-    int32_t width = 44;
+    // 44 columns, or the screen less a column each side when it is narrower (a phone held upright).
+    int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    help_geo.shown = false;
+    if (app.help_page == 2 && DAWN_EMBED_LIVE) {
+        render_help_meaning(width);
+        return;
+    }
+
     int32_t height = 26;
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
@@ -1050,6 +1232,93 @@ void render_toc(void)
     platform_set_cursor_visible(true);
 }
 
+//! Where render_search() drew its result rows last, for render_search_hit().
+static struct {
+    int32_t first_row, rows; //!< The list's first screen row and how many rows it filled
+    int32_t left, width; //!< The box's columns
+} search_geo;
+
+//! One "by meaning" row's text after its indent, in max_cols columns: this note's piece is its
+//! heading or first line; another note's is that note's title, then " · " and the same.
+static void render_meaning_row(const SearchState* search, int32_t m, bool sel, int32_t max_cols)
+{
+    const char* text = search->meaning_text[m];
+    if (m < search->meaning_here) {
+        hist_write_fit(text, max_cols);
+        return;
+    }
+    // The title keeps at least half the row when both don't fit, so the row says which note.
+    const char* title = search->meaning[m].note_title;
+    int32_t title_cols = hist_cols(title, strlen(title));
+    // A piece that is the note's own H1 repeats the title: say it once, in the whole row.
+    int32_t text_cols = strcasecmp(text, title) == 0 ? 0 : hist_cols(text, strlen(text));
+    int32_t title_max = max_cols;
+    if (text_cols > 0 && title_cols + 3 + text_cols > max_cols) {
+        title_max = max_cols - 3 - text_cols;
+        if (title_max < max_cols / 2)
+            title_max = max_cols / 2;
+    }
+    int32_t used = hist_write_fit(title, title_max);
+    int32_t sep = used > 0 ? 3 : 0;
+    if (text_cols > 0 && max_cols - used - sep >= 2) {
+        if (sep) {
+            set_fg(get_dim());
+            platform_write_str(" · ");
+            set_fg(sel ? get_fg() : get_dim());
+        }
+        hist_write_fit(text, max_cols - used - sep);
+    }
+}
+
+int32_t render_search_hit(int32_t row, int32_t col)
+{
+    const SearchState* search = (const SearchState*)app.search_state;
+    if (!search || row < search_geo.first_row || row >= search_geo.first_row + search_geo.rows
+        || col <= search_geo.left || col >= search_geo.left + search_geo.width - 1)
+        return -1;
+    int32_t idx = search->scroll + row - search_geo.first_row;
+    if (idx < search->count)
+        return idx;
+    int32_t m = idx - search->count - 1; // past the "by meaning" label, which is no result
+    return m >= 0 && m < search->meaning_count ? search->count + m : -1;
+}
+
+//! What the meaning index is doing, in a few words for the search box; "" while it is off, before
+//! an embedder exists and on builds without it.
+static void search_meaning_status(char* out, size_t cap)
+{
+    out[0] = '\0';
+    if (!DAWN_EMBED_LIVE)
+        return;
+    EmbedStatus st;
+    embed_status(&st);
+    switch (st.phase) {
+    case EMBED_PHASE_OFF:
+    case EMBED_PHASE_DISCOVERING:
+    case EMBED_PHASE_NO_EMBEDDER:
+        break; // until a model exists (or while switched off) the box says nothing about meaning
+    case EMBED_PHASE_INDEXING:
+        snprintf(out, cap, "indexing %d/%d", st.notes_done, st.notes_total);
+        break;
+    case EMBED_PHASE_PAUSED:
+        snprintf(out, cap, "paused (chat busy)");
+        break;
+    case EMBED_PHASE_WAITING: {
+        int64_t left = st.retry_at_ms - DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (left > 0)
+            snprintf(out, cap, "waiting for TAI · %llds", (long long)((left + 999) / 1000));
+        else
+            snprintf(out, cap, "waiting for TAI");
+    } break;
+    case EMBED_PHASE_IDLE:
+        snprintf(out, cap, "index ready · %d note%s", st.notes_indexed, st.notes_indexed == 1 ? "" : "s");
+        break;
+    case EMBED_PHASE_FAILED:
+        snprintf(out, cap, "failed: %s", st.error[0] ? st.error : "unknown error");
+        break;
+    }
+}
+
 void render_search(void)
 {
     SearchState* search = (SearchState*)app.search_state;
@@ -1081,25 +1350,35 @@ void render_search(void)
     platform_reset_attrs();
     set_bg(get_modal_bg());
 
-    // Search input
+    // Results count: the exact matches and the "by meaning" rows
+    char count_str[32];
+    int32_t found = search->count + search->meaning_count;
+    if (search->count >= SEARCH_MAX_RESULTS) {
+        snprintf(count_str, sizeof(count_str), "%d+ matches", found);
+    } else {
+        snprintf(count_str, sizeof(count_str), "%d match%s", found, found == 1 ? "" : "es");
+    }
+
+    // Search input: a query too long for the room left of the count shows its end, where the
+    // typing is
     int32_t search_row = top + 4;
+    int32_t query_room = content_width - 6 - 1 - 1 - (int32_t)strlen(count_str); // "find: ", "_", a gap
+    size_t from = 0, qlen = (size_t)search->query_len;
+    while (from < qlen && hist_cols(search->query + from, qlen - from) > query_room) {
+        from++;
+        while (from < qlen && ((unsigned char)search->query[from] & 0xC0) == 0x80)
+            from++; // not in the middle of a character
+    }
+    int32_t query_cols = hist_cols(search->query + from, qlen - from);
     move_to(search_row, content_left);
     set_fg(get_dim());
     platform_write_str("find: ");
     set_fg(get_accent());
-    for (int32_t i = 0; i < search->query_len && i < content_width - 8; i++) {
+    for (size_t i = from; i < qlen; i++)
         platform_write_char(search->query[i]);
-    }
     set_fg(get_fg());
     platform_write_char('_');
 
-    // Results count
-    char count_str[32];
-    if (search->count >= SEARCH_MAX_RESULTS) {
-        snprintf(count_str, sizeof(count_str), "%d+ matches", search->count);
-    } else {
-        snprintf(count_str, sizeof(count_str), "%d match%s", search->count, search->count == 1 ? "" : "es");
-    }
     move_to(search_row, content_right - (int32_t)strlen(count_str));
     set_fg(get_dim());
     platform_write_str(count_str);
@@ -1111,9 +1390,12 @@ void render_search(void)
         platform_write_str("─");
 
     // Search results with context, then the dim "by meaning" group under a label row. Scrolling
-    // counts rows: the exact results, the label, the meaning rows.
+    // counts rows: the exact results, the label, the meaning rows. The list's last row goes to
+    // the meaning index's status when there is one.
+    char status[EMBED_ERROR_MAX + 32];
+    search_meaning_status(status, sizeof(status));
     int32_t list_start = top + 6;
-    int32_t visible = list_height;
+    int32_t visible = status[0] ? list_height - 1 : list_height;
     int32_t total_rows = search->count + (search->meaning_count > 0 ? search->meaning_count + 1 : 0);
     int32_t sel_row = search->selected < search->count ? search->selected : search->selected + 1;
 
@@ -1122,6 +1404,11 @@ void render_search(void)
         search->scroll = sel_row;
     if (sel_row >= search->scroll + visible)
         search->scroll = sel_row - visible + 1;
+
+    search_geo.first_row = list_start;
+    search_geo.rows = total_rows - search->scroll < visible ? total_rows - search->scroll : visible;
+    search_geo.left = left;
+    search_geo.width = width;
 
     for (int32_t i = 0; i < visible; i++) {
         int32_t idx = search->scroll + i;
@@ -1147,10 +1434,7 @@ void render_search(void)
             set_fg(get_accent());
             platform_write_str(sel ? "▸       " : "        "); // under the line numbers
             set_fg(sel ? get_fg() : get_dim());
-            const char* text = search->meaning_text[m];
-            int32_t max_ctx = content_width - 10;
-            for (int32_t j = 0; text[j] && j < max_ctx; j++)
-                platform_write_char(text[j]);
+            render_meaning_row(search, m, sel, content_width - 10);
             set_bg(get_modal_bg());
             continue;
         }
@@ -1216,13 +1500,23 @@ void render_search(void)
         platform_write_str("↓");
     }
 
+    // The meaning index's status, dim and right-aligned under the list
+    if (status[0]) {
+        int32_t cols = hist_cols(status, strlen(status));
+        if (cols > content_width)
+            cols = content_width;
+        move_to(list_start + visible, content_right - cols);
+        set_fg(get_dim());
+        hist_write_fit(status, content_width);
+    }
+
     // Footer
     move_to(top + height - 2, content_left);
     set_fg(get_dim());
-    platform_write_str("↑↓:nav  enter:jump  ^n/^p:next/prev  esc:close");
+    hist_write_fit("↑↓:nav  enter:jump  ^n/^p:next/prev  esc:close", content_width);
 
     // Position cursor at search
-    move_to(search_row, content_left + 6 + search->query_len);
+    move_to(search_row, content_left + 6 + query_cols);
     platform_set_cursor_visible(true);
 }
 //! Where MODE_CONFLICT's choices were drawn last, for render_conflict_hit().

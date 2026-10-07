@@ -29,6 +29,13 @@ bool title_undo(void);
 //! note's title-source goes, and live titles never touch this note's title again.
 void title_user_edited(void);
 
+//! Whether a live title is being asked for right now (its quiet job is out).
+bool title_busy(void);
+
+#else
+
+static inline bool title_busy(void) { return false; }
+
 #endif // HAS_LIBAI
 
 #endif // DAWN_TITLE_H
