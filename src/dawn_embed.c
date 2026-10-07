@@ -55,7 +55,8 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #define EMBED_QUERY_MAX 512 //!< Query bytes kept (longer queries are cut)
 #define EMBED_QUERY_DEBOUNCE_MS 250 //!< A query goes out once typing pauses this long
 #define EMBED_QUERY_CACHE 4 //!< Query vectors remembered
-#define EMBED_QUERY_RETRY_MS 10000 //!< A failed query may be tried again after this
+#define EMBED_QUERY_RETRY_MS 10000 //!< A failed query may be tried again after this (or Retry-After)
+#define EMBED_QUERY_WAIT_MAX_MS 15000 //!< Longest Retry-After a query waits out before resending
 #define EMBED_RELATED_CACHE 8 //!< embed_related() answers remembered for the current note
 
 // #endregion
@@ -80,7 +81,9 @@ typedef struct {
     uint64_t hash;
     uint64_t epoch; //!< g.epoch when it was embedded; any other epoch makes it unusable
     bool failed;
+    bool announced; //!< A failure whose retry time came: embed_poll() has said so
     int64_t done_ms;
+    int64_t retry_at_ms; //!< When a failure may be tried again
     int64_t used; //!< LRU tick
     int32_t dims;
     float* vec;
@@ -1168,8 +1171,9 @@ static QueryVec* qcache_find(uint64_t hash)
     return NULL;
 }
 
-//! Store a query's outcome (vec taken over; NULL when it failed). Caller holds g_lock.
-static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims)
+//! Store a query's outcome (vec taken over; NULL when it failed, and then it is not sent again
+//! for EMBED_QUERY_RETRY_MS or retry_ms, whichever is longer). Caller holds g_lock.
+static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims, int64_t retry_ms)
 {
     QueryVec* slot = &g.qcache[0];
     for (int32_t i = 0; i < EMBED_QUERY_CACHE; i++) {
@@ -1186,8 +1190,28 @@ static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims)
     slot->vec = vec;
     slot->dims = dims;
     slot->failed = vec == NULL;
+    slot->announced = false;
     slot->done_ms = now_ms();
+    slot->retry_at_ms = slot->done_ms + (retry_ms > EMBED_QUERY_RETRY_MS ? retry_ms : EMBED_QUERY_RETRY_MS);
     slot->used = ++g.q_tick;
+}
+
+//! Sleep out a query's Retry-After. False when asked to stop or when a newer query is waiting,
+//! which matters more than this one.
+static bool query_wait(int64_t ms, uint64_t hash)
+{
+    int64_t until = now_ms() + ms;
+    for (;;) {
+        pthread_mutex_lock(&g_lock);
+        bool superseded = g.q_pending && g.q_hash != hash;
+        pthread_mutex_unlock(&g_lock);
+        if (atomic_load(&g.stop) || superseded)
+            return false;
+        int64_t left = until - now_ms();
+        if (left <= 0)
+            return true;
+        sleep_ms(left < 50 ? left : 50);
+    }
 }
 
 static void* query_main(void* arg)
@@ -1221,26 +1245,36 @@ static void* query_main(void* arg)
 
         float* vec = NULL;
         int32_t got = 0;
+        int32_t retry_ms = 0;
         if (have) {
             const char* inputs[1] = { text };
             size_t lens[1] = { len };
             ai_embed_request_t req = {
                 .model = emb.id, .inputs = inputs, .inputs_len = lens, .count = 1, .dims = emb.dims, .query = true
             };
-            ai_embed_result_t res;
-            int32_t retry_ms;
-            if (ai_embed_vectors(&req, &res, &retry_ms, &g.stop) == AI_EMBED_OK
-                && (dims == 0 || res.dims == dims)) {
-                vec = res.vectors;
-                got = res.dims;
-                res.vectors = NULL;
-                embed_normalize(vec, got);
+            // A 429/503 is waited out (Retry-After) and the same query sent once more, while the
+            // caller keeps getting EMBED_PENDING; a wait too long for someone typing fails at once
+            // and the failure lasts until Retry-After has passed.
+            for (int32_t attempt = 0; attempt < 2; attempt++) {
+                ai_embed_result_t res;
+                ai_embed_status_t st = ai_embed_vectors(&req, &res, &retry_ms, &g.stop);
+                if (st == AI_EMBED_OK && (dims == 0 || res.dims == dims)) {
+                    vec = res.vectors;
+                    got = res.dims;
+                    res.vectors = NULL;
+                    embed_normalize(vec, got);
+                }
+                ai_embed_result_free(&res);
+                if (st != AI_EMBED_RETRY)
+                    retry_ms = 0;
+                if (vec || st != AI_EMBED_RETRY || attempt > 0 || retry_ms > EMBED_QUERY_WAIT_MAX_MS
+                    || !query_wait(retry_ms, hash))
+                    break;
             }
-            ai_embed_result_free(&res);
         }
 
         pthread_mutex_lock(&g_lock);
-        qcache_put(hash, epoch, vec, got);
+        qcache_put(hash, epoch, vec, got, retry_ms);
         g.q_inflight = 0;
         pthread_mutex_unlock(&g_lock);
         atomic_store(&g.news, true);
@@ -1415,7 +1449,24 @@ bool embed_ready(void)
     return ready;
 }
 
-bool embed_poll(void) { return g.started && atomic_exchange(&g.news, false); }
+bool embed_poll(void)
+{
+    if (!g.started)
+        return false;
+    // A failed query whose retry time has come: a caller showing nothing for it should ask again.
+    int64_t now = now_ms();
+    bool due = false;
+    pthread_mutex_lock(&g_lock);
+    for (int32_t i = 0; i < EMBED_QUERY_CACHE; i++) {
+        QueryVec* q = &g.qcache[i];
+        if (q->failed && !q->announced && now >= q->retry_at_ms) {
+            q->announced = true;
+            due = true;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return atomic_exchange(&g.news, false) || due;
+}
 
 //! Whether a stored note can be compared with vectors of the current embedder. Caller holds g_lock.
 static bool note_comparable(const StoreNote* n, int32_t dims)
@@ -1507,7 +1558,7 @@ EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* op
         state = EMBED_UNAVAILABLE;
     } else {
         QueryVec* qv = qcache_find(hash);
-        if (qv && qv->failed && now_ms() - qv->done_ms < EMBED_QUERY_RETRY_MS) {
+        if (qv && qv->failed && now_ms() < qv->retry_at_ms) {
             state = EMBED_UNAVAILABLE;
         } else if (qv && qv->vec) {
             qv->used = ++g.q_tick;
