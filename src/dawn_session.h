@@ -108,6 +108,11 @@ void session_header(char* name, size_t name_cap, char* line, size_t line_cap);
 //! and the writer may be waiting on it.
 bool session_reading(void);
 
+//! The job in flight in a few lowercase words, for a status panel: "waking the model" (priming),
+//! "answering" (a question), "quiet work" (a live title), "summarising the chat" and "rebuilding
+//! context" (the compaction's two steps); "" when nothing runs.
+const char* session_job_name(void);
+
 //! The model requests go to (configured, else the loaded one), "" when unknown.
 const char* session_model_id(void);
 
@@ -136,6 +141,10 @@ char* session_note_context(void);
 void session_pick_model(const char* id);
 
 // #endregion
+
+#else
+
+static inline const char* session_job_name(void) { return ""; }
 
 #endif // HAS_LIBAI
 

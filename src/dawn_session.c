@@ -1760,6 +1760,24 @@ bool session_ai_configured(void)
     return file_nonempty(path);
 }
 
+const char* session_job_name(void)
+{
+    switch (g_job.kind) {
+    case JOB_PRIME:
+        return "waking the model";
+    case JOB_USER:
+        return "answering";
+    case JOB_QUIET:
+        return "quiet work";
+    case JOB_SUMMARY:
+        return "summarising the chat";
+    case JOB_REBUILD:
+        return "rebuilding context";
+    default:
+        return "";
+    }
+}
+
 bool session_reading(void)
 {
     return g_job.kind != JOB_NONE && g_job.reading && !g_job.got_output && !g_job.orphaned;
