@@ -48,8 +48,14 @@ Open:
    on the welcome screen. Checked on the phone in tmux: ready row, cap, icon, the sweep during a
    load (`🮊██▎`), and the launcher's own rendering in a screenshot. Popup masks are no longer
    sent inside tmux (`e78affc`), where they became the window title.
-3. Ship: `embed-gemma2` is merged into `tl` (7c2fc93) and `DAWN_COMMIT` bumped in tlstore
-   (catalog base `0.1.3+<commit>.0`); the next tlstore bins release builds and records it.
+3. Ship: `embed-gemma2` is merged into `tl` (7c2fc93, pushed with 70fe1b0) and `DAWN_COMMIT`
+   bumped in tlstore (`2528266`, pushed to tlstore `dev`). Not built yet: tlstore's build.yml runs
+   on `main`, which is 2 commits behind `dev`; fast-forward it (`git push origin origin/dev:main`)
+   and run `gh workflow run build.yml --ref main -f tools=dawn`. The user does this by hand.
+8. Launcher read-aloud (not dawn code, but dawn shares the speaker): Read aloud from the selection
+   toolbar now goes a sentence per `/v1/ai/speak` call and the runtime gained additive pause /
+   resume / state ops; dawn's `/v1/ai/speak` contract is unchanged, and a stop from either side
+   still stops both.
 4. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
    route) stops indexing until the next discovery; dawn could fall back to the next embedder.
 5. Launcher flakes, order-dependent, pass alone: `TerminalIOPreferencesDataStoreLazyModeTest`,
