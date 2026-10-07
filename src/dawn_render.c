@@ -1100,6 +1100,46 @@ int32_t render_search_hit(int32_t row, int32_t col)
     return m >= 0 && m < search->meaning_count ? search->count + m : -1;
 }
 
+//! What the meaning index is doing, in a few words for the search box ("" on builds without it).
+static void search_meaning_status(char* out, size_t cap)
+{
+    out[0] = '\0';
+    if (!DAWN_EMBED_LIVE)
+        return;
+    EmbedStatus st;
+    embed_status(&st);
+    switch (st.phase) {
+    case EMBED_PHASE_OFF:
+        snprintf(out, cap, "meaning off");
+        break;
+    case EMBED_PHASE_DISCOVERING:
+        snprintf(out, cap, "looking for an embedder");
+        break;
+    case EMBED_PHASE_NO_EMBEDDER:
+        snprintf(out, cap, "no embedder installed");
+        break;
+    case EMBED_PHASE_INDEXING:
+        snprintf(out, cap, "indexing %d/%d", st.notes_done, st.notes_total);
+        break;
+    case EMBED_PHASE_PAUSED:
+        snprintf(out, cap, "paused (chat busy)");
+        break;
+    case EMBED_PHASE_WAITING: {
+        int64_t left = st.retry_at_ms - DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (left > 0)
+            snprintf(out, cap, "waiting for TAI · %llds", (long long)((left + 999) / 1000));
+        else
+            snprintf(out, cap, "waiting for TAI");
+    } break;
+    case EMBED_PHASE_IDLE:
+        snprintf(out, cap, "index ready · %d note%s", st.notes_indexed, st.notes_indexed == 1 ? "" : "s");
+        break;
+    case EMBED_PHASE_FAILED:
+        snprintf(out, cap, "failed: %s", st.error[0] ? st.error : "unknown error");
+        break;
+    }
+}
+
 void render_search(void)
 {
     SearchState* search = (SearchState*)app.search_state;
@@ -1162,9 +1202,12 @@ void render_search(void)
         platform_write_str("─");
 
     // Search results with context, then the dim "by meaning" group under a label row. Scrolling
-    // counts rows: the exact results, the label, the meaning rows.
+    // counts rows: the exact results, the label, the meaning rows. The list's last row goes to
+    // the meaning index's status when there is one.
+    char status[EMBED_ERROR_MAX + 32];
+    search_meaning_status(status, sizeof(status));
     int32_t list_start = top + 6;
-    int32_t visible = list_height;
+    int32_t visible = status[0] ? list_height - 1 : list_height;
     int32_t total_rows = search->count + (search->meaning_count > 0 ? search->meaning_count + 1 : 0);
     int32_t sel_row = search->selected < search->count ? search->selected : search->selected + 1;
 
@@ -1269,10 +1312,20 @@ void render_search(void)
         platform_write_str("↓");
     }
 
+    // The meaning index's status, dim and right-aligned under the list
+    if (status[0]) {
+        int32_t cols = hist_cols(status, strlen(status));
+        if (cols > content_width)
+            cols = content_width;
+        move_to(list_start + visible, content_right - cols);
+        set_fg(get_dim());
+        hist_write_fit(status, content_width);
+    }
+
     // Footer
     move_to(top + height - 2, content_left);
     set_fg(get_dim());
-    platform_write_str("↑↓:nav  enter:jump  ^n/^p:next/prev  esc:close");
+    hist_write_fit("↑↓:nav  enter:jump  ^n/^p:next/prev  esc:close", content_width);
 
     // Position cursor at search
     move_to(search_row, content_left + 6 + search->query_len);

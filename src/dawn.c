@@ -3847,6 +3847,22 @@ static void render_writing_plain(void)
 //! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
 static bool embed_news = false;
 
+//! After embed_poll() said something moved: a meaning index that has just stopped for good (a
+//! permanent error) says why once, as a sticky notice, each time it enters that state.
+static void embed_tell_failure(void)
+{
+    static bool failed = false;
+    EmbedStatus st;
+    embed_status(&st);
+    bool now = st.phase == EMBED_PHASE_FAILED;
+    if (now && !failed) {
+        char msg[EMBED_ERROR_MAX + 24];
+        snprintf(msg, sizeof(msg), "meaning index: %s", st.error[0] ? st.error : "failed");
+        notice_post(NOTICE_ERROR, msg);
+    }
+    failed = now;
+}
+
 //! A "by meaning" row's text: the piece's heading, or the first non-blank line of slice (the
 //! piece's text, NUL-terminated), cut to fit out at a UTF-8 boundary.
 static void meaning_row_text(char* out, size_t cap, const char* heading, const char* slice)
@@ -6533,8 +6549,10 @@ bool dawn_frame(void)
     ai_tick();
 #endif
     voice_tick();
-    if (embed_poll())
+    if (embed_poll()) {
         embed_news = true;
+        embed_tell_failure();
+    }
     handle_input();
     render();
 
