@@ -10,6 +10,13 @@
 //            opens (which may load the model);
 //   append   every later job is exactly one appended turn: the question plus a compact "since
 //            last time" diff of the sections that changed; earlier messages are never edited;
+//   relevant every question (not only the first) also carries the pieces of the note the meaning
+//            index (dawn_embed) finds close to it (cosine 0.30 and up), but only those the model
+//            has not seen as they are: not sent whole since the last prime or rebuild (tracked by
+//            their text hash) and not inside a section it holds unchanged. On a later turn at most
+//            6 of them, in a quarter of the turn's note budget, after the diff; nothing at all
+//            when none qualifies or the question is still being embedded (nothing waits for it);
+
 //   watch    the conversation's size is tracked from each response's usage;
 //   compact  at 70% of the context window, in a quiet moment (8 s idle, nothing waiting, nothing
 //            streaming), a new conversation is built - same system prompt, a fresh snapshot, and
@@ -57,8 +64,9 @@ bool session_chat_may_open(void);
 // #region Jobs
 
 //! Ask the user's question (a chat message or a rewrite) through the conversation. The message
-//! sent is the question plus what changed in the note since the model last saw it (or a whole
-//! snapshot when the conversation is new). cb receives the reply's chunks and then NULL, exactly
+//! sent is the question plus what changed in the note since the model last saw it and the pieces
+//! relevant to the question it has not seen (or a whole snapshot when the conversation is new,
+//! with the relevant pieces placed in it). cb receives the reply's chunks and then NULL, exactly
 //! like ai_generate_response_stream()'s callback; it is called for this question only, even when
 //! the question waits behind priming or TAI's "one generation at a time" backoff (1/2/4 s).
 //! Only "Error: generation_active" after the last retry reaches cb as an error of that kind.

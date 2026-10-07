@@ -47,6 +47,10 @@
 //! One temperature for every request: TAI's reuse key includes it (optionsKey), so a title asked
 //! at a different temperature than the chat would start a new conversation every time.
 #define SESSION_TEMPERATURE 0.6
+#define RELEVANT_ASK 8 //!< Pieces of the note asked of dawn_embed per question, best first
+#define RELEVANT_MIN_SCORE 0.30f //!< A piece is sent as relevant only when this close to the question (cosine)
+#define RELEVANT_NOW_MAX 6 //!< Most pieces a later turn's "relevant now" block carries
+#define RELEVANT_NOW_SHARE 0.25 //!< That block's share of the turn's note budget, at most
 
 // #endregion
 
@@ -127,6 +131,10 @@ typedef struct {
     KnownSection* items;
     int32_t count;
     char* title; //!< The note's title as the model last heard it (NULL = none)
+    //! text_hash (dawn_embed) of every relevant piece the model got whole since the snapshot this
+    //! baseline descends from: a prime or rebuild starts it over, every later turn carries it on.
+    uint64_t* sent;
+    int32_t sent_count;
     bool valid; //!< False until a snapshot went out
 } Baseline;
 
@@ -134,7 +142,27 @@ static void baseline_free(Baseline* b)
 {
     free(b->items);
     free(b->title);
+    free(b->sent);
     memset(b, 0, sizeof(*b));
+}
+
+static bool baseline_was_sent(const Baseline* b, uint64_t hash)
+{
+    for (int32_t i = 0; i < b->sent_count; i++)
+        if (b->sent[i] == hash)
+            return true;
+    return false;
+}
+
+static void baseline_add_sent(Baseline* b, uint64_t hash)
+{
+    if (baseline_was_sent(b, hash))
+        return;
+    uint64_t* grown = realloc(b->sent, sizeof(uint64_t) * (size_t)(b->sent_count + 1));
+    if (!grown)
+        return; // forgetting one only means it may be sent again
+    b->sent = grown;
+    b->sent[b->sent_count++] = hash;
 }
 
 static const KnownSection* baseline_find(const Baseline* b, uint64_t key)
@@ -334,6 +362,8 @@ static char* build_diff(const Baseline* base, int32_t budget_tokens, Baseline* n
     }
     next->count = n;
     next->valid = true;
+    for (int32_t i = 0; i < base->sent_count; i++)
+        baseline_add_sent(next, base->sent[i]);
 
     bool had_whole = baseline_all_seen(base);
     int32_t cursor_section = -1;
@@ -470,9 +500,10 @@ static char* build_diff(const Baseline* base, int32_t budget_tokens, Baseline* n
 
 // #region Snapshot
 
-//! The pieces of the open note most relevant to question (dawn_embed), best first, that still
-//! hold the text they were indexed with. 0 when there is no index, the question is still being
-//! embedded (warmed while the user typed, it usually is not), or question is NULL.
+//! The pieces of the open note relevant to question (dawn_embed), best first: at least
+//! RELEVANT_MIN_SCORE close to it and still holding the text they were indexed with. 0 when there
+//! is no index, the question is still being embedded (warmed while the user typed, it usually is
+//! not; nothing waits for it), nothing is close enough, or question is NULL.
 static int32_t relevant_pieces(const char* question, EmbedHit* rel, int32_t max)
 {
     int32_t n = 0;
@@ -482,7 +513,7 @@ static int32_t relevant_pieces(const char* question, EmbedHit* rel, int32_t max)
     int32_t kept = 0;
     size_t doc_len = gap_len(&app.text);
     for (int32_t i = 0; i < n; i++) {
-        if ((size_t)rel[i].start + rel[i].len > doc_len)
+        if (rel[i].score < RELEVANT_MIN_SCORE || rel[i].len == 0 || (size_t)rel[i].start + rel[i].len > doc_len)
             continue;
         char* slice = gap_substr(&app.text, rel[i].start, rel[i].start + rel[i].len);
         if (slice && embed_hit_matches(&rel[i], slice, rel[i].len))
@@ -520,16 +551,19 @@ static char* note_context_budget(int32_t budget_tokens, const char* question, bo
     size_t s, e;
     get_selection(&s, &e);
     AiSnapshotInfo info;
-    EmbedHit rel[8];
-    int32_t rel_n = relevant_pieces(question, rel, 8);
+    EmbedHit rel[RELEVANT_ASK];
+    int32_t rel_n = relevant_pieces(question, rel, RELEVANT_ASK);
     char* snapshot = ai_note_snapshot(&app.text, app.block_cache, app.cursor, s, e, budget_tokens, rel, rel_n, &info);
     if (whole)
         *whole = info.whole_note;
-    if (base)
+    if (base) {
         baseline_from_snapshot(base, secs, n, info.whole_note);
+        for (int32_t i = 0; i < info.relevant_whole; i++)
+            baseline_add_sent(base, info.relevant_hashes[i]);
+    }
     free(secs);
 
-    char explainer[384] = "";
+    char explainer[512] = "";
     if (!info.whole_note) {
         if (info.has_relevant && info.section_heading[0])
             snprintf(explainer, sizeof(explainer),
@@ -547,6 +581,14 @@ static char* note_context_budget(int32_t budget_tokens, const char* question, bo
         else
             snprintf(explainer, sizeof(explainer),
                 "You see the outline and the part around the cursor; the rest is not shown.\n");
+        // Later turns carry a "relevant now" block (relevant_now()) whenever the index has pieces
+        // close to that question which the model has not seen as they are.
+        if (embed_ready()) {
+            size_t used = strlen(explainer);
+            snprintf(explainer + used, sizeof(explainer) - used,
+                "A later question may come with passages of the note that bear on it and that you have "
+                "not seen yet.\n");
+        }
     }
 
     sbuf_t out = { 0 };
@@ -555,6 +597,97 @@ static char* note_context_budget(int32_t budget_tokens, const char* question, bo
     sb_str(&out, explainer);
     sb_str(&out, snapshot); // its section already comes between <note> tags (dawn_ai_tokens.c)
     free(snapshot);
+    return sb_take(&out);
+}
+
+//! Whether the model already has a piece's text as it is now: the piece went out whole since the
+//! last snapshot (seen->sent), or every section it touches is one seen holds as seen with the
+//! same text. seen is a baseline of the note as it is now (build_diff()'s next).
+static bool piece_seen(const Baseline* seen, const NoteSection* secs, int32_t n, const EmbedHit* hit)
+{
+    if (baseline_was_sent(seen, hit->text_hash))
+        return true;
+    size_t start = hit->start, end = start + hit->len;
+    bool touched = false;
+    for (int32_t i = 0; i < n; i++) {
+        if (secs[i].end <= start || secs[i].start >= end)
+            continue;
+        touched = true;
+        const KnownSection* k = baseline_find(seen, secs[i].key);
+        if (!k || !k->seen || k->body != secs[i].body)
+            return false;
+    }
+    return touched;
+}
+
+//! The "relevant now" block of a later turn: up to RELEVANT_NOW_MAX pieces of the note relevant
+//! to question (relevant_pieces()) that the model has not seen as they are (piece_seen() against
+//! seen, the baseline this turn will leave) and that fit budget_tokens whole, best first. Each
+//! one sent joins seen->sent, so it is not sent again while its text stays the same. NULL (and
+//! no header at all) when none qualifies or the question is still being embedded.
+static char* relevant_now(const char* question, int32_t budget_tokens, Baseline* seen)
+{
+    static const char* const head = "Passages of the note that bear on this question, which you have not seen as they "
+                                    "are now:\n<relevant>\n";
+    static const char* const tail = "</relevant>\n";
+    budget_tokens -= ai_estimate_tokens(head) + ai_estimate_tokens(tail);
+    if (budget_tokens <= 0 || !seen->valid)
+        return NULL;
+    EmbedHit rel[RELEVANT_ASK];
+    int32_t n = relevant_pieces(question, rel, RELEVANT_ASK);
+    if (n == 0)
+        return NULL;
+    NoteSection* secs = malloc(sizeof(NoteSection) * MAX_SECTIONS);
+    if (!secs)
+        return NULL;
+    int32_t ns = split_sections(&app.text, secs, MAX_SECTIONS);
+    size_t sel_s, sel_e;
+    get_selection(&sel_s, &sel_e);
+
+    sbuf_t body = { 0 };
+    uint64_t sent[RELEVANT_NOW_MAX];
+    int32_t shown = 0;
+    for (int32_t i = 0; i < n && shown < RELEVANT_NOW_MAX; i++) {
+        size_t start = rel[i].start, end = start + rel[i].len;
+        if (piece_seen(seen, secs, ns, &rel[i]))
+            continue;
+        if (sel_s != sel_e && start >= sel_s && end <= sel_e)
+            continue; // the selection goes with the question anyway
+        char* text = gap_substr(&app.text, start, end);
+        size_t len = text ? strlen(text) : 0;
+        while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r' || text[len - 1] == ' ' || text[len - 1] == '\t'))
+            text[--len] = '\0';
+        if (len == 0) {
+            free(text);
+            continue;
+        }
+        char under[EMBED_HEADING_MAX + 16] = "";
+        if (rel[i].heading[0])
+            snprintf(under, sizeof(under), "(under \"%s\")\n", rel[i].heading);
+        int32_t cost = ai_estimate_tokens(under) + ai_estimate_tokens(text) + 1;
+        if (cost > budget_tokens) {
+            free(text);
+            continue; // a smaller one further down may still fit
+        }
+        budget_tokens -= cost;
+        sb_str(&body, under);
+        sb_add(&body, text, len);
+        sb_str(&body, "\n\n");
+        sent[shown++] = rel[i].text_hash;
+        free(text);
+    }
+    free(secs);
+    if (shown == 0 || !body.data) {
+        free(body.data);
+        return NULL;
+    }
+    for (int32_t i = 0; i < shown; i++)
+        baseline_add_sent(seen, sent[i]);
+    sbuf_t out = { 0 };
+    sb_str(&out, head);
+    sb_add(&out, body.data, body.len);
+    sb_str(&out, tail);
+    free(body.data);
     return sb_take(&out);
 }
 
@@ -1075,17 +1208,30 @@ static void user_start(void)
         size_t sel_s, sel_e;
         get_selection(&sel_s, &sel_e);
         char* selection = sel_s != sel_e ? gap_substr(&app.text, sel_s, sel_e) : NULL;
+        // The pieces relevant to this question the model has not seen as they are, within a
+        // quarter of the note budget and never more than the conversation has room for once the
+        // rest of the message is in (so they alone never push the turn into a new conversation).
+        char* relevant = NULL;
+        if (budget > 64 && g_job.pending.valid) {
+            int32_t rest = q_tokens + ai_estimate_tokens(diff) + ai_estimate_tokens(selection) + 48;
+            int32_t spare = window - g_conv_tokens - g_user.max_tokens - REQUEST_MARGIN - rest - 16;
+            int32_t share = (int32_t)(budget * RELEVANT_NOW_SHARE);
+            relevant = relevant_now(g_user.question, share < spare ? share : spare, &g_job.pending);
+        }
         sb_str(&msg, g_user.question);
-        if (diff || selection)
+        if (diff || relevant || selection)
             sb_str(&msg, "\n\n---\n");
         if (diff)
             sb_str(&msg, diff);
+        if (relevant)
+            sb_str(&msg, relevant);
         if (selection) {
             sb_str(&msg, "The user has selected this text (it is what they mean by \"this\"):\n<selection>\n");
             sb_str(&msg, selection);
             sb_str(&msg, "\n</selection>");
         }
         free(diff);
+        free(relevant);
         free(selection);
         g_job.whole = g_whole && (!g_job.pending.valid || baseline_all_seen(&g_job.pending));
         if (ai_estimate_tokens(msg.data) + g_user.max_tokens + REQUEST_MARGIN > window - g_conv_tokens || budget <= 64) {
