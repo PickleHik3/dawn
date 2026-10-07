@@ -20,8 +20,14 @@
 //! Debounce delay in milliseconds
 #define SEARCH_DEBOUNCE_MS 150
 
+//! Most rows in the "by meaning" group from the open note
+#define SEARCH_MEANING_HERE 5
+
+//! Most rows in the "by meaning" group from other notes (one per note)
+#define SEARCH_MEANING_ELSEWHERE 5
+
 //! Most rows in the "by meaning" group under the exact results
-#define SEARCH_MEANING_MAX 5
+#define SEARCH_MEANING_MAX (SEARCH_MEANING_HERE + SEARCH_MEANING_ELSEWHERE)
 
 // #endregion
 
@@ -51,9 +57,11 @@ typedef struct {
     int64_t last_change_time; //!< Timestamp of last query change (ms)
     bool dirty; //!< Query changed, needs re-search
     // The dim "by meaning" group (dawn_embed): selected counts on past the exact results into it.
-    EmbedHit meaning[SEARCH_MEANING_MAX]; //!< Pieces of this note close in meaning, best first
+    // This note's pieces come first, then other notes' best pieces, one per note.
+    EmbedHit meaning[SEARCH_MEANING_MAX]; //!< Pieces close in meaning, best first in each part
     char meaning_text[SEARCH_MEANING_MAX][SEARCH_CONTEXT_CHARS * 2]; //!< Each one's row: heading or first line
     int32_t meaning_count; //!< 0 unless embed_ready() and the query found some
+    int32_t meaning_here; //!< How many of those, from the first, are in the open note
     char meaning_query[SEARCH_MAX_QUERY]; //!< The query the group was ranked for
 } SearchState;
 

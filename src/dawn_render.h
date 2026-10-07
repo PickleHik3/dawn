@@ -57,6 +57,11 @@ void render_toc(void);
 //! Render the search overlay
 void render_search(void);
 
+//! The search result drawn on screen cell (row, col), both 1-based, as last rendered: each row
+//! owns the box's width, so a tap anywhere on it counts.
+//! @return the SearchState.selected value that picks it, or -1 for none (the "by meaning" label)
+int32_t render_search_hit(int32_t row, int32_t col);
+
 //! MODE_CONFLICT's choices, in the order the dialog lists them
 enum { CONFLICT_RELOAD, CONFLICT_OVERWRITE, CONFLICT_KEEP, CONFLICT_CHOICES };
 
