@@ -6405,10 +6405,14 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     // Apply persisted preferences. CLI overrides win over what's on disk
     // so user-supplied flags are honored even if settings exist.
     {
-        // Nerd Font icons by default only where the font is known to be installed: the launcher
-        // sets TERM_PROGRAM=termux-launcher. settings.json's "nerd_font" overrides either way.
+        // The launcher sets TERM_PROGRAM=termux-launcher; inside tmux TERM_PROGRAM is "tmux", but
+        // TERMUX_LAUNCHER_PANE (set by the launcher alone) survives. Nerd Font icons default on
+        // only there, where the font is known to be installed; settings.json's "nerd_font"
+        // overrides that either way, and never launcher_term.
         const char* prog = getenv("TERM_PROGRAM");
-        app.nerd_font = prog && strcmp(prog, "termux-launcher") == 0;
+        const char* pane = getenv("TERMUX_LAUNCHER_PANE");
+        app.launcher_term = (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
+        app.nerd_font = app.launcher_term;
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
     settings_load();

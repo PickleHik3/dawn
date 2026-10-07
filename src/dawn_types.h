@@ -313,6 +313,8 @@ typedef struct {
     bool focus_mode; //!< Focus mode enabled
     bool plain_mode; //!< Plain text mode (no WYSIWYG rendering)
     bool nerd_font; //!< Draw task boxes with Nerd Font icons (the launcher's terminal has the font)
+    bool launcher_term; //!< Running in Termux Launcher's terminal, also inside tmux there: it draws block,
+        //!< braille and legacy-computing eighths as seamless geometry (never set by settings.json)
     bool preview_mode; //!< Read-only preview mode
     int32_t help_page; //!< MODE_HELP's page: 0 = shortcuts, 1 = activity list (notice_history),
         //!< 2 = the meaning index (only where DAWN_EMBED_LIVE)
