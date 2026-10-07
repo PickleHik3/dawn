@@ -2512,6 +2512,14 @@ static int32_t chat_max_scroll = 0;
 //! 0 when not drawn), so a tap on it opens the model picker.
 static int32_t chat_name_row = 0, chat_name_col0 = 0, chat_name_col1 = 0;
 
+//! Where the last render drew the chat's "also in:" line (row 0 when not drawn) and the note piece
+//! it names, so a tap on that row opens it.
+static struct {
+    int32_t row, col0, col1; //!< Its row and columns [col0, col1)
+    char path[EMBED_PATH_MAX];
+    uint32_t start;
+} also_in;
+
 #if HAS_LIBAI
 //! The model picker: a small list over the chat's messages, opened by tapping the model's name in
 //! the header or Ctrl+L in the chat. Choosing switches at once; esc or Ctrl+L closes it.
@@ -2989,17 +2997,25 @@ skip_chat:
     // "also in: <title>" (dawn_embed): another note that covers the same ground, dim, on the gap
     // row between the messages and the input. Only when an index exists and a message row is left
     // above it (the header's rows stay the header's), and never in focus mode.
+    // A tap on it opens that note there; the arrow (nf-md-open_in_new with a Nerd Font, which
+    // spreads over the first of its two spaces) says so.
     EmbedHit rel[1];
+    also_in.row = 0;
     if (!app.focus_mode && msg_area_end > msg_area_start && embed_ready() && app.session_path
         && embed_related(app.session_path, EMBED_RELATED_MIN_SCORE, rel, 1) == 1) {
-        char line[EMBED_TITLE_MAX + 16];
-        snprintf(line, sizeof(line), "also in: %s", rel[0].note_title);
+        char line[EMBED_TITLE_MAX + 24];
+        snprintf(line, sizeof(line), "%salso in: %s", app.nerd_font ? "\xf3\xb0\x8f\x8c  " : "-> ", rel[0].note_title);
         int32_t fit = chat_wrap_line(line, strlen(line), 0, content_width);
         move_to(msg_area_end, content_start);
         set_bg(get_ai_bg());
         set_fg(get_dim());
         for (int32_t c = 0; c < fit; c++)
             out_char(line[c]);
+        also_in.row = msg_area_end;
+        also_in.col0 = content_start;
+        also_in.col1 = content_start + content_width;
+        snprintf(also_in.path, sizeof(also_in.path), "%s", rel[0].path);
+        also_in.start = rel[0].start;
     }
 
     // Input area: one rung up the tonal ladder (surface_container_high) from the chat, which is
@@ -4507,6 +4523,9 @@ static void handle_mouse_click(void)
         if (chat_name_row > 0 && row == chat_name_row && col >= chat_name_col0 && col <= chat_name_col1)
             chat_picker_open();
 #endif
+        // A tap on "also in:" opens that note at the piece it names.
+        if (also_in.row > 0 && row == also_in.row && col >= also_in.col0 && col < also_in.col1)
+            open_note_at(also_in.path, also_in.start);
         return;
     }
 
