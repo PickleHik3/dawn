@@ -1262,7 +1262,8 @@ static void render_meaning_row(const SearchState* search, int32_t m, bool sel, i
     // The title keeps at least half the row when both don't fit, so the row says which note.
     const char* title = search->meaning[m].note_title;
     int32_t title_cols = hist_cols(title, strlen(title));
-    int32_t text_cols = hist_cols(text, strlen(text));
+    // A piece that is the note's own H1 repeats the title: say it once, in the whole row.
+    int32_t text_cols = strcasecmp(text, title) == 0 ? 0 : hist_cols(text, strlen(text));
     int32_t title_max = max_cols;
     if (text_cols > 0 && title_cols + 3 + text_cols > max_cols) {
         title_max = max_cols - 3 - text_cols;

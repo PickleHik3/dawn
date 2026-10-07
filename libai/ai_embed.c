@@ -271,7 +271,9 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
 {
     memset(out, 0, sizeof(*out));
     resp_t resp;
-    ai_embed_status_t st = http_call("/models", NULL, 8L, cancel, &resp, NULL);
+    // 30 s, not 8: with twenty-odd models installed the launcher takes about 12 s to list them,
+    // and this runs on the indexer's own thread, so waiting costs nothing.
+    ai_embed_status_t st = http_call("/models", NULL, 30L, cancel, &resp, NULL);
     if (st != AI_EMBED_OK) {
         resp_free(&resp);
         return st;
