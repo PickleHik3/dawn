@@ -5416,6 +5416,47 @@ static void handle_ai_input(int32_t key)
     }
 }
 
+//! A key on MODE_HELP's meaning page: m switches the index off or on (and remembers it in
+//! settings.json), r arms a rebuild and a second r within HELP_REBUILD_CONFIRM_MS starts it; a tap
+//! on either row does the same. A tap elsewhere in the box, and the release, drag and scroll that
+//! come with taps, do nothing (the release after a tap on a row would otherwise close help).
+//! @return false for any other key, which closes help
+static bool help_meaning_key(int32_t key)
+{
+    if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_SCROLL_UP
+        || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
+        return true;
+    if (key == DAWN_KEY_MOUSE_CLICK) {
+        int32_t hit = render_help_hit(input_last_mouse_row(), input_last_mouse_col());
+        if (hit == HELP_HIT_OUTSIDE)
+            return false;
+        if (hit == HELP_HIT_BOX)
+            return true;
+        key = hit == HELP_HIT_TOGGLE ? 'm' : 'r';
+    }
+    if (key == 'm') {
+        app.meaning_index = !app.meaning_index;
+        embed_set_enabled(app.meaning_index);
+        settings_save();
+        app.help_rebuild_armed = 0;
+        return true;
+    }
+    if (key == 'r') {
+        if (!embed_enabled())
+            return true; // the row says to turn it on first
+        int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (app.help_rebuild_armed && now - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS) {
+            app.help_rebuild_armed = 0;
+            embed_rebuild();
+            notice_post(NOTICE_INFO, "rebuilding the meaning index");
+        } else {
+            app.help_rebuild_armed = now;
+        }
+        return true;
+    }
+    return false;
+}
+
 static void handle_input(void)
 {
     int32_t key = input_read_key();
@@ -6158,16 +6199,25 @@ static void handle_input(void)
         break;
     }
 
-    case MODE_HELP:
+    case MODE_HELP: {
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
-        if (key == '\t' || key == DAWN_KEY_RIGHT)
-            app.help_page = 1;
-        else if (key == DAWN_KEY_LEFT)
-            app.help_page = 0;
-        else
+        // A third, where the meaning index is compiled in, shows what it is doing and has its
+        // switch and its rebuild. Any other key closes help.
+        int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
+        if (key == '\t' || key == DAWN_KEY_RIGHT) {
+            if (app.help_page < last_page)
+                app.help_page++;
+        } else if (key == DAWN_KEY_LEFT) {
+            if (app.help_page > 0)
+                app.help_page--;
+        } else if (app.help_page != 2 || !help_meaning_key(key)) {
             MODE_POP();
+        }
+        if (app.help_page != 2)
+            app.help_rebuild_armed = 0;
         break;
+    }
 
     case MODE_TOC: {
         TocState* toc = (TocState*)app.toc_state;
@@ -6344,7 +6394,9 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
         const char* prog = getenv("TERM_PROGRAM");
         app.nerd_font = prog && strcmp(prog, "termux-launcher") == 0;
     }
+    app.meaning_index = true; // on unless settings.json says "meaning_index": false
     settings_load();
+    embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;
     }
