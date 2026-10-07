@@ -1,12 +1,21 @@
 // dawn_history.c - Session history management
+//
+// The list of notes lives in <notes dir>/.sessions as a CRDT (dawn_crdt.c), merged with what is on
+// disk before every write so two dawns never drop each other's entries. A .sessions that exists
+// but does not parse is set aside as .sessions.corrupt-<time> (with a notice) before anything is
+// written in its place, and one that cannot be read at all is not written over. A failed write
+// says so once, until a write gets through again.
 
 #include "dawn_history.h"
 #include "cJSON.h"
 #include "dawn_crdt.h"
 #include "dawn_date.h"
 #include "dawn_file.h"
+#include "dawn_notepath.h"
+#include "dawn_notice.h"
 #include "dawn_types.h"
 #include "dawn_utils.h"
+#include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,26 +24,58 @@ static CrdtState* hist_state = NULL;
 
 // #region Helpers
 
-static char* sessions_file_path(void)
+//! <notes dir>/.sessions, or NULL when that path does not fit.
+static const char* sessions_file_path(void)
 {
     static char path[PATH_MAX];
-#ifdef _WIN32
-    snprintf(path, sizeof(path), "%s\\.sessions", history_dir());
-#else
-    snprintf(path, sizeof(path), "%s/.sessions", history_dir());
-#endif
-    return path;
+    return path_join(path, sizeof(path), history_dir(), ".sessions") ? path : NULL;
 }
 
-static char* legacy_history_path(void)
+//! <notes dir>/.history (the format before the CRDT), or NULL when that path does not fit.
+static const char* legacy_history_path(void)
 {
     static char path[PATH_MAX];
-#ifdef _WIN32
-    snprintf(path, sizeof(path), "%s\\.history", history_dir());
-#else
-    snprintf(path, sizeof(path), "%s/.history", history_dir());
-#endif
-    return path;
+    return path_join(path, sizeof(path), history_dir(), ".history") ? path : NULL;
+}
+
+//! A notice for the first failure of a streak (*failing false), none for the rest; a success ends
+//! the streak.
+static void report(bool ok, bool* failing, const char* what)
+{
+    if (!ok && !*failing) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s · %s", what, strerror(errno));
+        notice_post(NOTICE_ERROR, msg);
+    }
+    *failing = !ok;
+}
+
+static bool g_read_failing; //!< .sessions could not be read (told once)
+static bool g_write_failing; //!< .sessions could not be written (told once)
+
+//! Write state to .sessions (the notes directory made first).
+static bool write_sessions(CrdtState* state)
+{
+    const char* path = sessions_file_path();
+    char* json = crdt_serialize(state);
+    bool ok = false;
+    if (!path)
+        errno = ENAMETOOLONG;
+    else if (!json)
+        errno = ENOMEM;
+    else
+        ok = DAWN_BACKEND(app)->mkdir_p(history_dir()) && DAWN_BACKEND(app)->write_file(path, json, strlen(json));
+    free(json);
+    report(ok, &g_write_failing, "couldn't save the history");
+    return ok;
+}
+
+static bool all_blank(const char* s, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        if (s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r')
+            return false;
+    return true;
 }
 
 static char* normalize_path(const char* path)
@@ -127,17 +168,48 @@ static void normalize_crdt_keys(CrdtState* state)
     }
 }
 
-static CrdtState* load_disk_state(void)
+//! .sessions as it is on disk. NULL with *writable set: there is none yet (missing or empty), or
+//! it did not parse and was set aside, so writing a new one loses nothing. NULL without: it could
+//! not be read, or not set aside, so it must not be written over.
+static CrdtState* load_disk_state(bool* writable)
 {
-    size_t len;
-    char* content = DAWN_BACKEND(app)->read_file(sessions_file_path(), &len);
-    if (!content)
+    *writable = false;
+    const char* path = sessions_file_path();
+    if (!path) {
+        errno = ENAMETOOLONG;
+        report(false, &g_read_failing, "couldn't read the history");
         return NULL;
+    }
+    size_t len = 0;
+    bool missing = false;
+    char* content = store_read(path, &len, &missing);
+    if (!content) {
+        report(missing, &g_read_failing, "couldn't read the history");
+        *writable = missing;
+        return NULL;
+    }
+    g_read_failing = false;
 
-    CrdtState* state = crdt_parse(content, len);
+    bool blank = all_blank(content, len);
+    CrdtState* state = blank ? NULL : crdt_parse(content, len);
     free(content);
-    normalize_crdt_keys(state);
-    return state;
+    if (state || blank) {
+        normalize_crdt_keys(state);
+        *writable = true;
+        return state;
+    }
+
+    // Damaged: kept under another name for whoever wants to look, never overwritten.
+    char moved[PATH_MAX];
+    char msg[128];
+    if (store_quarantine(path, moved, sizeof(moved))) {
+        snprintf(msg, sizeof(msg), "history file was damaged · kept as %s", notepath_base(moved, NULL));
+        *writable = true;
+    } else {
+        snprintf(msg, sizeof(msg), "history file is damaged · couldn't set it aside: %s", strerror(errno));
+    }
+    notice_post(NOTICE_ERROR, msg);
+    return NULL;
 }
 
 static CrdtState* migrate_v1_to_crdt(const char* json, size_t len)
@@ -195,34 +267,33 @@ void hist_load(void)
     }
     hist_free();
 
-    if (DAWN_BACKEND(app)->file_exists(legacy_history_path())) {
+    // The old .history becomes .sessions (merged into one already there), and goes only once the
+    // new file is written: a failed write leaves it to try again next time.
+    const char* legacy = legacy_history_path();
+    if (legacy && DAWN_BACKEND(app)->file_exists(legacy)) {
         size_t len;
-        char* content = DAWN_BACKEND(app)->read_file(legacy_history_path(), &len);
-        if (content) {
-            CrdtState* migrated = migrate_v1_to_crdt(content, len);
-            free(content);
-            if (migrated) {
-                char* json = crdt_serialize(migrated);
-                if (json) {
-                    DAWN_BACKEND(app)->mkdir_p(history_dir());
-                    DAWN_BACKEND(app)->write_file(sessions_file_path(), json, strlen(json));
-                    free(json);
+        char* content = DAWN_BACKEND(app)->read_file(legacy, &len);
+        CrdtState* migrated = content ? migrate_v1_to_crdt(content, len) : NULL;
+        free(content);
+        if (migrated) {
+            bool writable;
+            CrdtState* existing = load_disk_state(&writable);
+            if (existing) {
+                CrdtState* merged = crdt_merge(migrated, existing);
+                crdt_free(existing);
+                if (merged) {
+                    crdt_free(migrated);
+                    migrated = merged;
                 }
-                crdt_free(migrated);
             }
-            remove(legacy_history_path());
+            if (writable && write_sessions(migrated))
+                remove(legacy);
+            crdt_free(migrated);
         }
     }
 
-    size_t len;
-    char* content = DAWN_BACKEND(app)->read_file(sessions_file_path(), &len);
-    if (!content)
-        return;
-
-    hist_state = crdt_parse(content, len);
-    normalize_crdt_keys(hist_state);
-    free(content);
-
+    bool writable;
+    hist_state = load_disk_state(&writable);
     if (hist_state)
         rebuild_history_array();
 }
@@ -232,21 +303,21 @@ void hist_save(void)
     if (!hist_state)
         hist_state = crdt_create();
 
-    CrdtState* disk_state = load_disk_state();
+    bool writable;
+    CrdtState* disk_state = load_disk_state(&writable);
 
     if (disk_state) {
         CrdtState* merged = crdt_merge(hist_state, disk_state);
         crdt_free(disk_state);
-        crdt_free(hist_state);
-        hist_state = merged;
+        if (merged) {
+            crdt_free(hist_state);
+            hist_state = merged;
+        }
     }
 
-    char* json = crdt_serialize(hist_state);
-    if (json) {
-        DAWN_BACKEND(app)->mkdir_p(history_dir());
-        DAWN_BACKEND(app)->write_file(sessions_file_path(), json, strlen(json));
-        free(json);
-    }
+    // Not written over a file that could not be read: its entries would be lost.
+    if (writable)
+        write_sessions(hist_state);
 
     rebuild_history_array();
 }
