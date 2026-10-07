@@ -81,8 +81,9 @@
 //! the whole screen instead
 #define AI_SHEET_MIN_NOTE_ROWS 5
 
-//! How many pre-edit copies of a note the AI's edits keep, per note
-#define MAX_NOTE_VERSIONS 20
+//! How many copies of a note versions/ keeps per note: the AI's pre-edit copies and the
+//! per-session snapshots of the file taken before dawn writes over it (dawn_file.c)
+#define MAX_NOTE_VERSIONS 50
 
 //! Maximum AI response size
 #define MAX_AI_RESPONSE (64 * 1024)
@@ -122,7 +123,8 @@ DAWN_ENUM(uint8_t) {
     MODE_HELP, //!< Keyboard shortcuts help
     MODE_BLOCK_EDIT, //!< Block editor (modal) - images, etc.
     MODE_TOC, //!< Table of contents navigation (modal)
-    MODE_SEARCH //!< Document search (modal)
+    MODE_SEARCH, //!< Document search (modal)
+    MODE_CONFLICT //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
 } AppMode;
 
 //! Push a modal mode (saves current mode for later restoration)
@@ -157,6 +159,15 @@ typedef struct {
     size_t len;
     bool is_user; //!< true = user message, false = AI response
 } ChatMessage;
+
+//! What a file looked like on disk, cheaply: compared every couple of seconds to notice a change
+//! made elsewhere without reading the file (dawn_file.c note_watch()).
+typedef struct {
+    bool ok; //!< The file could be looked at (false: missing, or no stat on this platform)
+    uint64_t ino; //!< Its inode: an editor that saves through a rename gives it a new one
+    int64_t size; //!< Its size in bytes
+    int64_t mtime; //!< Its modification time: nanoseconds on Linux and Android, seconds elsewhere
+} DiskStamp;
 
 //! History entry for saved documents
 typedef struct {
@@ -365,6 +376,23 @@ typedef struct {
     bool dirty; //!< The note or its frontmatter changed since the last successful save
     bool save_failed; //!< The last save failed; the status bar says so until one succeeds
     bool write_fm; //!< Save with frontmatter: dawn's own notes, and files that came with some
+
+    // The open note's file as dawn last saw it (dawn_file.c): set when a note is opened or begun
+    // and after every write of dawn's own, compared with the disk before every save.
+    bool disk_known; //!< false: nothing to compare with (a buffer from stdin); saves are not checked
+    bool disk_present; //!< The file existed then
+    uint64_t disk_hash; //!< store_hash() of its bytes then
+    DiskStamp disk_stamp; //!< Its stamp then, for note_watch()'s cheap look
+
+    // A conflict: the file changed elsewhere while the note had unsaved edits here (dawn_file.c)
+    bool save_paused; //!< Nothing is written to the note until the writer chooses; the status bar says so
+    bool conflict_prompt; //!< Open MODE_CONFLICT as soon as the note is on screen
+    bool conflict_left_told; //!< The "left without saving" notice was posted for this leave
+    char* conflict_path; //!< This conflict's copy of the writer's text, beside the note (NULL: none yet)
+    uint64_t conflict_text_hash; //!< store_hash() of the text that copy holds
+
+    // Snapshots (recovery)
+    int64_t snapshot_at; //!< When this editing session last copied the file into versions/ (DAWN_CLOCK_SEC), 0 = not yet
 
     // Block cache (forward declared, allocated on demand)
     void* block_cache; //!< BlockCache* - block-based document model

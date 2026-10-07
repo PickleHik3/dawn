@@ -18,6 +18,7 @@
 #include "dawn_image.h"
 #include "dawn_input.h"
 #include "dawn_nav.h"
+#include "dawn_notepath.h"
 #include "dawn_notice.h"
 #include "dawn_session.h"
 #include "dawn_render.h"
@@ -32,6 +33,8 @@
 #include "dawn_utils.h"
 #include "dawn_voice.h"
 #include "dawn_wrap.h"
+#include <errno.h>
+#include <stdarg.h>
 
 // Platform capability check macro
 #define HAS_CAP(cap) dawn_ctx_has(&app.ctx, cap)
@@ -3108,6 +3111,15 @@ static void render_status_bar(const Layout* L)
         out_str("not saved");
     }
 
+    // The note changed elsewhere and the writer chose to keep editing: nothing is written to it
+    // until a save finds it unchanged or the dialog is answered.
+    if (app.save_paused) {
+        set_fg(get_border());
+        out_str(" · ");
+        set_fg(get_accent());
+        out_str("saving paused");
+    }
+
     if (app.focus_mode) {
         set_fg(get_border());
         out_str(" · ");
@@ -3140,7 +3152,7 @@ static void render_status_bar(const Layout* L)
         // rather than not showing at all; the activity list keeps the whole text.
         // What the left side actually used (words, timer, "not saved", selection) plus a gap.
         int32_t left_end = status_left + (int32_t)strlen(words_buf) + 2
-            + (app.timer_mins > 0 && app.timer_on ? 10 : 0) + (app.save_failed ? 12 : 0)
+            + (app.timer_mins > 0 && app.timer_on ? 10 : 0) + (app.save_failed ? 12 : 0) + (app.save_paused ? 16 : 0)
             + (has_selection() ? 12 : 0);
         int32_t room = status_right - left_end;
         size_t len = strlen(notice_text);
@@ -3935,6 +3947,10 @@ static void render(void)
         render_writing();
         render_search();
     } break;
+    case MODE_CONFLICT:
+        render_writing();
+        render_conflict();
+        break;
     }
 
     scrollind_frame_end();
@@ -3956,6 +3972,7 @@ static void begin_session(char* path)
     free(app.session_path);
     app.session_path = path;
     image_set_base_dir_for_note(path);
+    note_disk_begin_absent(); // no file yet: the first save creates it, unless one appears meanwhile
 
     fm_free(app.frontmatter);
     app.frontmatter = NULL;
@@ -3985,20 +4002,42 @@ static void begin_session(char* path)
 #endif
 }
 
-static void new_session(void)
+//! Start a new note of dawn's own, named by the time (2026-10-07_143005.md), or -2 .. -99 after
+//! it when a note of that name exists already: a new note never takes an existing file's path.
+//! @return false (with an error notice) when the notes directory cannot be made or no name is free
+static bool new_session(void)
 {
-    // Generate path in .dawn directory
-    DAWN_BACKEND(app)->mkdir_p(history_dir());
+    const char* dir = history_dir();
+    char msg[128];
+    if (!dir[0]) {
+        notice_post(NOTICE_ERROR, "couldn't start a note · the notes folder path is too long");
+        return false;
+    }
+    if (!DAWN_BACKEND(app)->mkdir_p(dir)) {
+        snprintf(msg, sizeof(msg), "couldn't make the notes folder · %s", strerror(errno));
+        notice_post(NOTICE_ERROR, msg);
+        return false;
+    }
     DawnTime lt;
     DAWN_BACKEND(app)->localtime(&lt);
     char timestamp[20];
     dawn_format_filename_time(&lt, timestamp, sizeof(timestamp));
     char path[PATH_MAX];
 #ifdef _WIN32
-    snprintf(path, sizeof(path), "%s\\%s.md", history_dir(), timestamp);
+    const char sep = '\\';
 #else
-    snprintf(path, sizeof(path), "%s/%s.md", history_dir(), timestamp);
+    const char sep = '/';
 #endif
+    bool found = false;
+    for (int32_t n = 1; n <= NOTEPATH_MAX_NUMBER && !found; n++) {
+        if (!notepath_numbered(path, sizeof(path), dir, strlen(dir), sep, timestamp, n))
+            break;
+        found = !DAWN_BACKEND(app)->file_exists(path);
+    }
+    if (!found) {
+        notice_post(NOTICE_ERROR, "couldn't start a note · no free name");
+        return false;
+    }
     begin_session(dawn_strdup(path));
 
     // A note of dawn's own carries frontmatter from the start.
@@ -4009,6 +4048,21 @@ static void new_session(void)
     dawn_format_iso_time(&lt, date_buf, sizeof(date_buf));
     fm_set_string(app.frontmatter, "date", date_buf);
     app.write_fm = true;
+    return true;
+}
+
+//! Open a note picked in the history. One that cannot be opened leaves the list where it was,
+//! with a notice (load_file_for_editing() posts its own for a file that is not text).
+static bool open_from_history(const char* path)
+{
+    if (load_file_for_editing(path))
+        return true;
+    if (!load_refused_binary()) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "couldn't open %s · %s", notepath_base(path, NULL), strerror(errno));
+        notice_post(NOTICE_ERROR, msg);
+    }
+    return false;
 }
 
 // #endregion
@@ -4576,8 +4630,11 @@ static void handle_writing(int32_t key)
             app.quit = true;
         else {
             // A note that could not be saved stays open, with the status bar saying so; the next
-            // esc after that warning leaves anyway, since the disk may never come back.
-            bool warned = app.save_failed;
+            // esc after that warning leaves anyway, since the disk may never come back. A note
+            // changed elsewhere likewise: the first esc that finds it asks (MODE_CONFLICT); once
+            // the writer chose to keep editing, esc leaves without overwriting, their text kept
+            // in the conflict copy (dawn_frame posts where).
+            bool warned = app.save_failed || app.save_paused;
             if (!save_session() && !warned)
                 break;
             app.mode = app.timer_on ? MODE_FINISHED : MODE_WELCOME;
@@ -5392,8 +5449,8 @@ static void handle_input(void)
         case '\n':
             if (app.hist_count > 0) {
                 HistoryEntry* entry = &app.history[app.hist_sel];
-                load_file_for_editing(entry->path);
-                restore_cursor_position(entry->cursor);
+                if (open_from_history(entry->path))
+                    restore_cursor_position(entry->cursor);
             }
             break;
         case 'e':
@@ -5403,7 +5460,8 @@ static void handle_input(void)
         case 't':
             if (app.hist_count > 0) {
                 HistoryEntry* entry = &app.history[app.hist_sel];
-                load_file_for_editing(entry->path);
+                if (!open_from_history(entry->path))
+                    break;
                 restore_cursor_position(entry->cursor);
                 fm_edit_init();
                 MODE_PUSH(MODE_FM_EDIT);
@@ -5975,6 +6033,33 @@ static void handle_input(void)
         // Future: else if (app.block_edit.type == BLOCK_CODE) { ... }
         break;
 
+    case MODE_CONFLICT: {
+        // r / o / k (or esc), or a tap on one of the three rows.
+        int32_t choice = -1;
+        if (key == DAWN_KEY_MOUSE_CLICK)
+            choice = render_conflict_hit(input_last_mouse_row(), input_last_mouse_col());
+        else if (key == 'r' || key == 'R')
+            choice = CONFLICT_RELOAD;
+        else if (key == 'o' || key == 'O')
+            choice = CONFLICT_OVERWRITE;
+        else if (key == 'k' || key == 'K' || key == '\x1b')
+            choice = CONFLICT_KEEP;
+        if (choice == CONFLICT_RELOAD) {
+            if (note_conflict_reload())
+                MODE_POP();
+        } else if (choice == CONFLICT_OVERWRITE) {
+            // A file changed yet again meanwhile is a new conflict: the dialog stays, asking anew.
+            if (note_conflict_overwrite() || !app.save_paused)
+                MODE_POP();
+            app.conflict_prompt = false;
+        } else if (choice == CONFLICT_KEEP) {
+            // Saving stays paused ("saving paused" on the status bar); the next save the writer
+            // makes, or the next autosave once the text changed, looks again and asks again.
+            MODE_POP();
+        }
+        break;
+    }
+
     case MODE_HELP:
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
@@ -6198,6 +6283,50 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     return true;
 }
 
+//! What dawn_engine_shutdown() has to tell the terminal, printed at exit: written now it would go
+//! to the alternate screen, which the frontend's dawn_ctx_shutdown() is yet to leave.
+static char g_exit_msg[2 * PATH_MAX + 128];
+
+static void print_exit_message(void)
+{
+    if (g_exit_msg[0])
+        fputs(g_exit_msg, stderr);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 1, 2)))
+#endif
+static void exit_message(const char* fmt, ...)
+{
+    static bool registered;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_exit_msg, sizeof(g_exit_msg), fmt, ap);
+    va_end(ap);
+    if (!registered && atexit(print_exit_message) == 0)
+        registered = true;
+    else if (!registered)
+        print_exit_message(); // no handler: late is better than never
+}
+
+//! Whether the note is on screen: being written, or under one of the dialogs opened over it.
+static bool on_note_screen(void)
+{
+    switch (app.mode) {
+    case MODE_WRITING:
+        return true;
+    case MODE_FM_EDIT:
+    case MODE_HELP:
+    case MODE_BLOCK_EDIT:
+    case MODE_TOC:
+    case MODE_SEARCH:
+    case MODE_CONFLICT:
+        return app.prev_mode == MODE_WRITING;
+    default:
+        return false;
+    }
+}
+
 void dawn_engine_shutdown(void)
 {
     embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
@@ -6205,14 +6334,26 @@ void dawn_engine_shutdown(void)
     scrollind_shutdown();
 
     // save_session writes only what changed; an empty note that was emptied on purpose counts.
-    if (app.session_path && app.mode == MODE_WRITING && !app.preview_mode) {
-        if (!save_session())
-            fprintf(stderr, "dawn: could not save %s\n", app.session_path);
+    // A note changed elsewhere is not written over: no one is left to ask, so the writer's text
+    // goes to (or refreshes) the conflict copy beside it and the terminal is told where.
+    if (app.session_path && on_note_screen() && !app.preview_mode) {
+        if (save_session()) {
+        } else if (app.save_paused && app.conflict_path) {
+            exit_message("dawn: %s changed elsewhere and was not overwritten; your text is in %s\n",
+                app.session_path, app.conflict_path);
+        } else if (app.save_paused) {
+            exit_message("dawn: %s changed elsewhere and was not overwritten; your text could not be copied\n",
+                app.session_path);
+        } else {
+            exit_message("dawn: could not save %s\n", app.session_path);
+        }
     }
 
     gap_free(&app.text);
     free(app.session_path);
     app.session_path = NULL;
+    free(app.conflict_path);
+    app.conflict_path = NULL;
     fm_free(app.frontmatter);
     app.frontmatter = NULL;
     chat_clear();
@@ -6260,13 +6401,36 @@ bool dawn_frame(void)
         timer_check();
 
     // Autosave touches the file only once something changed; a note merely opened stays as it was.
+    // While a conflict pauses saving it looks again only once the text differs from the copy
+    // already kept (save_session then refreshes the copy and asks again, or saves when the file
+    // is back to what dawn expected).
     if (app.mode == MODE_WRITING && app.dirty && !app.preview_mode) {
         int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC);
         if (app.last_save_time == 0)
             app.last_save_time = now;
         else if (now - app.last_save_time >= 5) {
-            save_session();
+            if (!app.save_paused || note_conflict_text_changed())
+                save_session();
             app.last_save_time = now;
+        }
+    }
+
+    // A change made elsewhere to a note with no unsaved edits is reloaded (dawn_file.c).
+    if (app.mode == MODE_WRITING && app.session_path)
+        note_watch();
+
+    // A save found the note changed elsewhere: ask as soon as the note is on screen. Left (esc,
+    // the timer) while saving is paused: say once where the writer's text is.
+    if (app.conflict_prompt && app.mode == MODE_WRITING && !app.preview_mode) {
+        app.conflict_prompt = false;
+        MODE_PUSH(MODE_CONFLICT);
+    }
+    if (app.save_paused) {
+        if (on_note_screen())
+            app.conflict_left_told = false;
+        else if (!app.conflict_left_told) {
+            app.conflict_left_told = true;
+            note_conflict_left();
         }
     }
 #if HAS_LIBAI
@@ -6353,7 +6517,7 @@ bool dawn_preview_buffer(const char* content, size_t size)
     return true;
 }
 
-void dawn_new_document(void) { new_session(); }
+void dawn_new_document(void) { (void)new_session(); }
 
 void dawn_save_document(void) { save_session(); }
 

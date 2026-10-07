@@ -3,6 +3,7 @@
 #include "dawn_app.h"
 #include "dawn_args.h"
 #include "dawn_backend.h"
+#include "dawn_file.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,9 +157,14 @@ int32_t main(int32_t argc, char* argv[])
     } else if (args.file) {
         // Edit mode: open file directly
         if (!dawn_load_document(args.file)) {
-            fprintf(stderr, "dawn: cannot open file: %s\n", args.file);
+            // Told after the terminal is given back: printed on the alternate screen it is lost.
+            bool binary = load_refused_binary();
             dawn_engine_shutdown();
             dawn_ctx_shutdown(&app.ctx);
+            if (binary)
+                fprintf(stderr, "dawn: %s is not a text file (contains NUL bytes)\n", args.file);
+            else
+                fprintf(stderr, "dawn: cannot open file: %s\n", args.file);
             free(stdin_content);
             args_free(&args);
             return 1;

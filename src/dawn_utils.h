@@ -62,8 +62,9 @@ void dawn_strncpy(char* dest, const char* src, size_t n);
 //! Get the chat history path for a session file
 //! @param session_path path to the .md session file
 //! @param chat_path output buffer for chat path
-//! @param bufsize size of chat_path buffer
-void get_chat_path(const char* session_path, char* chat_path, size_t bufsize);
+//! @param bufsize size of chat_path buffer (PATH_MAX fits any note path)
+//! @return false (and chat_path "") when the path does not fit
+bool get_chat_path(const char* session_path, char* chat_path, size_t bufsize);
 
 // #endregion
 

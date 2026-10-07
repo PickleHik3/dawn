@@ -5,6 +5,7 @@
 #include "dawn_gap.h"
 #include "dawn_image.h"
 #include "dawn_modal.h"
+#include "dawn_notepath.h"
 #include "dawn_notice.h"
 #include "dawn_search.h"
 #include "dawn_session.h"
@@ -1223,6 +1224,137 @@ void render_search(void)
     // Position cursor at search
     move_to(search_row, content_left + 6 + search->query_len);
     platform_set_cursor_visible(true);
+}
+//! Where MODE_CONFLICT's choices were drawn last, for render_conflict_hit().
+static struct {
+    bool shown;
+    int32_t left, width; //!< The dialog's columns
+    int32_t rows[CONFLICT_CHOICES]; //!< Each choice's row
+} conflict_geo;
+
+//! Break text into lines of at most width code points, at spaces where a word fits and inside a
+//! word that alone is wider. Returns the number of lines (at most max).
+static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, size_t* lens, int32_t max)
+{
+    size_t len = strlen(text);
+    size_t pos = 0;
+    int32_t n = 0;
+    while (pos < len && n < max) {
+        while (pos < len && text[pos] == ' ')
+            pos++;
+        if (pos >= len)
+            break;
+        size_t i = pos, last_space = 0;
+        int32_t cols = 0;
+        while (i < len && cols < width) {
+            if (text[i] == ' ')
+                last_space = i;
+            i++;
+            while (i < len && ((unsigned char)text[i] & 0xC0) == 0x80)
+                i++;
+            cols++;
+        }
+        size_t end = i;
+        if (i < len && text[i] != ' ' && last_space > pos)
+            end = last_space; // break at the last space rather than inside a word
+        starts[n] = pos;
+        lens[n] = end - pos;
+        n++;
+        pos = end;
+    }
+    return n;
+}
+
+void render_conflict(void)
+{
+    static const char* const labels[CONFLICT_CHOICES] = {
+        [CONFLICT_RELOAD] = "[r] Reload theirs",
+        [CONFLICT_OVERWRITE] = "[o] Overwrite with mine",
+        [CONFLICT_KEEP] = "[k] Keep editing",
+    };
+    static const char* const hints[CONFLICT_CHOICES] = {
+        [CONFLICT_RELOAD] = "ctrl+z brings yours back",
+        [CONFLICT_OVERWRITE] = "theirs goes to versions",
+        [CONFLICT_KEEP] = "saving stays paused",
+    };
+
+    int32_t width = app.cols - 4 < 60 ? app.cols - 4 : 60;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    int32_t text_w = width - 6;
+
+    char body[3 * PATH_MAX];
+    const char* name = app.session_path ? notepath_base(app.session_path, NULL) : "this note";
+    if (app.conflict_path)
+        snprintf(body, sizeof(body), "%s was changed outside dawn while you had unsaved edits here. Your text is safe in %s. Saving is paused until you choose.",
+            name, notepath_base(app.conflict_path, NULL));
+    else
+        snprintf(body, sizeof(body), "%s was changed outside dawn while you had unsaved edits here. A copy of your text could not be written, so keep the note open. Saving is paused until you choose.",
+            name);
+
+    // Rows: border, blank, title, blank, body, blank, the choices with a blank between (easier to
+    // tap), blank, border. Short screens lose the blanks between choices, then body lines.
+    enum { BODY_MAX = 16 };
+    size_t starts[BODY_MAX], lens[BODY_MAX];
+    int32_t body_n = conflict_wrap(body, text_w > 8 ? text_w : 8, starts, lens, BODY_MAX);
+    int32_t gap = 1;
+    int32_t fixed = 7 + CONFLICT_CHOICES + (CONFLICT_CHOICES - 1) * gap;
+    if (fixed + body_n > app.rows) {
+        gap = 0;
+        fixed = 7 + CONFLICT_CHOICES;
+    }
+    if (fixed + body_n > app.rows)
+        body_n = app.rows - fixed > 1 ? app.rows - fixed : 1;
+    int32_t height = fixed + body_n;
+
+    int32_t top, left;
+    render_popup_box(width, height, &top, &left);
+    set_bg(get_modal_bg());
+
+    int32_t col = left + 3;
+    int32_t row = top + 2;
+    move_to(row, col);
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str("CHANGED ELSEWHERE");
+    platform_reset_attrs();
+    set_bg(get_modal_bg());
+    row += 2;
+
+    set_fg(get_fg());
+    for (int32_t i = 0; i < body_n; i++) {
+        move_to(row++, col);
+        DAWN_BACKEND(app)->write_str(body + starts[i], lens[i]);
+    }
+    row++;
+
+    conflict_geo.shown = true;
+    conflict_geo.left = left;
+    conflict_geo.width = width;
+    for (int32_t c = 0; c < CONFLICT_CHOICES; c++) {
+        conflict_geo.rows[c] = row;
+        move_to(row, col);
+        set_fg(get_accent());
+        platform_write_str(labels[c]);
+        int32_t used = (int32_t)strlen(labels[c]);
+        int32_t hint_len = (int32_t)strlen(hints[c]);
+        if (used + 3 + hint_len <= text_w) {
+            set_fg(get_dim());
+            platform_write_str(" · ");
+            platform_write_str(hints[c]);
+        }
+        row += 1 + gap;
+    }
+}
+
+int32_t render_conflict_hit(int32_t row, int32_t col)
+{
+    if (!conflict_geo.shown || col < conflict_geo.left || col >= conflict_geo.left + conflict_geo.width)
+        return -1;
+    for (int32_t c = 0; c < CONFLICT_CHOICES; c++)
+        if (row == conflict_geo.rows[c])
+            return c;
+    return -1;
 }
 
 // #endregion
