@@ -1,4 +1,5 @@
-// dawn_settings.c - settings.json in the config directory: theme, timer, Nerd Font boxes.
+// dawn_settings.c - settings.json in the config directory: theme, timer, Nerd Font boxes, the
+// meaning index switch.
 //
 // A save rewrites only the keys dawn sets and keeps every other one the file holds (nerd_font,
 // written by hand or by the launcher, among them). A settings.json that does not parse is set
@@ -130,6 +131,10 @@ void settings_load(void)
     if (cJSON_IsBool(nerd_j))
         app.nerd_font = cJSON_IsTrue(nerd_j);
 
+    cJSON* meaning_j = cJSON_GetObjectItem(root, "meaning_index");
+    if (cJSON_IsBool(meaning_j))
+        app.meaning_index = cJSON_IsTrue(meaning_j);
+
     cJSON* timer_j = cJSON_GetObjectItem(root, "timer_mins");
     if (cJSON_IsNumber(timer_j)) {
         int32_t mins = (int32_t)timer_j->valuedouble;
@@ -157,6 +162,7 @@ void settings_save(void)
 
     set_item(root, "theme", cJSON_CreateString(app.theme == THEME_DARK ? "dark" : "light"));
     set_item(root, "timer_mins", cJSON_CreateNumber((double)app.timer_mins));
+    set_item(root, "meaning_index", cJSON_CreateBool(app.meaning_index));
 
     char* json = cJSON_Print(root);
     cJSON_Delete(root);

@@ -9,6 +9,7 @@
 #include "dawn_notice.h"
 #include "dawn_search.h"
 #include "dawn_session.h"
+#include "dawn_status.h"
 #include "dawn_theme.h"
 #include "dawn_timer.h"
 #include "dawn_toc.h"
@@ -202,8 +203,24 @@ void render_welcome(void)
     render_text_at(row, col2, "?", get_accent());
     render_text_at(row, col2 + 2, " help", get_dim());
 
+    // The status panel (dawn_status) goes in the bottom right of the space under the actions:
+    // below the "ai ready" line where there are rows enough, else straight under the actions, at
+    // most three rows, taking the place of that line while it is out.
+    int32_t panel_last = bottom_row - 1;
+    int32_t panel_first = row + 3;
+    bool panel_short = panel_last - panel_first + 1 < 2;
+    if (panel_short) {
+        panel_first = row + 1;
+        if (panel_first < panel_last - 2)
+            panel_first = panel_last - 2;
+    } else if (panel_first < panel_last - 3) {
+        panel_first = panel_last - 3;
+    }
+    int32_t panel_cols = app.cols - 2 < 48 ? app.cols - 2 : 48;
+    status_area(panel_first, panel_last, app.cols, panel_cols, true);
+
 #if HAS_LIBAI
-    if (app.ai_ready && session_ai_configured()) {
+    if (app.ai_ready && session_ai_configured() && !(panel_short && status_visible())) {
         row += 2;
         render_center_text(row, "✦ ai ready", get_accent());
     }
@@ -347,14 +364,191 @@ static void render_help_activity(int32_t top, int32_t left, int32_t width, int32
     }
     #undef NOTICE_HELP_MAX
 
-    move_to(top + height - 2, left + (width - 26) / 2);
+    // Where there is a meaning page, this footer points on to it as the first page's points here.
+    const char* footer = DAWN_EMBED_LIVE ? "[<-] keys [tab] meaning [esc] close" : "[<-] shortcuts   [esc] close";
+    move_to(top + height - 2, left + (width - (int32_t)strlen(footer)) / 2);
     set_fg(get_dim());
-    platform_write_str("[<-] shortcuts   [esc] close");
+    platform_write_str(footer);
+}
+
+static int32_t hist_write_fit(const char* s, int32_t max_cols);
+static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, size_t* lens, int32_t max);
+
+//! Where MODE_HELP's meaning page drew its box and its two actions last, for render_help_hit().
+static struct {
+    bool shown;
+    int32_t top, left, width, height; //!< The box
+    int32_t toggle_row, rebuild_row; //!< The actions' rows
+} help_geo;
+
+//! What the meaning index is doing, in words, for the help page the writer went to: unlike the
+//! search box it also says when there is no embedder yet and how to get one.
+static void help_meaning_phase(const EmbedStatus* st, char* out, size_t cap)
+{
+    switch (st->phase) {
+    case EMBED_PHASE_OFF:
+        snprintf(out, cap, "%s", embed_enabled() ? "starting" : "off");
+        break;
+    case EMBED_PHASE_DISCOVERING:
+        snprintf(out, cap, "looking for an embedder");
+        break;
+    case EMBED_PHASE_NO_EMBEDDER:
+        snprintf(out, cap, "no embedder installed \xE2\x80\x94 get EmbeddingGemma in Termux Launcher's AI settings");
+        break;
+    case EMBED_PHASE_INDEXING:
+        if (st->current_title[0])
+            snprintf(out, cap, "indexing %d/%d \xC2\xB7 %s", st->notes_done, st->notes_total, st->current_title);
+        else
+            snprintf(out, cap, "indexing %d/%d", st->notes_done, st->notes_total);
+        break;
+    case EMBED_PHASE_PAUSED:
+        snprintf(out, cap, "paused (chat busy)");
+        break;
+    case EMBED_PHASE_WAITING: {
+        int64_t wait = st->retry_at_ms - DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (wait > 0)
+            snprintf(out, cap, "waiting for TAI \xC2\xB7 %llds", (long long)((wait + 999) / 1000));
+        else
+            snprintf(out, cap, "waiting for TAI");
+    } break;
+    case EMBED_PHASE_IDLE:
+        snprintf(out, cap, "index ready \xC2\xB7 %d note%s", st->notes_indexed, st->notes_indexed == 1 ? "" : "s");
+        break;
+    case EMBED_PHASE_FAILED:
+        snprintf(out, cap, "failed: %s", st->error[0] ? st->error : "unknown error");
+        break;
+    }
+}
+
+//! MODE_HELP's third page (only where DAWN_EMBED_LIVE): the meaning index's state, model and
+//! size, then its switch (m) and its rebuild (r, twice), each also a row to tap. It has its own
+//! height; short screens lose the blank rows around the actions first.
+static void render_help_meaning(int32_t width)
+{
+    EmbedStatus st;
+    embed_status(&st);
+    bool on = embed_enabled();
+
+    int32_t text_w = width - 6;
+    int32_t label_w = 7; // "status " / "model  " / "notes  "
+    int32_t value_w = text_w - label_w > 8 ? text_w - label_w : 8;
+
+    char phase[192];
+    if (on)
+        help_meaning_phase(&st, phase, sizeof(phase));
+    else
+        snprintf(phase, sizeof(phase), "off");
+    enum { PHASE_LINES = 4 };
+    size_t starts[PHASE_LINES], lens[PHASE_LINES];
+    int32_t phase_n = conflict_wrap(phase, value_w, starts, lens, PHASE_LINES);
+    if (phase_n < 1) {
+        phase_n = 1;
+        starts[0] = lens[0] = 0;
+    }
+
+    // Rows: border, blank, title, blank, status lines, model, notes, blank, toggle, gap, rebuild,
+    // blank, footer, border.
+    int32_t gap = 1, tail = 1;
+    int32_t height = 12 + phase_n + gap + tail;
+    if (height > app.rows) {
+        gap = tail = 0;
+        height = 12 + phase_n;
+    }
+
+    int32_t top, left;
+    render_popup_box(width, height, &top, &left);
+    set_bg(get_modal_bg());
+
+    int32_t col = left + 3;
+    move_to(top + 2, left + (width - 13) / 2);
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str("MEANING INDEX");
+    platform_reset_attrs();
+    set_bg(get_modal_bg());
+
+    int32_t row = top + 4;
+    for (int32_t i = 0; i < phase_n; i++) {
+        if (i == 0) {
+            move_to(row, col);
+            set_fg(get_dim());
+            platform_write_str("status");
+        }
+        move_to(row++, col + label_w);
+        set_fg(get_fg());
+        DAWN_BACKEND(app)->write_str(phase + starts[i], lens[i]);
+    }
+
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str("model");
+    move_to(row++, col + label_w);
+    set_fg(st.model[0] ? get_fg() : get_dim());
+    hist_write_fit(st.model[0] ? st.model : "none yet", value_w);
+
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str("notes");
+    move_to(row++, col + label_w);
+    set_fg(get_fg());
+    char notes[32];
+    snprintf(notes, sizeof(notes), "%d indexed", st.notes_indexed);
+    platform_write_str(notes);
+    row++;
+
+    help_geo.toggle_row = row;
+    move_to(row, col);
+    set_fg(get_accent());
+    platform_write_str("[m] ");
+    set_fg(get_fg());
+    platform_write_str(on ? "meaning search: on" : "meaning search: off");
+    row += 1 + gap;
+
+    // Off, a rebuild would wait unseen until the index is switched on again, so it is not offered.
+    help_geo.rebuild_row = row;
+    bool armed = app.help_rebuild_armed
+        && DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS;
+    move_to(row, col);
+    set_fg(on ? get_accent() : get_dim());
+    platform_write_str("[r] ");
+    set_fg(!on ? get_dim() : armed ? get_accent() : get_fg());
+    hist_write_fit(!on ? "rebuild (turn it on first)" : armed ? "press r again to rebuild" : "rebuild the index", text_w - 4);
+
+    move_to(top + height - 2, left + (width - 27) / 2);
+    set_fg(get_dim());
+    platform_write_str("[<-] activity   [esc] close");
+
+    help_geo.shown = true;
+    help_geo.top = top;
+    help_geo.left = left;
+    help_geo.width = width;
+    help_geo.height = height;
+}
+
+int32_t render_help_hit(int32_t row, int32_t col)
+{
+    if (!help_geo.shown || row < help_geo.top || row >= help_geo.top + help_geo.height
+        || col < help_geo.left || col >= help_geo.left + help_geo.width)
+        return HELP_HIT_OUTSIDE;
+    if (row == help_geo.toggle_row)
+        return HELP_HIT_TOGGLE;
+    if (row == help_geo.rebuild_row)
+        return HELP_HIT_REBUILD;
+    return HELP_HIT_BOX;
 }
 
 void render_help(void)
 {
-    int32_t width = 44;
+    // 44 columns, or the screen less a column each side when it is narrower (a phone held upright).
+    int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    help_geo.shown = false;
+    if (app.help_page == 2 && DAWN_EMBED_LIVE) {
+        render_help_meaning(width);
+        return;
+    }
+
     int32_t height = 26;
     int32_t top, left;
     render_popup_box(width, height, &top, &left);

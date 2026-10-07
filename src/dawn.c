@@ -25,6 +25,7 @@
 #include "dawn_scrollind.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
+#include "dawn_status.h"
 #include "dawn_tex.h"
 #include "dawn_theme.h"
 #include "dawn_title.h"
@@ -176,6 +177,14 @@ static inline Layout calc_layout(void)
     if (l.text_height < 1)
         l.text_height = 1;
     return l;
+}
+
+//! How wide the status panel (dawn_status) may be over the note: 40 columns, less on a phone,
+//! leaving the note's left side clear.
+static inline int32_t status_panel_cols(const Layout* L)
+{
+    int32_t cols = L->text_area_cols - 4;
+    return cols < 40 ? cols : 40;
 }
 
 //! Calculate screen row from virtual row
@@ -3073,6 +3082,7 @@ skip_chat:
     if (app.ai_focused) {
         move_to(cursor_row, cursor_col);
         cursor_visible(true);
+        status_cursor(cursor_row, cursor_col);
     }
     reset_attrs();
 }
@@ -3840,8 +3850,11 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
+    // The status panel's corner (dawn_status): the two blank rows under the text.
+    status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, cursor_screen_col);
 }
 
 //! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
@@ -4028,6 +4041,9 @@ static void render(void)
         break;
     }
 
+    // The status panel slides out over the note (not in focus mode) or the welcome screen, never
+    // over a dialog.
+    status_frame(app.mode == MODE_WELCOME || (app.mode == MODE_WRITING && !app.focus_mode));
     scrollind_frame_end();
     sync_end();
     out_flush();
@@ -5416,6 +5432,47 @@ static void handle_ai_input(int32_t key)
     }
 }
 
+//! A key on MODE_HELP's meaning page: m switches the index off or on (and remembers it in
+//! settings.json), r arms a rebuild and a second r within HELP_REBUILD_CONFIRM_MS starts it; a tap
+//! on either row does the same. A tap elsewhere in the box, and the release, drag and scroll that
+//! come with taps, do nothing (the release after a tap on a row would otherwise close help).
+//! @return false for any other key, which closes help
+static bool help_meaning_key(int32_t key)
+{
+    if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_SCROLL_UP
+        || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
+        return true;
+    if (key == DAWN_KEY_MOUSE_CLICK) {
+        int32_t hit = render_help_hit(input_last_mouse_row(), input_last_mouse_col());
+        if (hit == HELP_HIT_OUTSIDE)
+            return false;
+        if (hit == HELP_HIT_BOX)
+            return true;
+        key = hit == HELP_HIT_TOGGLE ? 'm' : 'r';
+    }
+    if (key == 'm') {
+        app.meaning_index = !app.meaning_index;
+        embed_set_enabled(app.meaning_index);
+        settings_save();
+        app.help_rebuild_armed = 0;
+        return true;
+    }
+    if (key == 'r') {
+        if (!embed_enabled())
+            return true; // the row says to turn it on first
+        int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+        if (app.help_rebuild_armed && now - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS) {
+            app.help_rebuild_armed = 0;
+            embed_rebuild();
+            notice_post(NOTICE_INFO, "rebuilding the meaning index");
+        } else {
+            app.help_rebuild_armed = now;
+        }
+        return true;
+    }
+    return false;
+}
+
 static void handle_input(void)
 {
     int32_t key = input_read_key();
@@ -6158,16 +6215,25 @@ static void handle_input(void)
         break;
     }
 
-    case MODE_HELP:
+    case MODE_HELP: {
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
-        if (key == '\t' || key == DAWN_KEY_RIGHT)
-            app.help_page = 1;
-        else if (key == DAWN_KEY_LEFT)
-            app.help_page = 0;
-        else
+        // A third, where the meaning index is compiled in, shows what it is doing and has its
+        // switch and its rebuild. Any other key closes help.
+        int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
+        if (key == '\t' || key == DAWN_KEY_RIGHT) {
+            if (app.help_page < last_page)
+                app.help_page++;
+        } else if (key == DAWN_KEY_LEFT) {
+            if (app.help_page > 0)
+                app.help_page--;
+        } else if (app.help_page != 2 || !help_meaning_key(key)) {
             MODE_POP();
+        }
+        if (app.help_page != 2)
+            app.help_rebuild_armed = 0;
         break;
+    }
 
     case MODE_TOC: {
         TocState* toc = (TocState*)app.toc_state;
@@ -6344,7 +6410,9 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
         const char* prog = getenv("TERM_PROGRAM");
         app.nerd_font = prog && strcmp(prog, "termux-launcher") == 0;
     }
+    app.meaning_index = true; // on unless settings.json says "meaning_index": false
     settings_load();
+    embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;
     }
@@ -7137,6 +7205,13 @@ static void render_writing(void)
     if (!L.ai_sheet)
         render_status_bar(&L);
 
+    // The status panel's corner (dawn_status): the two blank rows between the text and the status
+    // line, or the one between the text and a chat sheet.
+    if (L.ai_sheet)
+        status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
+    else
+        status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+
     if (app.ai_open) {
         render_ai_panel(&L);
         if (app.ai_focused) {
@@ -7159,6 +7234,7 @@ static void render_writing(void)
         voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, rs.cursor_col);
 }
 
 //! Render a single block - dispatches to type-specific renderer
