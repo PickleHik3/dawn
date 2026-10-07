@@ -25,6 +25,7 @@
 #include "dawn_scrollind.h"
 #include "dawn_search.h"
 #include "dawn_settings.h"
+#include "dawn_status.h"
 #include "dawn_tex.h"
 #include "dawn_theme.h"
 #include "dawn_title.h"
@@ -176,6 +177,14 @@ static inline Layout calc_layout(void)
     if (l.text_height < 1)
         l.text_height = 1;
     return l;
+}
+
+//! How wide the status panel (dawn_status) may be over the note: 40 columns, less on a phone,
+//! leaving the note's left side clear.
+static inline int32_t status_panel_cols(const Layout* L)
+{
+    int32_t cols = L->text_area_cols - 4;
+    return cols < 40 ? cols : 40;
 }
 
 //! Calculate screen row from virtual row
@@ -3073,6 +3082,7 @@ skip_chat:
     if (app.ai_focused) {
         move_to(cursor_row, cursor_col);
         cursor_visible(true);
+        status_cursor(cursor_row, cursor_col);
     }
     reset_attrs();
 }
@@ -3840,8 +3850,11 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
+    // The status panel's corner (dawn_status): the two blank rows under the text.
+    status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, cursor_screen_col);
 }
 
 //! Set by embed_poll(): the meaning index or a query changed, so the "by meaning" group ranks again.
@@ -4028,6 +4041,9 @@ static void render(void)
         break;
     }
 
+    // The status panel slides out over the note (not in focus mode) or the welcome screen, never
+    // over a dialog.
+    status_frame(app.mode == MODE_WELCOME || (app.mode == MODE_WRITING && !app.focus_mode));
     scrollind_frame_end();
     sync_end();
     out_flush();
@@ -7189,6 +7205,13 @@ static void render_writing(void)
     if (!L.ai_sheet)
         render_status_bar(&L);
 
+    // The status panel's corner (dawn_status): the two blank rows between the text and the status
+    // line, or the one between the text and a chat sheet.
+    if (L.ai_sheet)
+        status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
+    else
+        status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+
     if (app.ai_open) {
         render_ai_panel(&L);
         if (app.ai_focused) {
@@ -7211,6 +7234,7 @@ static void render_writing(void)
         voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
     cursor_visible(true);
+    status_cursor(cursor_screen_row, rs.cursor_col);
 }
 
 //! Render a single block - dispatches to type-specific renderer
