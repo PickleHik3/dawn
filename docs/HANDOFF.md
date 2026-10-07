@@ -43,15 +43,22 @@ Open:
    (multi-GB) through `ModelInfo.from` 6-10 times per request with no cache. The chat bridge's
    /models and /ai/runtime timeouts (`libai/ai_bridge_openai.c:378`, `:762`, 8 s) fail the same way.
    Rebuild ran at ~2 notes/min while TAI was in that state.
-2. Ship: merge `embed-gemma2` into `tl` (ask first), then bump `DAWN_COMMIT` in
+   While /v1/ai/runtime takes 9-15 s, the panel's runtime poll (`ai_bridge_openai.c:839`, 5 s)
+   never sees a load, so the loading row with its sweep cannot show.
+2. Status panel (merge 0ab533b): bars are eighth blocks and the spinner braille on every terminal;
+   in the launcher (`app.launcher_term`, also inside tmux via TERMUX_LAUNCHER_PANE) the sweep
+   glides in eighths with U+2595/U+1FB87-1FB8B on its left edge. "ai ready" is a resting panel row
+   on the welcome screen. Checked on the phone in tmux: ready row, cap and icon. Not yet seen:
+   the gliding sweep (needs a model load TAI answers in time) and how it looks outside tmux.
+3. Ship: merge `embed-gemma2` into `tl` (ask first), then bump `DAWN_COMMIT` in
    `../tlstore/recipes/cross/build-dawn.sh`; push launcher `dev` when its owner agrees.
-3. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
+4. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
    route) stops indexing until the next discovery; dawn could fall back to the next embedder.
-4. Launcher flakes, order-dependent, pass alone: `TerminalIOPreferencesDataStoreLazyModeTest`,
+5. Launcher flakes, order-dependent, pass alone: `TerminalIOPreferencesDataStoreLazyModeTest`,
    `IconPackChoicesLiveApplyTest`.
-5. Two sessions installing to the same phone overwrite each other's launcher builds; check
+6. Two sessions installing to the same phone overwrite each other's launcher builds; check
    `adb shell dumpsys package com.termux | grep lastUpdateTime` before trusting a device result.
-6. clang-format is not installed; this branch was formatted by hand.
+7. clang-format is not installed; this branch was formatted by hand.
 
 ## 2026-10-07 · storage robustness (local data store)
 
