@@ -1094,4 +1094,43 @@ void embed_topk_push(EmbedScored* top, int32_t* count, int32_t k, EmbedScored ca
         *count = n + 1;
 }
 
+int32_t embed_cut(const EmbedScored* top, int32_t count, float min_score, float near_best)
+{
+    if (!top || count <= 0)
+        return 0;
+    float bar = min_score;
+    if (near_best > 0.0f && top[0].score - near_best > bar)
+        bar = top[0].score - near_best;
+    int32_t n = 0;
+    while (n < count && top[n].score >= bar)
+        n++;
+    return n;
+}
+
+//! Score floors per embedder family, matched as a substring of the model id; the first match
+//! wins and the last row (no match) covers the rest. Measured 2026-10-07 on the phone (A065), 256
+//! dims, cosine with the launcher's task prefixes. EmbeddingGemma 2 440M sits high: a question
+//! scores 0.84-0.86 against the notes that answer it but still 0.55-0.73 against unrelated ones,
+//! and unrelated notes score 0.65 against each other, same-topic 0.74, near-duplicates 0.89.
+//! EmbeddingGemma 300M (v1) scores 0.62-0.65 for the answer and 0.11-0.37 for the rest.
+static const struct {
+    const char* match;
+    float search;
+    float related;
+} embed_floor_table[] = {
+    { "embeddinggemma-2", 0.70f, 0.80f },
+    { NULL, 0.35f, 0.60f }, // EmbeddingGemma v1, Qwen3 and anything else
+};
+
+void embed_floors(const char* model_id, float* search, float* related)
+{
+    size_t i = 0;
+    while (embed_floor_table[i].match && !(model_id && strstr(model_id, embed_floor_table[i].match)))
+        i++;
+    if (search)
+        *search = embed_floor_table[i].search;
+    if (related)
+        *related = embed_floor_table[i].related;
+}
+
 // #endregion

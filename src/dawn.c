@@ -3011,7 +3011,7 @@ skip_chat:
     EmbedHit rel[1];
     also_in.row = 0;
     if (!app.focus_mode && msg_area_end > msg_area_start && embed_ready() && app.session_path
-        && embed_related(app.session_path, EMBED_RELATED_MIN_SCORE, rel, 1) == 1) {
+        && embed_related(app.session_path, embed_related_floor(), rel, 1) == 1) {
         char line[EMBED_TITLE_MAX + 24];
         snprintf(line, sizeof(line), "%salso in: %s", app.nerd_font ? "\xf3\xb0\x8f\x8c  " : "-> ", rel[0].note_title);
         int32_t fit = chat_wrap_line(line, strlen(line), 0, content_width);
@@ -3931,7 +3931,7 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
         return;
     embed_news = false;
     snprintf(s->meaning_query, sizeof(s->meaning_query), "%s", s->query);
-    EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE };
+    EmbedSearchOpts opts = { .only_path = app.session_path, .min_score = embed_search_floor(), .near_best = EMBED_NEAR_BEST };
     int32_t n = 0;
     if (embed_search(s->query, (size_t)s->query_len, &opts, s->meaning, SEARCH_MEANING_HERE, &n) != EMBED_READY)
         n = 0;
@@ -3957,7 +3957,7 @@ static void refresh_meaning(SearchState* s, bool exact_changed)
     // Other notes, one row each: the piece is read back from its file to check it is still there.
     EmbedHit other[SEARCH_MEANING_ELSEWHERE];
     EmbedSearchOpts elsewhere = {
-        .only_path = NULL, .exclude_path = app.session_path, .min_score = EMBED_SEARCH_MIN_SCORE, .one_per_note = true
+        .only_path = NULL, .exclude_path = app.session_path, .min_score = embed_search_floor(), .near_best = EMBED_NEAR_BEST, .one_per_note = true
     };
     if (embed_search(s->query, (size_t)s->query_len, &elsewhere, other, SEARCH_MEANING_ELSEWHERE, &n) != EMBED_READY)
         n = 0;
