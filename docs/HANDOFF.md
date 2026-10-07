@@ -38,18 +38,16 @@ Second device pass, done (launcher `dev` c8e453df4 = adec12b8f + the Android 16 
   title no longer prints the name twice.
 
 Open:
-1. TAI is slow: /v1/models ~12-16 s and, under memory pressure, /v1/ai/runtime ~15 s. Launcher
-   side, unconfirmed by profiling: `TaiModelSpec.java:517` re-parses each Gemma `.litertlm`
-   (multi-GB) through `ModelInfo.from` 6-10 times per request with no cache. The chat bridge's
-   /models and /ai/runtime timeouts (`libai/ai_bridge_openai.c:378`, `:762`, 8 s) fail the same way.
-   Rebuild ran at ~2 notes/min while TAI was in that state.
-   While /v1/ai/runtime takes 9-15 s, the panel's runtime poll (`ai_bridge_openai.c:839`, 5 s)
-   never sees a load, so the loading row with its sweep cannot show.
+1. TAI's slow listing is fixed in the launcher (`a565a728d` on dev: the speculative-decoding probe
+   is cached per model file). On the A065 /v1/models went 12-16 s -> 1.1 s, /v1/ai/runtime
+   9-15 s -> 0.3 s, and the panel's loading row now shows a gliding sweep during a real load.
+   Dawn's chat bridge still uses 8 s / 5 s timeouts (`libai/ai_bridge_openai.c:378`, `:839`).
 2. Status panel (merge 0ab533b): bars are eighth blocks and the spinner braille on every terminal;
    in the launcher (`app.launcher_term`, also inside tmux via TERMUX_LAUNCHER_PANE) the sweep
    glides in eighths with U+2595/U+1FB87-1FB8B on its left edge. "ai ready" is a resting panel row
-   on the welcome screen. Checked on the phone in tmux: ready row, cap and icon. Not yet seen:
-   the gliding sweep (needs a model load TAI answers in time) and how it looks outside tmux.
+   on the welcome screen. Checked on the phone in tmux: ready row, cap, icon, the sweep during a
+   load (`🮊██▎`), and the launcher's own rendering in a screenshot. Popup masks are no longer
+   sent inside tmux (`e78affc`), where they became the window title.
 3. Ship: merge `embed-gemma2` into `tl` (ask first), then bump `DAWN_COMMIT` in
    `../tlstore/recipes/cross/build-dawn.sh`; push launcher `dev` when its owner agrees.
 4. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
