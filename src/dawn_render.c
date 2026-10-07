@@ -1100,7 +1100,8 @@ int32_t render_search_hit(int32_t row, int32_t col)
     return m >= 0 && m < search->meaning_count ? search->count + m : -1;
 }
 
-//! What the meaning index is doing, in a few words for the search box ("" on builds without it).
+//! What the meaning index is doing, in a few words for the search box; "" while it is off, before
+//! an embedder exists and on builds without it.
 static void search_meaning_status(char* out, size_t cap)
 {
     out[0] = '\0';
@@ -1110,14 +1111,9 @@ static void search_meaning_status(char* out, size_t cap)
     embed_status(&st);
     switch (st.phase) {
     case EMBED_PHASE_OFF:
-        snprintf(out, cap, "meaning off");
-        break;
     case EMBED_PHASE_DISCOVERING:
-        snprintf(out, cap, "looking for an embedder");
-        break;
     case EMBED_PHASE_NO_EMBEDDER:
-        snprintf(out, cap, "no embedder installed");
-        break;
+        break; // until a model exists (or while switched off) the box says nothing about meaning
     case EMBED_PHASE_INDEXING:
         snprintf(out, cap, "indexing %d/%d", st.notes_done, st.notes_total);
         break;
