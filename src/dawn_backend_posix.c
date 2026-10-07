@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -73,6 +74,7 @@ static struct {
     int32_t last_mouse_row;
     volatile sig_atomic_t resize_needed;
     volatile sig_atomic_t quit_requested;
+    volatile sig_atomic_t hangup; //!< The terminal went away (SIGHUP or POLLHUP): quit, save, don't wait on it
     bool kitty_keyboard_enabled;
     DawnMode mode; //!< Interactive or print mode
     int32_t tty_fd; //!< File descriptor for terminal queries in print mode (-1 if not used)
@@ -292,6 +294,18 @@ static void handle_sigwinch(int32_t sig)
 static void handle_sigterm(int32_t sig)
 {
     (void)sig;
+    posix_state.quit_requested = 1;
+}
+
+//! Closing a Termux session (or an ssh link, a terminal window) hangs up the tty and sends SIGHUP.
+//! It asks for the same clean quit as SIGTERM, so the main loop ends and dawn_engine_shutdown
+//! saves the note, instead of the default action killing dawn with up to 5 s of typing unsaved.
+//! After a hangup every read of the tty returns at once and every write fails with EIO, so
+//! nothing on the way out can block on it (see posix_input_available and posix_shutdown).
+static void handle_sighup(int32_t sig)
+{
+    (void)sig;
+    posix_state.hangup = 1;
     posix_state.quit_requested = 1;
 }
 
@@ -634,10 +648,15 @@ static bool posix_init(DawnMode mode)
     }
 
     // Interactive mode: full terminal setup
-    // Install signal handlers
+    // Install signal handlers. These replace posix_install_shutdown_handlers' kill-on-signal ones:
+    // in interactive mode every way out goes through the main loop so the note is saved.
+    // SIGPIPE is ignored so a write to a closed pipe (xclip, a terminal that vanished) is an EPIPE
+    // error rather than a death before that save.
     signal(SIGWINCH, handle_sigwinch);
     signal(SIGINT, handle_sigterm);
     signal(SIGTERM, handle_sigterm);
+    signal(SIGHUP, handle_sighup);
+    signal(SIGPIPE, SIG_IGN);
 
     // Enable raw mode
     if (tcgetattr(STDIN_FILENO, &posix_state.orig_termios) == -1) {
@@ -731,8 +750,10 @@ static void posix_shutdown(void)
     printf(SYNC_START CURSOR_SHOW MOUSE_OFF DICTATION_MARKS_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
     fflush(stdout);
 
+    // After a hangup there is no output left to drain, so the restore doesn't wait for it
+    // (TCSANOW); on a hung-up tty both calls just fail with EIO.
     if (posix_state.raw_mode) {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &posix_state.orig_termios);
+        tcsetattr(STDIN_FILENO, posix_state.hangup ? TCSANOW : TCSAFLUSH, &posix_state.orig_termios);
         posix_state.raw_mode = false;
     }
 
@@ -1711,8 +1732,31 @@ static bool posix_check_quit(void)
     return posix_state.quit_requested;
 }
 
+//! Wait for input. On Linux and Android this also notices a terminal that hung up (POLLHUP)
+//! without a SIGHUP reaching dawn (started under nohup, or not in the tty's foreground group):
+//! that requests the same clean quit as handle_sighup, so dawn saves and exits instead of looping
+//! forever on a tty that reads as always ready and empty.
 static bool posix_input_available(float timeout_ms)
 {
+#if defined(__linux__)
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+    struct timespec ts;
+    struct timespec* tsp = NULL;
+    if (timeout_ms >= 0) {
+        long total_us = (long)(timeout_ms * 1000.0f);
+        ts.tv_sec = total_us / 1000000;
+        ts.tv_nsec = (total_us % 1000000) * 1000;
+        tsp = &ts;
+    }
+    if (ppoll(&pfd, 1, tsp, NULL) <= 0)
+        return false;
+    if (posix_state.mode == DAWN_MODE_INTERACTIVE && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+        posix_state.hangup = 1;
+        posix_state.quit_requested = 1;
+        return false;
+    }
+    return (pfd.revents & POLLIN) != 0;
+#else
     struct timeval tv;
     fd_set fds;
     FD_ZERO(&fds);
@@ -1728,6 +1772,7 @@ static bool posix_input_available(float timeout_ms)
         tv.tv_usec = total_us % 1000000;
         return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
     }
+#endif
 }
 
 static void (*user_resize_callback)(int32_t) = NULL;
@@ -1757,6 +1802,7 @@ static void posix_register_signals(void (*on_resize)(int32_t), void (*on_quit)(i
     signal(SIGWINCH, posix_sigwinch_handler);
     signal(SIGINT, posix_sigquit_handler);
     signal(SIGTERM, posix_sigquit_handler);
+    signal(SIGHUP, posix_sigquit_handler);
 }
 
 #ifdef __APPLE__
