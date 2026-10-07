@@ -7,6 +7,7 @@
 #endif
 
 #include "dawn_backend.h"
+#include "dawn_fsio.h"
 #include "dawn_wrap.h"
 #include "dawn_utils.h"
 
@@ -15,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -72,6 +74,7 @@ static struct {
     int32_t last_mouse_row;
     volatile sig_atomic_t resize_needed;
     volatile sig_atomic_t quit_requested;
+    volatile sig_atomic_t hangup; //!< The terminal went away (SIGHUP or POLLHUP): quit, save, don't wait on it
     bool kitty_keyboard_enabled;
     DawnMode mode; //!< Interactive or print mode
     int32_t tty_fd; //!< File descriptor for terminal queries in print mode (-1 if not used)
@@ -291,6 +294,18 @@ static void handle_sigwinch(int32_t sig)
 static void handle_sigterm(int32_t sig)
 {
     (void)sig;
+    posix_state.quit_requested = 1;
+}
+
+//! Closing a Termux session (or an ssh link, a terminal window) hangs up the tty and sends SIGHUP.
+//! It asks for the same clean quit as SIGTERM, so the main loop ends and dawn_engine_shutdown
+//! saves the note, instead of the default action killing dawn with up to 5 s of typing unsaved.
+//! After a hangup every read of the tty returns at once and every write fails with EIO, so
+//! nothing on the way out can block on it (see posix_input_available and posix_shutdown).
+static void handle_sighup(int32_t sig)
+{
+    (void)sig;
+    posix_state.hangup = 1;
     posix_state.quit_requested = 1;
 }
 
@@ -633,10 +648,15 @@ static bool posix_init(DawnMode mode)
     }
 
     // Interactive mode: full terminal setup
-    // Install signal handlers
+    // Install signal handlers. These replace posix_install_shutdown_handlers' kill-on-signal ones:
+    // in interactive mode every way out goes through the main loop so the note is saved.
+    // SIGPIPE is ignored so a write to a closed pipe (xclip, a terminal that vanished) is an EPIPE
+    // error rather than a death before that save.
     signal(SIGWINCH, handle_sigwinch);
     signal(SIGINT, handle_sigterm);
     signal(SIGTERM, handle_sigterm);
+    signal(SIGHUP, handle_sighup);
+    signal(SIGPIPE, SIG_IGN);
 
     // Enable raw mode
     if (tcgetattr(STDIN_FILENO, &posix_state.orig_termios) == -1) {
@@ -730,8 +750,10 @@ static void posix_shutdown(void)
     printf(SYNC_START CURSOR_SHOW MOUSE_OFF DICTATION_MARKS_OFF BRACKETED_PASTE_OFF THEME_MODE_OFF ALT_SCREEN_OFF RESET SYNC_END);
     fflush(stdout);
 
+    // After a hangup there is no output left to drain, so the restore doesn't wait for it
+    // (TCSANOW); on a hung-up tty both calls just fail with EIO.
     if (posix_state.raw_mode) {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &posix_state.orig_termios);
+        tcsetattr(STDIN_FILENO, posix_state.hangup ? TCSANOW : TCSAFLUSH, &posix_state.orig_termios);
         posix_state.raw_mode = false;
     }
 
@@ -1710,8 +1732,31 @@ static bool posix_check_quit(void)
     return posix_state.quit_requested;
 }
 
+//! Wait for input. On Linux and Android this also notices a terminal that hung up (POLLHUP)
+//! without a SIGHUP reaching dawn (started under nohup, or not in the tty's foreground group):
+//! that requests the same clean quit as handle_sighup, so dawn saves and exits instead of looping
+//! forever on a tty that reads as always ready and empty.
 static bool posix_input_available(float timeout_ms)
 {
+#if defined(__linux__)
+    struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN, .revents = 0 };
+    struct timespec ts;
+    struct timespec* tsp = NULL;
+    if (timeout_ms >= 0) {
+        long total_us = (long)(timeout_ms * 1000.0f);
+        ts.tv_sec = total_us / 1000000;
+        ts.tv_nsec = (total_us % 1000000) * 1000;
+        tsp = &ts;
+    }
+    if (ppoll(&pfd, 1, tsp, NULL) <= 0)
+        return false;
+    if (posix_state.mode == DAWN_MODE_INTERACTIVE && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+        posix_state.hangup = 1;
+        posix_state.quit_requested = 1;
+        return false;
+    }
+    return (pfd.revents & POLLIN) != 0;
+#else
     struct timeval tv;
     fd_set fds;
     FD_ZERO(&fds);
@@ -1727,6 +1772,7 @@ static bool posix_input_available(float timeout_ms)
         tv.tv_usec = total_us % 1000000;
         return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
     }
+#endif
 }
 
 static void (*user_resize_callback)(int32_t) = NULL;
@@ -1756,6 +1802,7 @@ static void posix_register_signals(void (*on_resize)(int32_t), void (*on_quit)(i
     signal(SIGWINCH, posix_sigwinch_handler);
     signal(SIGINT, posix_sigquit_handler);
     signal(SIGTERM, posix_sigquit_handler);
+    signal(SIGHUP, posix_sigquit_handler);
 }
 
 #ifdef __APPLE__
@@ -2007,22 +2054,10 @@ static const char* posix_get_home_dir(void)
     return pw ? pw->pw_dir : NULL;
 }
 
+//! Every directory dawn creates (notes, config, cache, versions) is private to the user.
 static bool posix_mkdir_p(const char* path)
 {
-    char tmp[512];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-                return false;
-            }
-            *p = '/';
-        }
-    }
-    return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+    return fsio_mkdir_p(path, 0700);
 }
 
 static bool posix_file_exists(const char* path)
@@ -2031,70 +2066,20 @@ static bool posix_file_exists(const char* path)
     return stat(path, &st) == 0;
 }
 
+#define POSIX_READ_MAX ((size_t)100 * 1024 * 1024) //!< Largest file read whole (100 MB)
+
+//! The whole file or NULL; errno tells a missing file (ENOENT) from one that could not be read.
 static char* posix_read_file(const char* path, size_t* out_len)
 {
-    *out_len = 0;
-    FILE* f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    if (size < 0 || size > 100 * 1024 * 1024) { // 100MB limit
-        fclose(f);
-        return NULL;
-    }
-
-    char* data = malloc((size_t)size + 1);
-    if (!data) {
-        fclose(f);
-        return NULL;
-    }
-
-    size_t read_size = fread(data, 1, (size_t)size, f);
-    fclose(f);
-
-    data[read_size] = '\0';
-    *out_len = read_size;
-    return data;
+    return fsio_read_all(path, out_len, POSIX_READ_MAX);
 }
 
-//! Write the whole file or none of it: the data goes to <path>.tmp beside it, reaches the disk,
-//! and then takes the old file's place in one rename. A failure anywhere leaves the old file as
-//! it was and removes the temporary one.
+//! Write the whole file or none of it (dawn_fsio.c): a unique temp file beside the target, fsync,
+//! one rename, then the directory is synced. A symlinked note stays a symlink. A failure leaves
+//! the old file as it was and no temp file behind.
 static bool posix_write_file(const char* path, const char* data, size_t len)
 {
-    char tmp[PATH_MAX];
-    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
-        return false;
-
-    // A file that exists keeps its permissions through the rename.
-    struct stat st;
-    bool existed = stat(path, &st) == 0;
-
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0)
-        return false;
-    if (existed)
-        fchmod(fd, st.st_mode & 07777);
-
-    FILE* f = fdopen(fd, "wb");
-    if (!f) {
-        close(fd);
-        unlink(tmp);
-        return false;
-    }
-
-    bool ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fd) == 0;
-    if (fclose(f) != 0)
-        ok = false;
-    if (ok && rename(tmp, path) != 0)
-        ok = false;
-    if (!ok)
-        unlink(tmp);
-    return ok;
+    return fsio_write_atomic(path, data, len);
 }
 
 static bool posix_list_dir(const char* path, char*** out_names, int32_t* out_count)
@@ -2109,17 +2094,28 @@ static bool posix_list_dir(const char* path, char*** out_names, int32_t* out_cou
     int32_t cap = 64;
     char** names = malloc(sizeof(char*) * (size_t)cap);
     int32_t count = 0;
+    if (!names) {
+        closedir(d);
+        return false;
+    }
 
+    // Out of memory part way: the names gathered so far are still a usable listing.
     struct dirent* e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.')
             continue;
 
         if (count >= cap) {
+            char** grown = realloc(names, sizeof(char*) * (size_t)cap * 2);
+            if (!grown)
+                break;
+            names = grown;
             cap *= 2;
-            names = realloc(names, sizeof(char*) * (size_t)cap);
         }
-        names[count++] = dawn_strdup(e->d_name);
+        char* name = dawn_strdup(e->d_name);
+        if (!name)
+            break;
+        names[count++] = name;
     }
     closedir(d);
 
@@ -2141,19 +2137,49 @@ static bool posix_delete_file(const char* path)
     return unlink(path) == 0;
 }
 
+//! path in single quotes for the shell, each ' inside written as '\''. False if it does not fit.
+static bool shell_quote(const char* path, char* out, size_t out_size)
+{
+    size_t n = 0;
+    if (out_size < 3)
+        return false;
+    out[n++] = '\'';
+    for (const char* p = path; *p; p++) {
+        if (*p == '\'') {
+            if (n + 4 >= out_size)
+                return false;
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else {
+            if (n + 1 >= out_size)
+                return false;
+            out[n++] = *p;
+        }
+    }
+    if (n + 2 > out_size)
+        return false;
+    out[n++] = '\'';
+    out[n] = '\0';
+    return true;
+}
+
+//! The path goes through shell_quote, so a ' in a file name cannot end the quoting and run the
+//! rest as a command; a path that does not fit the command line is not opened at all, never cut.
 static void posix_reveal_in_finder(const char* path)
 {
+    char quoted[PATH_MAX * 4 + 3];
+    char cmd[sizeof(quoted) + 32];
+    if (!path || !shell_quote(path, quoted, sizeof(quoted)))
+        return;
 #ifdef __APPLE__
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "open -R '%s' 2>/dev/null", path);
-    int32_t r = system(cmd);
-    (void)r;
+    int32_t n = snprintf(cmd, sizeof(cmd), "open -R %s 2>/dev/null", quoted);
 #else
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "xdg-open '%s' 2>/dev/null &", path);
+    int32_t n = snprintf(cmd, sizeof(cmd), "xdg-open %s 2>/dev/null &", quoted);
+#endif
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+        return;
     int32_t r = system(cmd);
     (void)r;
-#endif
 }
 
 static int64_t posix_clock(DawnClock kind)
@@ -2261,10 +2287,10 @@ static TransmittedImage* find_transmitted(const char* path)
 static uint32_t transmit_to_terminal(const char* path)
 {
     // Resolve to absolute path for file-based transmission
+    // (the file can vanish between resolving and drawing, e.g. a damaged cache PNG just removed)
     char abs_path[PATH_MAX];
-    char* resolved = realpath(path, abs_path);
-    (void)resolved;
-    assert(resolved && "realpath failed for image path");
+    if (!realpath(path, abs_path))
+        return 0;
 
     // Base64 encode the file path for transmission
     size_t path_len = strlen(abs_path);
@@ -2518,6 +2544,66 @@ static bool is_download_in_progress(const char* url)
     return false;
 }
 
+// #region Image cache files
+// Every cached PNG reaches its final name in one rename (fsio_write_atomic), so a crash, a full
+// disk or a second dawn converting the same image never leaves a half-written file under a cache
+// name. A cache hit is still checked with stbi_info, and a file that fails it is removed and made
+// again.
+
+//! stbi_write_png_to_func's sink: the whole PNG gathered in memory.
+typedef struct {
+    uint8_t* data;
+    size_t len;
+    size_t cap;
+    bool failed;
+} PngSink;
+
+static void png_sink_write(void* context, void* data, int size)
+{
+    PngSink* sink = context;
+    if (sink->failed || size <= 0)
+        return;
+    size_t need = sink->len + (size_t)size;
+    if (need > sink->cap) {
+        size_t cap = sink->cap ? sink->cap : 65536;
+        while (cap < need)
+            cap *= 2;
+        uint8_t* grown = realloc(sink->data, cap);
+        if (!grown) {
+            sink->failed = true;
+            return;
+        }
+        sink->data = grown;
+        sink->cap = cap;
+    }
+    memcpy(sink->data + sink->len, data, (size_t)size);
+    sink->len = need;
+}
+
+//! RGBA pixels encoded as PNG and put at path atomically.
+static bool write_png_atomic(const char* path, int32_t w, int32_t h, const uint8_t* rgba)
+{
+    PngSink sink = { 0 };
+    bool ok = stbi_write_png_to_func(png_sink_write, &sink, w, h, 4, rgba, w * 4) != 0 && !sink.failed
+        && fsio_write_atomic(path, sink.data, sink.len);
+    free(sink.data);
+    return ok;
+}
+
+//! A cached PNG that exists and whose header decodes. A damaged one is removed so it is redone.
+static bool cached_png_ok(const char* path)
+{
+    if (!posix_file_exists(path))
+        return false;
+    int32_t w, h, channels;
+    if (stbi_info(path, &w, &h, &channels))
+        return true;
+    unlink(path);
+    return false;
+}
+
+// #endregion
+
 static bool convert_downloaded_to_png(const char* temp_path, const char* final_path, const char* url)
 {
     if (svg_is_svg_file(url)) {
@@ -2533,7 +2619,7 @@ static bool convert_downloaded_to_png(const char* temp_path, const char* final_p
         if (!ok)
             return false;
 
-        ok = stbi_write_png(final_path, w, h, 4, pixels, w * 4) != 0;
+        ok = write_png_atomic(final_path, w, h, pixels);
         free(pixels);
         return ok;
     }
@@ -2543,7 +2629,7 @@ static bool convert_downloaded_to_png(const char* temp_path, const char* final_p
     if (!pixels)
         return false;
 
-    bool ok = stbi_write_png(final_path, w, h, 4, pixels, w * 4) != 0;
+    bool ok = write_png_atomic(final_path, w, h, pixels);
     stbi_image_free(pixels);
     return ok;
 }
@@ -2599,7 +2685,9 @@ static void poll_downloads(void)
     }
 }
 
-static bool start_async_download(const char* url, const char* temp_path, const char* final_path)
+//! The download lands in its own temp file beside final_path (fsio_create_temp: a unique name,
+//! so two dawns fetching the same URL never write into one file) and is converted on completion.
+static bool start_async_download(const char* url, const char* final_path)
 {
     if (download_count >= MAX_DOWNLOADS)
         return false;
@@ -2610,13 +2698,21 @@ static bool start_async_download(const char* url, const char* temp_path, const c
             return false;
     }
 
-    FILE* fp = fopen(temp_path, "wb");
-    if (!fp)
+    char temp_path[PATH_MAX];
+    int fd = fsio_create_temp(final_path, temp_path, sizeof(temp_path));
+    if (fd < 0)
         return false;
+    FILE* fp = fdopen(fd, "wb");
+    if (!fp) {
+        close(fd);
+        unlink(temp_path);
+        return false;
+    }
 
     CURL* easy = curl_easy_init();
     if (!easy) {
         fclose(fp);
+        unlink(temp_path);
         return false;
     }
 
@@ -2646,15 +2742,27 @@ static bool start_async_download(const char* url, const char* temp_path, const c
 static bool posix_image_cache_dir(char* out, size_t out_size)
 {
     const char* xdg_cache = getenv("XDG_CACHE_HOME");
+    int32_t n;
     if (xdg_cache && xdg_cache[0] == '/') {
-        snprintf(out, out_size, "%s/dawn/image-cache", xdg_cache);
+        n = snprintf(out, out_size, "%s/dawn/image-cache", xdg_cache);
     } else {
         const char* home = posix_get_home_dir();
         if (!home)
             return false;
-        snprintf(out, out_size, "%s/.cache/dawn/image-cache", home);
+        n = snprintf(out, out_size, "%s/.cache/dawn/image-cache", home);
     }
+    if (n < 0 || (size_t)n >= out_size)
+        return false;
     return posix_mkdir_p(out);
+}
+
+//! The cached PNG path for a cache key in out; false when it does not fit (never cut short).
+static bool cache_png_path(const char* cache_dir, const char* key, char* out, size_t out_size)
+{
+    char hash_hex[17];
+    term_hash_to_hex(key, hash_hex);
+    int32_t n = snprintf(out, out_size, "%s/%.16s.png", cache_dir, hash_hex);
+    return n >= 0 && (size_t)n < out_size;
 }
 
 static bool download_url_to_cache(const char* url, char* cached_path, size_t path_size)
@@ -2665,32 +2773,20 @@ static bool download_url_to_cache(const char* url, char* cached_path, size_t pat
     if (is_failed_url(url))
         return false;
 
-    char cache_dir[512];
+    char cache_dir[PATH_MAX];
     if (!posix_image_cache_dir(cache_dir, sizeof(cache_dir)))
         return false;
 
-    char hash_hex[17];
-    term_hash_to_hex(url, hash_hex);
+    if (!cache_png_path(cache_dir, url, cached_path, path_size))
+        return false;
 
-    snprintf(cached_path, path_size, "%s/%.16s.png", cache_dir, hash_hex);
+    if (cached_png_ok(cached_path))
+        return true;
 
-    // Already cached?
-    if (posix_file_exists(cached_path)) {
-        int32_t w, h, channels;
-        if (stbi_info(cached_path, &w, &h, &channels))
-            return true;
-        unlink(cached_path);
-    }
-
-    // Already downloading?
     if (is_download_in_progress(url))
         return false;
 
-    // Start async download
-    char temp_path[1024];
-    snprintf(temp_path, sizeof(temp_path), "%s/%.16s.tmp", cache_dir, hash_hex);
-    start_async_download(url, temp_path, cached_path);
-
+    start_async_download(url, cached_path);
     return false;
 }
 
@@ -2714,38 +2810,39 @@ static bool ensure_png_cached(const char* src_path, char* out, size_t out_size)
 {
     assert(src_path && out && out_size > 0);
 
-    // If already PNG, just return the original path
+    // If already PNG, just return the original path (if it fits; a cut path names another file)
     if (is_png_file(src_path)) {
-        strncpy(out, src_path, out_size - 1);
-        out[out_size - 1] = '\0';
+        size_t n = strlen(src_path);
+        if (n >= out_size)
+            return false;
+        memcpy(out, src_path, n + 1);
         return true;
     }
 
     // Need to convert - get cache directory
-    char cache_dir[512];
+    char cache_dir[PATH_MAX];
     if (!posix_image_cache_dir(cache_dir, sizeof(cache_dir)))
         return false;
 
-    // Use absolute path + mtime as cache key
+    // Use absolute path + mtime as cache key. realpath can fail (the file went away, a directory
+    // lost its search permission); that is no image, not a crash.
     char abs_path[PATH_MAX];
-    char* resolved = realpath(src_path, abs_path);
-    (void)resolved;
-    assert(resolved && "realpath failed for image path");
+    if (!realpath(src_path, abs_path))
+        return false;
 
     int64_t mtime = posix_get_mtime(abs_path);
 
     char key[CACHE_KEY_SIZE];
-    snprintf(key, sizeof(key), "%s:%lld", abs_path, (long long)mtime);
+    int32_t kn = snprintf(key, sizeof(key), "%s:%lld", abs_path, (long long)mtime);
+    if (kn < 0 || (size_t)kn >= sizeof(key))
+        return false;
 
-    char hash_hex[17];
-    term_hash_to_hex(key, hash_hex);
+    if (!cache_png_path(cache_dir, key, out, out_size))
+        return false;
 
-    snprintf(out, out_size, "%s/%.16s.png", cache_dir, hash_hex);
-
-    // Check if cached PNG already exists
-    if (posix_file_exists(out)) {
+    // A cached PNG that decodes is used; a damaged one was just removed and is made again below.
+    if (cached_png_ok(out))
         return true;
-    }
 
     // Handle SVG files via dawn_svg
     if (svg_is_svg_file(abs_path)) {
@@ -2761,7 +2858,7 @@ static bool ensure_png_cached(const char* src_path, char* out, size_t out_size)
         if (!ok)
             return false;
 
-        ok = stbi_write_png(out, w, h, 4, pixels, w * 4) != 0;
+        ok = write_png_atomic(out, w, h, pixels);
         free(pixels);
         return ok;
     }
@@ -2773,10 +2870,10 @@ static bool ensure_png_cached(const char* src_path, char* out, size_t out_size)
         return false;
     }
 
-    int32_t write_ok = stbi_write_png(out, w, h, 4, pixels, w * 4);
+    bool write_ok = write_png_atomic(out, w, h, pixels);
     stbi_image_free(pixels);
 
-    return write_ok != 0;
+    return write_ok;
 }
 
 static bool posix_image_resolve_path(const char* raw_path, const char* base_dir,
@@ -2803,18 +2900,18 @@ static bool posix_image_resolve_path(const char* raw_path, const char* base_dir,
     if (raw_path[0] == '~') {
         const char* home = posix_get_home_dir();
         if (home) {
-            snprintf(resolved, sizeof(resolved), "%s%s", home, raw_path + 1);
-            if (posix_file_exists(resolved)) {
+            int32_t n = snprintf(resolved, sizeof(resolved), "%s%s", home, raw_path + 1);
+            if (n >= 0 && (size_t)n < sizeof(resolved) && posix_file_exists(resolved)) {
                 return ensure_png_cached(resolved, out, out_size);
             }
         }
         return false;
     }
 
-    // Relative path - try base_dir
+    // Relative path - try base_dir (a joined path that does not fit is skipped, never cut)
     if (base_dir && base_dir[0]) {
-        snprintf(resolved, sizeof(resolved), "%s/%s", base_dir, raw_path);
-        if (posix_file_exists(resolved)) {
+        int32_t n = snprintf(resolved, sizeof(resolved), "%s/%s", base_dir, raw_path);
+        if (n >= 0 && (size_t)n < sizeof(resolved) && posix_file_exists(resolved)) {
             return ensure_png_cached(resolved, out, out_size);
         }
     }
