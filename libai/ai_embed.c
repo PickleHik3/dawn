@@ -190,6 +190,8 @@ static ai_embed_status_t http_call(const char* path, const char* body, long time
         return AI_EMBED_OK;
     if (status == 404 || status == 501)
         return AI_EMBED_NONE;
+    if (status == 401 || status == 403)
+        return AI_EMBED_REFUSED;
     if (status == 429 || status == 503) {
         if (retry_after_ms)
             *retry_after_ms = (retry_after_s ? retry_after_s : (status == 429 ? 10 : 20)) * 1000;
@@ -554,6 +556,14 @@ static bool parse_vectors(const char* body, const ai_embed_request_t* req, ai_em
 //! Set once the server refuses base64; from then on vectors come as float arrays.
 static atomic_bool g_float_only;
 
+//! A 400 code that names the model's setup rather than the request: asking again with other text
+//! will not help until the endpoint changes.
+static bool is_setup_error(const char* code)
+{
+    return strcmp(code, "embedding_tokenizer_missing") == 0 || strcmp(code, "invalid_dimensions") == 0
+        || strcmp(code, "capability_not_supported") == 0;
+}
+
 ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_result_t* out,
     int32_t* retry_after_ms, const atomic_bool* cancel)
 {
@@ -587,6 +597,14 @@ ai_embed_status_t ai_embed_vectors(const ai_embed_request_t* req, ai_embed_resul
         if (st == AI_EMBED_OK && !parse_vectors(resp.data, req, out)) {
             ai_embed_result_free(out);
             st = AI_EMBED_ERROR;
+        } else if (st != AI_EMBED_OK && st != AI_EMBED_CANCELLED) {
+            cJSON* root = resp.data ? cJSON_Parse(resp.data) : NULL;
+            snprintf(out->error, sizeof(out->error), "%s", error_code(root));
+            cJSON_Delete(root);
+            if (st == AI_EMBED_REJECTED && is_setup_error(out->error))
+                st = AI_EMBED_REFUSED;
+            if (st == AI_EMBED_REFUSED && !out->error[0])
+                snprintf(out->error, sizeof(out->error), "%s", "unauthorized");
         }
         resp_free(&resp);
         return st;

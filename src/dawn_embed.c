@@ -108,6 +108,7 @@ static struct {
     int32_t note_cap;
     uint64_t generation; //!< Bumped on every store change
     bool have_embedder;
+    char error[AI_EMBED_ERROR_MAX]; //!< Why indexing stopped for good (an error code), "" when it runs
     ai_embedder_t embedder;
     int32_t dims; //!< Vector length in use: embedder.dims, or learned from the first reply
     uint64_t epoch; //!< Bumped whenever the embedder's id, revision or dims change
@@ -424,6 +425,17 @@ static void adopt_dims(int32_t dims)
     atomic_store(&g.news, true);
 }
 
+//! Record (code) or clear (NULL) the permanent failure that stops indexing.
+static void set_failure(const char* code)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = strcmp(g.error, code ? code : "") != 0;
+    snprintf(g.error, sizeof(g.error), "%s", code ? code : "");
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
+}
+
 static void clear_embedder(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -571,13 +583,16 @@ static void scan_build(ScanList* out, const ai_embedder_t* emb, int32_t dims)
 
 // #region Indexing one note
 
-typedef enum { JOB_DONE, JOB_FAILED, JOB_NO_EMBEDDER, JOB_CANCELLED } JobResult;
+//! How indexing one note ended. JOB_FAILED is the note's own problem (it waits for the next scan);
+//! JOB_NO_EMBEDDER and JOB_REFUSED are the embedder's (the note goes back in line).
+typedef enum { JOB_DONE, JOB_FAILED, JOB_NO_EMBEDDER, JOB_REFUSED, JOB_CANCELLED } JobResult;
 
 //! What the worker carries from note to note.
 typedef struct {
     ai_embedder_t emb;
     int32_t dims; //!< 0 until the first reply when the model lists no Matryoshka sizes
     int32_t reply_dims; //!< The length of a reply that did not match dims, 0 for none
+    char error[AI_EMBED_ERROR_MAX]; //!< The code of the last AI_EMBED_REFUSED
     float token_scale; //!< The model's tokens over the estimate
     bool calibrated; //!< /v1/tokenize was tried for this embedder
     int64_t last_request_ms;
@@ -674,6 +689,9 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
             return JOB_NO_EMBEDDER;
         case AI_EMBED_REJECTED:
             return JOB_FAILED;
+        case AI_EMBED_REFUSED:
+            snprintf(w->error, sizeof(w->error), "%s", res->error[0] ? res->error : "refused");
+            return JOB_REFUSED;
         case AI_EMBED_RETRY:
         case AI_EMBED_ERROR:
             break;
@@ -1016,6 +1034,7 @@ static void* worker_main(void* arg)
     Worker w = { .token_scale = 1.0f };
     bool have = false;
     bool stalled = false; //!< /v1/embeddings turned the embedder away: index nothing until discovery
+    bool failed = false; //!< A permanent refusal: index nothing until a discovery succeeds
     int64_t next_discover = 0, next_scan = 0;
     int64_t swap_backoff = 0; //!< Wait before the next rediscovery after a turn-away (0: at once)
     ScanList scan = { 0 };
@@ -1051,17 +1070,25 @@ static void* worker_main(void* arg)
                 w.emb.context_window = found.context_window;
                 have = true;
                 stalled = false;
+                failed = false;
+                set_failure(NULL);
                 next_discover = now + EMBED_DISCOVER_OK_MS;
             } else if (st == AI_EMBED_NONE) {
                 clear_embedder();
                 have = false;
                 stalled = false;
+                failed = false;
+                set_failure(NULL);
                 next_discover = now + EMBED_DISCOVER_NONE_MS;
+            } else if (st == AI_EMBED_REFUSED) {
+                failed = true; // the key is wrong: nothing else will work either
+                set_failure("unauthorized");
+                next_discover = now + EMBED_DISCOVER_FAIL_MS;
             } else {
                 next_discover = now + EMBED_DISCOVER_FAIL_MS;
             }
         }
-        if (!have || stalled) {
+        if (!have || stalled || failed) {
             worker_wait(next_discover - now);
             continue;
         }
@@ -1093,7 +1120,7 @@ static void* worker_main(void* arg)
         }
 
         // A note the embedder turned away is not the note's fault: it goes back in line.
-        bool again = r == JOB_NO_EMBEDDER;
+        bool again = r == JOB_NO_EMBEDDER || r == JOB_REFUSED;
         if (again && is_live)
             live_requeue(&live);
         else if (again)
@@ -1105,6 +1132,13 @@ static void* worker_main(void* arg)
             break;
         if (r == JOB_DONE)
             swap_backoff = 0;
+        if (r == JOB_REFUSED) {
+            // 401, or a 400 naming the model's setup (embedding_tokenizer_missing,
+            // invalid_dimensions, capability_not_supported): every note would fail the same way.
+            // Stop until discovery, on its usual timer, finds the endpoint working again.
+            failed = true;
+            set_failure(w.error);
+        }
         if (r == JOB_NO_EMBEDDER) {
             // 404 model_not_found, or vectors of another length: the model may have been swapped.
             // Ask /v1/models at once, then back off 5 s, 10 s, ... 5 min while it keeps happening.
