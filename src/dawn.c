@@ -4631,10 +4631,14 @@ static void handle_writing(int32_t key)
         else {
             // A note that could not be saved stays open, with the status bar saying so; the next
             // esc after that warning leaves anyway, since the disk may never come back. A note
-            // changed elsewhere likewise: the first esc that finds it asks (MODE_CONFLICT); once
-            // the writer chose to keep editing, esc leaves without overwriting, their text kept
-            // in the conflict copy (dawn_frame posts where).
-            bool warned = app.save_failed || app.save_paused;
+            // changed elsewhere: while saving is paused, the first esc asks again (MODE_CONFLICT);
+            // the next one leaves without overwriting, the writer's text kept in the conflict
+            // copy (dawn_frame posts where).
+            bool warned = app.save_failed || (app.save_paused && app.conflict_leave_asked);
+            if (app.save_paused && !app.conflict_leave_asked) {
+                app.conflict_leave_asked = true;
+                app.conflict_prompt = true;
+            }
             if (!save_session() && !warned)
                 break;
             app.mode = app.timer_on ? MODE_FINISHED : MODE_WELCOME;
@@ -6053,8 +6057,8 @@ static void handle_input(void)
                 MODE_POP();
             app.conflict_prompt = false;
         } else if (choice == CONFLICT_KEEP) {
-            // Saving stays paused ("saving paused" on the status bar); the next save the writer
-            // makes, or the next autosave once the text changed, looks again and asks again.
+            // Saving stays paused ("saving paused" on the status bar). Autosaves keep the copy of
+            // the writer's text current without asking; esc asks again before leaving.
             MODE_POP();
         }
         break;
@@ -6402,7 +6406,7 @@ bool dawn_frame(void)
 
     // Autosave touches the file only once something changed; a note merely opened stays as it was.
     // While a conflict pauses saving it looks again only once the text differs from the copy
-    // already kept (save_session then refreshes the copy and asks again, or saves when the file
+    // already kept (save_session then refreshes the copy without asking, or saves when the file
     // is back to what dawn expected).
     if (app.mode == MODE_WRITING && app.dirty && !app.preview_mode) {
         int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_SEC);

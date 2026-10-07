@@ -292,6 +292,7 @@ static void conflict_end(void)
     app.save_paused = false;
     app.conflict_prompt = false;
     app.conflict_left_told = false;
+    app.conflict_leave_asked = false;
     free(app.conflict_path);
     app.conflict_path = NULL;
     app.conflict_text_hash = 0;
@@ -791,10 +792,13 @@ static bool conflict_copy_create(const char* content, size_t len, char* out, siz
 //! The file changed elsewhere while the note has unsaved edits: keep the writer's text (content,
 //! what the save would have written) in this conflict's copy, pause saving and ask. The copy is
 //! written once per distinct text: a save that finds the text as the copy holds it writes nothing.
+//! Only a new conflict asks: once the writer chose to keep editing, autosaves just keep the copy
+//! current, and esc asks again (dawn.c).
 static void conflict_found(const char* content, size_t len)
 {
+    if (!app.save_paused)
+        app.conflict_prompt = true;
     app.save_paused = true;
-    app.conflict_prompt = true;
 
     uint64_t text_hash = buffer_text_hash();
     if (app.conflict_path && app.conflict_text_hash == text_hash)

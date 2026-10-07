@@ -59,7 +59,8 @@ uint64_t store_hash(const void* data, size_t len);
 //! - deleted elsewhere: written again, with a notice;
 //! - changed elsewhere (a conflict): NOT written. The text goes to a copy beside the note
 //!   (<stem>.conflict-<time>.md, refreshed when the text changes), app.save_paused is set and
-//!   app.conflict_prompt asks dawn.c to open MODE_CONFLICT.
+//!   for a new conflict app.conflict_prompt asks dawn.c to open MODE_CONFLICT (later saves while
+//!   paused only refresh the copy).
 //! @return false when the note was not written (a failure: app.save_failed; or a conflict:
 //!         app.save_paused)
 bool save_session(void);

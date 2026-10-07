@@ -388,6 +388,7 @@ typedef struct {
     bool save_paused; //!< Nothing is written to the note until the writer chooses; the status bar says so
     bool conflict_prompt; //!< Open MODE_CONFLICT as soon as the note is on screen
     bool conflict_left_told; //!< The "left without saving" notice was posted for this leave
+    bool conflict_leave_asked; //!< Esc already reopened the dialog while paused: the next esc leaves
     char* conflict_path; //!< This conflict's copy of the writer's text, beside the note (NULL: none yet)
     uint64_t conflict_text_hash; //!< store_hash() of the text that copy holds
 
