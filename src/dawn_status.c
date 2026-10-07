@@ -10,9 +10,23 @@
 // helpers, then indexing. The welcome screen has room for up to four rows, a longer bar and the
 // note being indexed; inside a note (not in focus mode, and never over a dialog: render() decides)
 // the panel is one or two rows above the status line, or one row above the chat when it is a
-// bottom sheet, and keeps off the cursor's row, hiding for a frame when it cannot. While the chat is open the model's own rows stay out: the chat says the same.
+// bottom sheet, and keeps off the cursor's row, hiding for a frame when it cannot. While the chat
+// is open the model's own rows stay out: the chat says the same.
 // Nothing is shown while nothing runs: an index that is current, off, failed (a notice says so),
-// waiting for TAI or without an embedder shows nothing.
+// waiting for TAI or without an embedder shows nothing. The one exception is the welcome screen's
+// "ai ready" row (an endpoint is configured and the model is not busy): it names the loaded model,
+// else the configured one, and rests with a still star in place of a spinner. It counts as going
+// on, so it slides in once and stays; a load or a job takes its place without the panel moving,
+// and it comes back the same way. It never shows inside a note, and goes at once, without
+// lingering, when the welcome screen does.
+//
+// Glyphs: bars are eighth blocks over a U+2500 track and the spinner is braille on every
+// terminal (dawn draws box drawing everywhere already). Nerd Font (app.nerd_font) only adds the
+// icons and the rounded U+E0B6 cap, else the cap is a right half block. In Termux Launcher's
+// terminal (app.launcher_term), which draws blocks and legacy-computing eighths as seamless
+// geometry, the sweep slides an eighth of a cell at a time, its left edge a right-eighth glyph
+// (U+2595, U+1FB87..U+1FB8B, U+2590) and its right edge a left-eighth block; elsewhere, where the
+// U+1FBxx glyphs may be missing, it moves a whole cell at a time.
 //
 // Motion: the panel slides in from the right edge over SLIDE_MS when something starts, and once
 // everything has ended it lingers LINGER_MS with its last rows dimmed, then slides out. The
@@ -56,6 +70,7 @@ typedef enum { BAR_NONE, BAR_FRACTION, BAR_SWEEP } StatusBar;
 typedef struct {
     StatusIcon icon;
     StatusBar bar;
+    bool rest; //!< A resting row ("ai ready"): a still mark in place of the spinner
     float frac; //!< For BAR_FRACTION, 0..1
     char text[96]; //!< A few words; cut with an ellipsis when the panel is narrow
     char detail[EMBED_TITLE_MAX]; //!< Dim words after the text, dropped first when there is no room ("" none)
@@ -91,6 +106,7 @@ static int32_t add_line(StatusLine* out, int32_t n, StatusIcon icon, StatusBar b
     StatusLine* l = &out[n];
     l->icon = icon;
     l->bar = bar;
+    l->rest = false;
     l->frac = frac < 0 ? 0 : frac > 1 ? 1 : frac;
     snprintf(l->text, sizeof(l->text), "%s", text);
     snprintf(l->detail, sizeof(l->detail), "%s", detail ? detail : "");
@@ -159,7 +175,8 @@ bool status_visible(void)
 // #region What is going on
 
 #if HAS_LIBAI
-//! The model's rows: loading (or waking for a job), reading the note, answering, then quiet work.
+//! The model's rows: loading (or waking for a job), reading the note, answering, then quiet work;
+//! on the welcome screen, when none of those shows, a resting "ai ready" row.
 static int32_t collect_model(StatusLine* out, int32_t n, int64_t now)
 {
     if (!app.ai_ready)
@@ -215,6 +232,14 @@ static int32_t collect_model(StatusLine* out, int32_t n, int64_t now)
         n = add_line(out, n, ICON_CHAT, BAR_NONE, 0, job, NULL);
     else if (strcmp(job, "quiet work") == 0)
         n = add_line(out, n, ICON_QUIET, BAR_NONE, 0, "working in the background", NULL);
+
+    // The welcome screen's "ai ready", while no other model row is out. It is active like any
+    // row, so the panel slides in once and rests, and a load swaps rows with it without sliding.
+    if (n == 0 && g.area && g.welcome && g.configured) {
+        const char* model = g.info.loaded_model[0] ? g.info.loaded_model : session_model_id();
+        n = add_line(out, n, ICON_MODEL, BAR_NONE, 0, "ai ready", model);
+        out[n - 1].rest = true;
+    }
     return n;
 }
 #endif
@@ -334,57 +359,69 @@ static int32_t tail_cells(const StatusLine* l, bool still)
     return 1 + (bar > 0 ? bar : 1) + 1;
 }
 
+//! The separator before a row's detail, or NULL when the row shows none here: " · " before the
+//! note being indexed or the ready model (welcome screen only), a space before a load's seconds.
+static const char* detail_sep(const StatusLine* l)
+{
+    if (!l->detail[0])
+        return NULL;
+    if (l->icon == ICON_MODEL && !l->rest)
+        return " ";
+    return g.welcome ? " \xC2\xB7 " : NULL;
+}
+
 //! The width a row wants: cap, pad, icon and gap, text, detail, tail.
 static int32_t natural_width(const StatusLine* l, bool still)
 {
     int32_t w = 2 + (app.nerd_font ? 2 : 0) + cols_of(l->text) + tail_cells(l, still);
-    if (l->detail[0] && g.welcome)
-        w += 3 + cols_of(l->detail); // " · detail"
-    else if (l->detail[0] && l->icon == ICON_MODEL)
-        w += 1 + cols_of(l->detail); // the seconds
+    const char* sep = detail_sep(l);
+    if (sep)
+        w += cols_of(sep) + cols_of(l->detail);
     return w;
 }
 
+//! Fill from the left by k eighths of a cell (1..7).
+static const char* const left_eighths[] = {
+    "\xE2\x96\x8F", "\xE2\x96\x8E", "\xE2\x96\x8D", "\xE2\x96\x8C", "\xE2\x96\x8B", "\xE2\x96\x8A", "\xE2\x96\x89",
+};
+
+//! Fill from the right by k eighths of a cell (1..7): U+2595, U+1FB87, U+1FB88, U+2590, U+1FB89,
+//! U+1FB8A, U+1FB8B. The U+1FBxx ones are legacy computing, which only the launcher is sure to have.
+static const char* const right_eighths[] = {
+    "\xE2\x96\x95", "\xF0\x9F\xAE\x87", "\xF0\x9F\xAE\x88", "\xE2\x96\x90", "\xF0\x9F\xAE\x89", "\xF0\x9F\xAE\x8A",
+    "\xF0\x9F\xAE\x8B",
+};
+
+#define SWEEP_CELLS 3 //!< The sweep's length
+#define SWEEP_CELL_MS 70 //!< How long the sweep takes to move one cell
+
+//! A bar: filled cells and eighth blocks over a thin track. A fraction fills from the left to
+//! the eighth; a sweep is three filled cells running back and forth, in eighths of a cell where
+//! the launcher draws both edges' blocks, else a whole cell at a time.
 static void put_bar(CellRow* row, const StatusLine* l, int32_t cells, bool live, int64_t now)
 {
-    // A sweep: three filled cells running back and forth.
-    int32_t seg_at = -1;
+    // What is filled, in eighths of a cell from the bar's left end: [from, to).
+    int32_t from = 0, to = (int32_t)(l->frac * (float)(cells * 8) + 0.5f);
     if (l->bar == BAR_SWEEP) {
-        int32_t span = (app.nerd_font ? cells : cells - 2) - 3;
-        int32_t step = span > 0 ? (int32_t)((now / 70) % (2 * span)) : 0;
-        seg_at = step < span ? step : 2 * span - step;
+        int32_t unit = app.launcher_term ? 1 : 8; // eighths per step
+        int32_t span = (cells - SWEEP_CELLS) * 8 / unit; // steps from one end to the other
+        int32_t step = span > 0 ? (int32_t)((now * 8 / unit / SWEEP_CELL_MS) % (2 * span)) : 0;
+        from = (step < span ? step : 2 * span - step) * unit;
+        to = live ? from + SWEEP_CELLS * 8 : from;
     }
 
-    if (!app.nerd_font) {
-        // [####----]
-        int32_t inner = cells - 2;
-        int32_t filled = (int32_t)(l->frac * (float)inner + 0.5f);
-        put(row, "[", ROLE_DETAIL);
-        for (int32_t i = 0; i < inner; i++) {
-            bool on = l->bar == BAR_SWEEP ? (live && i >= seg_at && i < seg_at + 3) : i < filled;
-            put(row, on ? "#" : "-", on ? ROLE_FILL : ROLE_DETAIL);
-        }
-        put(row, "]", ROLE_DETAIL);
-        return;
-    }
-
-    static const char* const eighths[] = {
-        "\xE2\x96\x8F", "\xE2\x96\x8E", "\xE2\x96\x8D", "\xE2\x96\x8C", "\xE2\x96\x8B", "\xE2\x96\x8A", "\xE2\x96\x89",
-    };
-    int32_t total = (int32_t)(l->frac * (float)(cells * 8) + 0.5f);
     for (int32_t i = 0; i < cells; i++) {
-        if (l->bar == BAR_SWEEP) {
-            bool on = live && i >= seg_at && i < seg_at + 3;
-            put(row, on ? "\xE2\x96\x88" : "\xE2\x94\x80", on ? ROLE_FILL : ROLE_TRACK);
-            continue;
-        }
-        int32_t e = total - i * 8;
+        int32_t lo = i * 8 > from ? i * 8 : from;
+        int32_t hi = i * 8 + 8 < to ? i * 8 + 8 : to;
+        int32_t e = hi - lo; // eighths of this cell filled
         if (e >= 8)
-            put(row, "\xE2\x96\x88", ROLE_FILL);
+            put(row, "\xE2\x96\x88", ROLE_FILL); // U+2588
         else if (e <= 0)
             put(row, "\xE2\x94\x80", ROLE_TRACK); // U+2500
+        else if (lo > i * 8)
+            put(row, right_eighths[e - 1], ROLE_FILL); // the sweep's left edge
         else
-            put(row, eighths[e - 1], ROLE_FILL);
+            put(row, left_eighths[e - 1], ROLE_FILL);
     }
 }
 
@@ -404,10 +441,10 @@ static void layout_row(CellRow* row, const StatusLine* l, int32_t width, bool li
     int32_t room = width - row->n - tail;
     int32_t used = put_text(row, l->text, room, ROLE_TEXT);
 
-    // The detail: the note being indexed (welcome screen) or the seconds a load has taken.
-    bool want_detail = l->detail[0] && (g.welcome || l->icon == ICON_MODEL);
-    if (want_detail) {
-        const char* sep = g.welcome && l->icon != ICON_MODEL ? " \xC2\xB7 " : " ";
+    // The detail: the note being indexed or the model that is ready (welcome screen), or the
+    // seconds a load has taken.
+    const char* sep = detail_sep(l);
+    if (sep) {
         int32_t sep_cols = cols_of(sep);
         if (room - used - sep_cols >= 3) {
             put_text(row, sep, sep_cols, ROLE_DETAIL);
@@ -421,19 +458,18 @@ static void layout_row(CellRow* row, const StatusLine* l, int32_t width, bool li
     int32_t bar = bar_cells(l, still);
     if (bar > 0) {
         put_bar(row, l, bar, live, now);
+    } else if (l->rest) {
+        put(row, "\xE2\x9C\xA6", ROLE_SPIN); // U+2726, still
     } else if (!live) {
         put(row, " ", ROLE_PAD);
     } else if (still) {
         put(row, "\xE2\x80\xA6", ROLE_SPIN);
-    } else if (app.nerd_font) {
+    } else {
         static const char* const frames[] = {
             "\xE2\xA0\x8B", "\xE2\xA0\x99", "\xE2\xA0\xB9", "\xE2\xA0\xB8", "\xE2\xA0\xBC",
             "\xE2\xA0\xB4", "\xE2\xA0\xA6", "\xE2\xA0\xA7", "\xE2\xA0\x87", "\xE2\xA0\x8F",
         };
         put(row, frames[(now / 80) % 10], ROLE_SPIN);
-    } else {
-        static const char* const frames[] = { "|", "/", "-", "\\" };
-        put(row, frames[(now / 120) % 4], ROLE_SPIN);
     }
     put(row, " ", ROLE_PAD);
 }
@@ -561,6 +597,18 @@ void status_frame(bool show)
         memcpy(g.lines, now_lines, sizeof(StatusLine) * (size_t)n);
         g.count = n;
         g.last_active = now;
+    } else if (g.count > 0) {
+        // A resting row belongs to the welcome screen: leaving it (or the model going away)
+        // takes the row at once, without lingering over a note.
+        bool resting = true;
+        for (int32_t i = 0; i < g.count; i++)
+            resting = resting && g.lines[i].rest;
+        if (resting) {
+            g.slide = SLIDE_HIDDEN;
+            g.progress = 0;
+            g.count = 0;
+            g.width = 0;
+        }
     }
     slide_tick(active, still, now);
 
