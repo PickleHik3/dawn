@@ -44,18 +44,16 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef _WIN32
-#include "dawn_embed_index.h" // embed_hash(): the same FNV-1a as fsio_hash, which Windows lacks
-#else
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
-
-//! Whether the open note's file is compared with what dawn last saw before each save.
+//! Whether dawn_fsio is used here: the open note's file is then compared with what dawn last saw
+//! before each save. Windows lacks fsio and the web backend's reads set no errno, so both keep
+//! the plain backend calls (and rename-based fallbacks) instead.
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 #define DAWN_DISK_CHECK 1
+#include <sys/stat.h>
+#include <unistd.h>
 #else
 #define DAWN_DISK_CHECK 0
+#include "dawn_embed_index.h" // embed_hash(): the same FNV-1a as fsio_hash
 #endif
 
 #define STORE_READ_MAX ((size_t)100 * 1024 * 1024) //!< Largest file read whole, as the backend's
@@ -188,7 +186,7 @@ char* store_read(const char* path, size_t* out_len, bool* missing)
 
 bool store_move_no_replace(const char* from, const char* to)
 {
-#ifndef _WIN32
+#if DAWN_DISK_CHECK
     return fsio_move_no_replace(from, to);
 #else
     if (DAWN_BACKEND(app)->file_exists(to)) {
@@ -201,7 +199,7 @@ bool store_move_no_replace(const char* from, const char* to)
 
 bool store_quarantine(const char* path, char* out, size_t out_size)
 {
-#ifndef _WIN32
+#if DAWN_DISK_CHECK
     return fsio_quarantine(path, out, out_size);
 #else
     time_t now = time(NULL);
@@ -232,7 +230,7 @@ bool store_quarantine(const char* path, char* out, size_t out_size)
 
 uint64_t store_hash(const void* data, size_t len)
 {
-#ifndef _WIN32
+#if DAWN_DISK_CHECK
     return fsio_hash(data, len);
 #else
     return embed_hash(data, len);
@@ -716,7 +714,7 @@ static void snapshot_before_write(const char* disk, size_t len)
     save_note_version(disk, len, out, sizeof(out));
 }
 
-#ifndef _WIN32
+#if DAWN_DISK_CHECK
 static bool write_all(int fd, const char* data, size_t len)
 {
     while (len > 0) {
@@ -742,7 +740,7 @@ static bool conflict_copy_create(const char* content, size_t len, char* out, siz
     char stamp[32];
     snprintf(stamp, sizeof(stamp), "%04d%02d%02d-%02d%02d%02d", (int)lt.year, (int)lt.mon + 1, (int)lt.mday,
         (int)lt.hour, (int)lt.min, (int)lt.sec);
-#ifndef _WIN32
+#if DAWN_DISK_CHECK
     // The bytes reach the disk under a temp name first and then take the first free name in one
     // no-replace move: a crash leaves no half-written copy, and nothing is ever replaced.
     char tmp[PATH_MAX];
