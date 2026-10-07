@@ -2480,7 +2480,7 @@ static void posix_image_clear_all(void)
 
 static void posix_image_mask_region(int32_t col, int32_t row, int32_t cols, int32_t rows, DawnColor bg)
 {
-    if (cols <= 0 || rows <= 0)
+    if (cols <= 0 || rows <= 0 || in_multiplexer()) // tmux would make the APC its window title
         return;
 
     uint8_t pixel[4] = { bg.r, bg.g, bg.b, 255 };
