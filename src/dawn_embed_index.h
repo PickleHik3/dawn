@@ -158,6 +158,15 @@ typedef struct {
 //! current length (start at 0) and k its capacity; a candidate no better than the k-th is dropped.
 void embed_topk_push(EmbedScored* top, int32_t* count, int32_t k, EmbedScored cand);
 
+//! How many of a best-first list survive: the leading entries scoring at least min_score and, when
+//! near_best > 0, no more than near_best below top[0]. The rest are cut off, never reordered.
+int32_t embed_cut(const EmbedScored* top, int32_t count, float min_score, float near_best);
+
+//! The score floors for an embedder (its /v1/models id; NULL or "" when there is none): *search
+//! for a query against pieces (Ctrl+S's "by meaning"), *related for note against note (the chat's
+//! "also in:"). Cosine baselines differ a lot between models, so each family has its own pair.
+void embed_floors(const char* model_id, float* search, float* related);
+
 // #endregion
 
 #endif // DAWN_EMBED_INDEX_H

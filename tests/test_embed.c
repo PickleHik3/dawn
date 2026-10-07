@@ -1,5 +1,6 @@
 // test_embed.c - host tests for the pure half of the meaning index (dawn_embed_index.c):
-// the chunker, the index file round trip and its corruption handling, and cosine top-k.
+// the chunker, the index file round trip and its corruption handling, cosine top-k and the score
+// floors and near-best cut.
 
 #include "dawn_embed_index.h"
 
@@ -544,6 +545,72 @@ static void test_topk_and_cosine(void)
     CHECK(n == 2);
 }
 
+//! Rank (note, score) pairs best first, cut them with model's search floor and EMBED_NEAR_BEST's
+//! 0.10, and return a bitmask of the notes kept.
+static uint32_t kept_notes(const char* model, const float* scores, int32_t count)
+{
+    EmbedScored top[16];
+    int32_t n = 0;
+    for (int32_t i = 0; i < count; i++)
+        embed_topk_push(top, &n, 16, (EmbedScored) { i, 0, scores[i] });
+    float min_score = 0.0f;
+    embed_floors(model, &min_score, NULL);
+    n = embed_cut(top, n, min_score, 0.10f);
+    uint32_t mask = 0;
+    for (int32_t i = 0; i < n; i++)
+        mask |= 1u << top[i].note;
+    return mask;
+}
+
+static void test_floors_and_margin(void)
+{
+    // The cut keeps a prefix: floor, then the margin under the best, whichever is higher.
+    EmbedScored top[4] = { { 0, 0, 0.9f }, { 1, 0, 0.85f }, { 2, 0, 0.7f }, { 3, 0, 0.5f } };
+    CHECK(embed_cut(top, 4, 0.6f, 0.0f) == 3);
+    CHECK(embed_cut(top, 4, 0.6f, 0.1f) == 2);
+    CHECK(embed_cut(top, 4, -2.0f, 0.0f) == 4);
+    CHECK(embed_cut(top, 4, 0.95f, 0.1f) == 0);
+    CHECK(embed_cut(top, 0, 0.0f, 0.1f) == 0);
+    CHECK(embed_cut(NULL, 4, 0.0f, 0.1f) == 0);
+
+    float search = 0.0f, related = 0.0f;
+    embed_floors(NULL, &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+    embed_floors("", &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+    embed_floors("qwen3-embedding-0.6b", &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+
+    // Measured on the phone, 2026-10-07, 256 dims. Notes: 0 tomato watering, 1 garden journal
+    // (watering), 2 sourdough starter, 3 compost, 4 kubectl, 5 meeting (budget).
+    const char* v2 = "embeddinggemma-2-text-vision-440m";
+    const char* v1 = "embeddinggemma-300m";
+    embed_floors(v2, &search, &related);
+    CHECK(search == 0.70f && related == 0.80f);
+    embed_floors(v1, &search, &related);
+    CHECK(search == 0.35f && related == 0.60f);
+
+    float v2_tomatoes[] = { 0.86f, 0.84f, 0.73f, 0.65f, 0.63f, 0.55f };
+    CHECK(kept_notes(v2, v2_tomatoes, 6) == 0x3); // starter 0.73 is under 0.86 - 0.10
+    float v2_bread[] = { 0.59f, 0.60f, 0.75f, 0.64f, 0.62f, 0.55f };
+    CHECK(kept_notes(v2, v2_bread, 6) == 0x4);
+    float v2_kube[] = { -1.0f, -1.0f, 0.60f, 0.61f, 0.84f, 0.63f };
+    CHECK(kept_notes(v2, v2_kube, 6) == 0x10);
+    float v2_money[] = { -1.0f, -1.0f, 0.61f, 0.60f, -1.0f, 0.73f };
+    CHECK(kept_notes(v2, v2_money, 6) == 0x20);
+
+    float v1_tomatoes[] = { 0.62f, 0.62f, 0.37f, 0.33f, 0.22f, 0.11f };
+    CHECK(kept_notes(v1, v1_tomatoes, 6) == 0x3);
+    float v1_bread[] = { 0.21f, 0.22f, 0.43f, 0.30f, -1.0f, -1.0f };
+    CHECK(kept_notes(v1, v1_bread, 6) == 0x4);
+    float v1_kube[] = { -1.0f, -1.0f, -1.0f, 0.24f, 0.65f, 0.23f };
+    CHECK(kept_notes(v1, v1_kube, 6) == 0x10);
+
+    // Note against note under EmbeddingGemma 2: only the near-duplicate is related.
+    embed_floors(v2, NULL, &related);
+    CHECK(0.89f >= related && 0.74f < related && 0.65f < related);
+}
+
 // #endregion
 
 int main(void)
@@ -561,6 +628,7 @@ int main(void)
     test_index_round_trip();
     test_index_corruption();
     test_topk_and_cosine();
+    test_floors_and_margin();
 
     printf("test-embed: %d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;

@@ -1811,9 +1811,35 @@ static int32_t rank_locked(const float* q, int32_t dims, const EmbedSearchOpts* 
         if (opts && opts->one_per_note && best.chunk >= 0)
             embed_topk_push(top, &n, max, best);
     }
+    n = embed_cut(top, n, min_score, opts ? opts->near_best : 0.0f);
     for (int32_t i = 0; i < n; i++)
         fill_hit(&hits[i], g.notes[top[i].note], top[i].chunk, top[i].score);
     return n;
+}
+
+//! The floors for the embedder in use (embed_floors()); the default family's when there is none.
+static void current_floors(float* search, float* related)
+{
+    char id[sizeof(g.embedder.id)] = "";
+    pthread_mutex_lock(&g_lock);
+    if (g.have_embedder)
+        snprintf(id, sizeof(id), "%s", g.embedder.id);
+    pthread_mutex_unlock(&g_lock);
+    embed_floors(id, search, related);
+}
+
+float embed_search_floor(void)
+{
+    float f = 0.0f;
+    current_floors(&f, NULL);
+    return f;
+}
+
+float embed_related_floor(void)
+{
+    float f = 0.0f;
+    current_floors(NULL, &f);
+    return f;
 }
 
 EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* opts, EmbedHit* hits,
@@ -2012,6 +2038,20 @@ void embed_set_enabled(bool enabled) { (void)enabled; }
 bool embed_enabled(void) { return false; }
 
 void embed_rebuild(void) { }
+
+float embed_search_floor(void)
+{
+    float f = 0.0f;
+    embed_floors(NULL, &f, NULL);
+    return f;
+}
+
+float embed_related_floor(void)
+{
+    float f = 0.0f;
+    embed_floors(NULL, NULL, &f);
+    return f;
+}
 
 EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* opts, EmbedHit* hits,
     int32_t max, int32_t* count)

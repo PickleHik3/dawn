@@ -43,8 +43,7 @@
 #endif
 
 #define EMBED_HITS_MAX 64 //!< Most hits one call returns
-#define EMBED_SEARCH_MIN_SCORE 0.35f //!< Suggested floor for Ctrl+S's "by meaning" group
-#define EMBED_RELATED_MIN_SCORE 0.60f //!< Suggested floor for the chat's "also in:" line
+#define EMBED_NEAR_BEST 0.10f //!< Suggested EmbedSearchOpts.near_best for Ctrl+S's "by meaning" group
 #define EMBED_ERROR_MAX 64 //!< EmbedStatus.error, bytes including the NUL
 
 // #region Types
@@ -96,7 +95,8 @@ typedef struct {
 typedef struct {
     const char* only_path; //!< Only this note's pieces, or NULL for every note
     const char* exclude_path; //!< Never this note (e.g. the open one), or NULL
-    float min_score; //!< Drop hits below this (EMBED_SEARCH_MIN_SCORE; -1 keeps everything)
+    float min_score; //!< Drop hits below this (embed_search_floor(); -1 keeps everything)
+    float near_best; //!< Drop hits scoring more than this below the call's best hit (0 = off)
     bool one_per_note; //!< Keep only each note's best piece
 } EmbedSearchOpts;
 
@@ -154,11 +154,18 @@ void embed_rebuild(void);
 
 // #region Queries
 
+//! The min_score for embed_search() that suits the embedder in use: its family's floor (see
+//! embed_floors()), or the default family's when there is none.
+float embed_search_floor(void);
+
+//! The min_score for embed_related() that suits the embedder in use, as embed_search_floor().
+float embed_related_floor(void);
+
 //! Pieces most similar in meaning to query, best first. The first call for a new query text
 //! returns EMBED_PENDING and embeds it in the background (typing a new query replaces one not yet
 //! sent); once embed_poll() returns true, the same call returns EMBED_READY. Recent query vectors
 //! are cached, so asking again with the same text is cheap. opts may be NULL (every note, no
-//! floor, every piece). *count gets the number of hits written, at most max (<= EMBED_HITS_MAX).
+//! floor or margin, every piece). *count gets the number of hits written, at most max (<= EMBED_HITS_MAX).
 EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* opts, EmbedHit* hits,
     int32_t max, int32_t* count);
 
@@ -168,7 +175,7 @@ EmbedState embed_relevant(const char* path, const char* query, size_t len, Embed
     int32_t* count);
 
 //! Other notes that cover the same ground as the note at path (whole-note similarity), best
-//! first, scoring at least min_score (EMBED_RELATED_MIN_SCORE). Each hit's range and heading name
+//! first, scoring at least min_score (embed_related_floor()). Each hit's range and heading name
 //! the piece of that note closest to this one. Needs no query, so it never waits; the answer is
 //! cached until the index changes, so calling it every frame is fine. Returns the count.
 int32_t embed_related(const char* path, float min_score, EmbedHit* out, int32_t max);
