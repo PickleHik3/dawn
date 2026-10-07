@@ -6508,10 +6508,8 @@ static bool on_note_screen(void)
 
 void dawn_engine_shutdown(void)
 {
-    embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
-    DAWN_BACKEND(app)->set_title(NULL);
-    scrollind_shutdown();
-
+    // The save comes first: closing a Termux session sends SIGHUP and then SIGKILL 150 ms later
+    // (the launcher's ShellTerminator), and stopping the meaning index can take up to a second.
     // save_session writes only what changed; an empty note that was emptied on purpose counts.
     // A note changed elsewhere is not written over: no one is left to ask, so the writer's text
     // goes to (or refreshes) the conflict copy beside it and the terminal is told where.
@@ -6527,6 +6525,9 @@ void dawn_engine_shutdown(void)
             exit_message("dawn: could not save %s\n", app.session_path);
         }
     }
+    embed_shutdown(); // anything pending is lost: the note is saved, and the next scan catches up
+    DAWN_BACKEND(app)->set_title(NULL);
+    scrollind_shutdown();
 
     gap_free(&app.text);
     free(app.session_path);
