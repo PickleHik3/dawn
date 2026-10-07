@@ -48,8 +48,8 @@ Open:
    on the welcome screen. Checked on the phone in tmux: ready row, cap, icon, the sweep during a
    load (`🮊██▎`), and the launcher's own rendering in a screenshot. Popup masks are no longer
    sent inside tmux (`e78affc`), where they became the window title.
-3. Ship: merge `embed-gemma2` into `tl` (ask first), then bump `DAWN_COMMIT` in
-   `../tlstore/recipes/cross/build-dawn.sh`; push launcher `dev` when its owner agrees.
+3. Ship: `embed-gemma2` is merged into `tl` (7c2fc93) and `DAWN_COMMIT` bumped in tlstore
+   (catalog base `0.1.3+<commit>.0`); the next tlstore bins release builds and records it.
 4. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
    route) stops indexing until the next discovery; dawn could fall back to the next embedder.
 5. Launcher flakes, order-dependent, pass alone: `TerminalIOPreferencesDataStoreLazyModeTest`,
