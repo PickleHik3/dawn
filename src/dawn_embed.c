@@ -8,9 +8,12 @@
 // callback, and an "alive" flag that embed_shutdown() waits on for a moment before freeing.
 //
 // Sharing. g_lock guards the store (the in-memory copy of every note's index), the embedder
-// description, the pending live texts and the query slot and cache. The worker is the store's
+// description, the pending live texts, the query slot and cache, and the status the worker
+// publishes for embed_status() (phase, progress, current title, error). The worker is the store's
 // only writer, so it reads the store without the lock and takes it only to swap entries in or
-// out; dawn's thread holds it while it ranks, which is a few milliseconds at most.
+// out; dawn's thread holds it while it ranks, which is a few milliseconds at most. The enable
+// switch and a rebuild request are atomics the worker reads at the top of its loop; every wait it
+// makes gives way to them, and a disabled worker's HTTP calls abort through the `halt` flag.
 
 #include "dawn_embed.h"
 
@@ -98,6 +101,9 @@ static struct {
     atomic_bool worker_alive;
     atomic_bool query_alive;
     atomic_bool news; //!< For embed_poll()
+    atomic_bool disabled; //!< embed_set_enabled(false)
+    atomic_bool halt; //!< stop || disabled: the worker's cancel flag for its HTTP calls
+    atomic_bool rebuild; //!< embed_rebuild() asked; the worker clears it
 
     // Set once by embed_start(), read-only afterwards.
     char notes_dir[EMBED_PATH_MAX];
@@ -112,6 +118,10 @@ static struct {
     uint64_t generation; //!< Bumped on every store change
     bool have_embedder;
     char error[AI_EMBED_ERROR_MAX]; //!< Why indexing stopped for good (an error code), "" when it runs
+    EmbedPhase phase; //!< What the worker is doing, for embed_status()
+    int32_t notes_total, notes_done; //!< This pass
+    char current_title[EMBED_TITLE_MAX]; //!< The note being embedded, "" otherwise
+    int64_t retry_at_ms; //!< For EMBED_PHASE_WAITING, else 0
     ai_embedder_t embedder;
     int32_t dims; //!< Vector length in use: embedder.dims, or learned from the first reply
     uint64_t epoch; //!< Bumped whenever the embedder's id, revision or dims change
@@ -146,10 +156,11 @@ static void sleep_ms(int64_t ms)
     nanosleep(&ts, NULL);
 }
 
-//! Sleep up to ms, waking early for embed_note_changed() or embed_shutdown().
+//! Sleep up to ms, waking early for embed_note_changed(), embed_set_enabled(), embed_rebuild() or
+//! embed_shutdown().
 static void worker_wait(int64_t ms)
 {
-    if (ms <= 0 || atomic_load(&g.stop))
+    if (ms <= 0 || atomic_load(&g.stop) || atomic_load(&g.rebuild))
         return;
     if (ms > EMBED_IDLE_WAIT_MS)
         ms = EMBED_IDLE_WAIT_MS;
@@ -162,8 +173,17 @@ static void worker_wait(int64_t ms)
         until.tv_nsec -= 1000000000L;
     }
     pthread_mutex_lock(&g_lock);
-    if (!atomic_load(&g.stop))
+    if (!atomic_load(&g.stop) && !atomic_load(&g.rebuild))
         pthread_cond_timedwait(&g_wake, &g_lock, &until);
+    pthread_mutex_unlock(&g_lock);
+}
+
+//! While disabled: sleep until embed_set_enabled(true), embed_rebuild() or embed_shutdown().
+static void off_wait(void)
+{
+    pthread_mutex_lock(&g_lock);
+    while (atomic_load(&g.disabled) && !atomic_load(&g.stop) && !atomic_load(&g.rebuild))
+        pthread_cond_wait(&g_wake, &g_lock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -200,6 +220,45 @@ static void mkdir_p(const char* path)
         buf[i] = '/';
     }
     mkdir(buf, 0700);
+}
+
+// #endregion
+
+// #region Status
+
+//! Publish the worker's phase; embed_poll() reports a change.
+static void status_phase(EmbedPhase phase, int64_t retry_at_ms)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = g.phase != phase || g.retry_at_ms != retry_at_ms;
+    g.phase = phase;
+    g.retry_at_ms = retry_at_ms;
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
+}
+
+//! Publish how far this pass has come.
+static void status_progress(int32_t done, int32_t total)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = g.notes_done != done || g.notes_total != total;
+    g.notes_done = done;
+    g.notes_total = total;
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
+}
+
+//! Publish the title of the note being embedded ("" when none).
+static void status_title(const char* title)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = strcmp(g.current_title, title) != 0;
+    snprintf(g.current_title, sizeof(g.current_title), "%s", title);
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
 }
 
 // #endregion
@@ -348,6 +407,37 @@ static bool index_is_current(const EmbedIndex* idx, const ai_embedder_t* emb, in
 {
     return strcmp(idx->model, emb->id) == 0 && strcmp(idx->revision, emb->revision) == 0
         && (dims == 0 || idx->dims == dims);
+}
+
+//! embed_rebuild(): empty the store and delete every index file (and leftover .tmp) in the cache.
+//! Worker thread only.
+static void store_clear(void)
+{
+    pthread_mutex_lock(&g_lock);
+    StoreNote** notes = g.notes;
+    int32_t count = g.note_count;
+    g.notes = NULL;
+    g.note_count = g.note_cap = 0;
+    g.generation++;
+    pthread_mutex_unlock(&g_lock);
+    for (int32_t i = 0; i < count; i++)
+        store_note_free(notes[i]);
+    free(notes);
+
+    DIR* dir = opendir(g.cache_dir);
+    if (dir) {
+        struct dirent* e;
+        while ((e = readdir(dir)) != NULL) {
+            size_t n = strlen(e->d_name);
+            char file[EMBED_PATH_MAX];
+            bool ours = (n > 4 && strcmp(e->d_name + n - 4, ".idx") == 0)
+                || (n > 8 && strcmp(e->d_name + n - 8, ".idx.tmp") == 0);
+            if (ours && join_path(file, sizeof(file), g.cache_dir, e->d_name))
+                remove(file);
+        }
+        closedir(dir);
+    }
+    atomic_store(&g.news, true);
 }
 
 //! Read every index file in the cache into the store; a file that fails to read (truncated,
@@ -603,25 +693,45 @@ typedef struct {
     bool busy;
 } Worker;
 
-//! Block while a chat reply is generating (checked at most every EMBED_BUSY_POLL_MS). False when
-//! asked to stop.
+//! Whether the worker should drop what it is waiting for: stopping, disabled, or a rebuild asked.
+static bool interrupted(void) { return atomic_load(&g.halt) || atomic_load(&g.rebuild); }
+
+//! Block while a chat reply is generating (checked at most every EMBED_BUSY_POLL_MS), showing
+//! EMBED_PHASE_PAUSED meanwhile. False when interrupted().
 static bool wait_until_idle(Worker* w)
 {
     for (;;) {
-        if (atomic_load(&g.stop))
+        if (interrupted())
             return false;
         int64_t now = now_ms();
         if (now - w->busy_checked_ms >= EMBED_BUSY_POLL_MS || w->busy_checked_ms == 0) {
             bool active = false;
-            ai_embed_status_t st = ai_embed_generation_active(&active, &g.stop);
+            ai_embed_status_t st = ai_embed_generation_active(&active, &g.halt);
             if (st == AI_EMBED_CANCELLED)
                 return false;
             w->busy = st == AI_EMBED_OK && active;
             w->busy_checked_ms = now_ms();
         }
-        if (!w->busy)
+        if (!w->busy) {
+            status_phase(EMBED_PHASE_INDEXING, 0);
             return true;
+        }
+        status_phase(EMBED_PHASE_PAUSED, 0);
         worker_wait(EMBED_BUSY_POLL_MS);
+    }
+}
+
+//! Wait until the monotonic time until_ms (worker_wait() alone stops at EMBED_IDLE_WAIT_MS).
+//! False when interrupted().
+static bool wait_until(int64_t until_ms)
+{
+    for (;;) {
+        if (interrupted())
+            return false;
+        int64_t left = until_ms - now_ms();
+        if (left <= 0)
+            return true;
+        worker_wait(left);
     }
 }
 
@@ -638,7 +748,7 @@ static void calibrate(Worker* w, const char* body, size_t len)
         n--;
     int32_t est = embed_estimate_tokens(body, n);
     int32_t tokens = 0;
-    if (est > 0 && ai_embed_tokenize(w->emb.id, body, n, &tokens, &g.stop) == AI_EMBED_OK && tokens > 0) {
+    if (est > 0 && ai_embed_tokenize(w->emb.id, body, n, &tokens, &g.halt) == AI_EMBED_OK && tokens > 0) {
         float s = (float)tokens / (float)est;
         w->token_scale = s < 0.5f ? 0.5f : s > 3.0f ? 3.0f : s;
     }
@@ -659,10 +769,7 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
     for (;;) {
         if (!wait_until_idle(w))
             return JOB_CANCELLED;
-        int64_t gap = w->last_request_ms + EMBED_REQUEST_GAP_MS - now_ms();
-        if (gap > 0)
-            worker_wait(gap);
-        if (atomic_load(&g.stop))
+        if (!wait_until(w->last_request_ms + EMBED_REQUEST_GAP_MS))
             return JOB_CANCELLED;
 
         ai_embed_request_t req = {
@@ -675,7 +782,7 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
             .title = title,
         };
         int32_t retry_ms = 0;
-        ai_embed_status_t st = ai_embed_vectors(&req, res, &retry_ms, &g.stop);
+        ai_embed_status_t st = ai_embed_vectors(&req, res, &retry_ms, &g.halt);
         w->last_request_ms = now_ms();
         switch (st) {
         case AI_EMBED_OK:
@@ -701,7 +808,11 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
         }
         if (++retries > EMBED_MAX_RETRIES)
             return JOB_FAILED;
-        worker_wait(retry_ms > 0 ? retry_ms : 10000);
+        int64_t until = now_ms() + (retry_ms > 0 ? retry_ms : 10000);
+        status_phase(EMBED_PHASE_WAITING, until);
+        if (!wait_until(until))
+            return JOB_CANCELLED;
+        status_phase(EMBED_PHASE_INDEXING, 0);
     }
 }
 
@@ -955,6 +1066,7 @@ static JobResult index_note(Worker* w, const char* path, const char* live_body, 
         free(owned);
         return JOB_FAILED;
     }
+    status_title(title);
 
     int32_t truncated = 0;
     JobResult r = index_pass(w, path, body, len, title, mtime, size, w->token_scale, false, &truncated);
@@ -1038,18 +1150,49 @@ static void* worker_main(void* arg)
     bool have = false;
     bool stalled = false; //!< /v1/embeddings turned the embedder away: index nothing until discovery
     bool failed = false; //!< A permanent refusal: index nothing until a discovery succeeds
+    bool was_off = false; //!< Disabled until now: look at everything afresh
+    bool none = false; //!< The last discovery found no embedder
     int64_t next_discover = 0, next_scan = 0;
     int64_t swap_backoff = 0; //!< Wait before the next rediscovery after a turn-away (0: at once)
+    int32_t pass_total = 0, pass_done = 0; //!< Notes in this pass and how many are through
     ScanList scan = { 0 };
 
     while (!atomic_load(&g.stop)) {
+        if (atomic_exchange(&g.rebuild, false)) {
+            // embed_rebuild(): forget every vector, then look at the embedder and every note anew.
+            store_clear();
+            scan_free(&scan);
+            w.calibrated = false;
+            w.token_scale = 1.0f;
+            next_discover = next_scan = 0;
+            swap_backoff = 0;
+            pass_total = pass_done = 0;
+            status_progress(0, 0);
+        }
+        if (atomic_load(&g.disabled)) {
+            // embed_set_enabled(false): send nothing; embed_set_enabled(true) wakes us.
+            status_phase(EMBED_PHASE_OFF, 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
+            was_off = true;
+            off_wait();
+            continue;
+        }
+        if (was_off) {
+            was_off = false;
+            next_discover = next_scan = 0; // the endpoint and the notes may have moved on meanwhile
+        }
+
         apply_renames();
         int64_t now = now_ms();
         if (now >= next_discover) {
+            // A routine look while indexing runs keeps the phase; otherwise this is the news.
+            if (!have || stalled || failed)
+                status_phase(EMBED_PHASE_DISCOVERING, 0);
             ai_embedder_t found;
-            ai_embed_status_t st = ai_embed_find_embedder(&found, &g.stop);
+            ai_embed_status_t st = ai_embed_find_embedder(&found, &g.halt);
             if (st == AI_EMBED_CANCELLED)
-                break;
+                continue; // stopping or disabled: the loop's top decides
             if (st == AI_EMBED_OK) {
                 // Only a different embedder (or one back from being gone) means a rebuild and a
                 // rescan; the same one listed again just lets the stalled work carry on.
@@ -1061,6 +1204,7 @@ static void* worker_main(void* arg)
                     changed = true;
                 }
                 w.reply_dims = 0;
+                none = false;
                 if (changed || !have) {
                     w.emb = found;
                     w.dims = dims;
@@ -1079,6 +1223,7 @@ static void* worker_main(void* arg)
             } else if (st == AI_EMBED_NONE) {
                 clear_embedder();
                 have = false;
+                none = true;
                 stalled = false;
                 failed = false;
                 set_failure(NULL);
@@ -1092,12 +1237,20 @@ static void* worker_main(void* arg)
             }
         }
         if (!have || stalled || failed) {
+            EmbedPhase phase = failed ? EMBED_PHASE_FAILED
+                : !have && none       ? EMBED_PHASE_NO_EMBEDDER
+                                      : EMBED_PHASE_WAITING;
+            status_phase(phase, phase == EMBED_PHASE_WAITING ? next_discover : 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
             worker_wait(next_discover - now);
             continue;
         }
         if (now >= next_scan) {
             scan_build(&scan, &w.emb, w.dims);
             next_scan = now + EMBED_RESCAN_MS;
+            pass_total = scan.count;
+            pass_done = 0;
         }
 
         JobResult r;
@@ -1108,11 +1261,19 @@ static void* worker_main(void* arg)
             // Live text has no file time: a later scan re-reads the file and, finding the same
             // text, only records its time.
             is_live = true;
+            pass_total++;
+            status_phase(EMBED_PHASE_INDEXING, 0);
+            status_progress(pass_done, pass_total);
             r = index_note(&w, live.path, live.body, live.len, live.title, 0, 0);
         } else if (scan.next < scan.count) {
             ScanEntry* se = &scan.items[scan.next++];
+            status_phase(EMBED_PHASE_INDEXING, 0);
+            status_progress(pass_done, pass_total);
             r = index_note(&w, se->path, NULL, 0, NULL, se->mtime, se->size);
         } else {
+            status_phase(EMBED_PHASE_IDLE, 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
             int64_t wait = live_wait;
             if (next_scan - now < wait)
                 wait = next_scan - now;
@@ -1121,18 +1282,25 @@ static void* worker_main(void* arg)
             worker_wait(wait);
             continue;
         }
+        status_title("");
 
-        // A note the embedder turned away is not the note's fault: it goes back in line.
-        bool again = r == JOB_NO_EMBEDDER || r == JOB_REFUSED;
-        if (again && is_live)
+        // A note the embedder turned away (or that embed_set_enabled(false) interrupted) is not
+        // the note's fault: it goes back in line.
+        bool again = r == JOB_NO_EMBEDDER || r == JOB_REFUSED || (r == JOB_CANCELLED && !atomic_load(&g.stop));
+        if (again && is_live) {
             live_requeue(&live);
-        else if (again)
+            pass_total--; // counted again when it is taken
+        } else if (again) {
             scan.next--;
-        else if (is_live)
-            live_free(&live);
+        } else {
+            if (is_live)
+                live_free(&live);
+            pass_done++;
+            status_progress(pass_done, pass_total);
+        }
 
         if (r == JOB_CANCELLED)
-            break;
+            continue; // stopping or disabled: the loop's top decides
         if (r == JOB_DONE)
             swap_backoff = 0;
         if (r == JOB_REFUSED) {
@@ -1315,6 +1483,8 @@ void embed_start(const char* notes_dir, const char* const* extra_paths, int32_t 
     }
 
     atomic_store(&g.stop, false);
+    atomic_store(&g.halt, atomic_load(&g.disabled));
+    g.phase = atomic_load(&g.disabled) ? EMBED_PHASE_OFF : EMBED_PHASE_DISCOVERING;
     atomic_store(&g.worker_alive, true);
     pthread_t t;
     if (pthread_create(&t, NULL, worker_main, NULL) != 0) {
@@ -1331,6 +1501,7 @@ void embed_shutdown(void)
         return;
     pthread_mutex_lock(&g_lock);
     atomic_store(&g.stop, true);
+    atomic_store(&g.halt, true);
     pthread_cond_broadcast(&g_wake);
     pthread_mutex_unlock(&g_lock);
 
@@ -1441,7 +1612,7 @@ void embed_note_renamed(const char* old_path, const char* new_path)
 
 bool embed_ready(void)
 {
-    if (!g.started)
+    if (!g.started || atomic_load(&g.disabled))
         return false;
     pthread_mutex_lock(&g_lock);
     bool ready = g.have_embedder && g.note_count > 0;
@@ -1466,6 +1637,55 @@ bool embed_poll(void)
     }
     pthread_mutex_unlock(&g_lock);
     return atomic_exchange(&g.news, false) || due;
+}
+
+void embed_status(EmbedStatus* out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->phase = EMBED_PHASE_OFF;
+    if (!g.started)
+        return;
+    pthread_mutex_lock(&g_lock);
+    out->notes_indexed = g.note_count;
+    if (g.have_embedder)
+        snprintf(out->model, sizeof(out->model), "%s", g.embedder.id);
+    if (!atomic_load(&g.disabled)) {
+        out->phase = g.phase;
+        out->notes_total = g.notes_total;
+        out->notes_done = g.notes_done;
+        snprintf(out->current_title, sizeof(out->current_title), "%s", g.current_title);
+        if (g.phase == EMBED_PHASE_FAILED)
+            snprintf(out->error, sizeof(out->error), "%s", g.error);
+        if (g.phase == EMBED_PHASE_WAITING)
+            out->retry_at_ms = g.retry_at_ms;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void embed_set_enabled(bool enabled)
+{
+    pthread_mutex_lock(&g_lock);
+    bool was = !atomic_load(&g.disabled);
+    atomic_store(&g.disabled, !enabled);
+    atomic_store(&g.halt, atomic_load(&g.stop) || !enabled);
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    if (was != enabled)
+        atomic_store(&g.news, true);
+}
+
+bool embed_enabled(void) { return !atomic_load(&g.disabled); }
+
+void embed_rebuild(void)
+{
+    if (!g.started)
+        return;
+    pthread_mutex_lock(&g_lock);
+    atomic_store(&g.rebuild, true);
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
 }
 
 //! Whether a stored note can be compared with vectors of the current embedder. Caller holds g_lock.
@@ -1554,7 +1774,7 @@ EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* op
     EmbedState state = EMBED_PENDING;
     bool spawn = false;
     pthread_mutex_lock(&g_lock);
-    if (!g.have_embedder || g.note_count == 0) {
+    if (!g.have_embedder || g.note_count == 0 || atomic_load(&g.disabled)) {
         state = EMBED_UNAVAILABLE;
     } else {
         QueryVec* qv = qcache_find(hash);
@@ -1618,7 +1838,7 @@ static struct {
 
 int32_t embed_related(const char* path, float min_score, EmbedHit* out, int32_t max)
 {
-    if (!g.started || !path || !out || max <= 0)
+    if (!g.started || !path || !out || max <= 0 || atomic_load(&g.disabled))
         return 0;
     if (max > EMBED_RELATED_CACHE)
         max = EMBED_RELATED_CACHE;
@@ -1707,6 +1927,20 @@ void embed_note_renamed(const char* old_path, const char* new_path)
 bool embed_ready(void) { return false; }
 
 bool embed_poll(void) { return false; }
+
+void embed_status(EmbedStatus* out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->phase = EMBED_PHASE_OFF;
+}
+
+void embed_set_enabled(bool enabled) { (void)enabled; }
+
+bool embed_enabled(void) { return false; }
+
+void embed_rebuild(void) { }
 
 EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* opts, EmbedHit* hits,
     int32_t max, int32_t* count)
