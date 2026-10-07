@@ -21,6 +21,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <process.h>
+#define index_pid() ((long)_getpid())
+#else
+#include <unistd.h>
+#define index_pid() ((long)getpid())
+#endif
+#if !defined(__STDC_NO_ATOMICS__)
+#include <stdatomic.h>
+#endif
+
 #define EMBED_MAGIC "DAWNEMBD"
 #define EMBED_MAGIC_LEN 8
 
@@ -856,15 +867,29 @@ bool embed_index_write(const char* file_path, const EmbedIndex* idx)
     if (!embed_index_encode(idx, &data, &len))
         return false;
 
-    size_t n = strlen(file_path);
-    char* tmp = malloc(n + 5);
+    // A temp name of this process and this call, <file>.<pid>-<n>.tmp: two dawns (or two writes)
+    // never share one, and dawn_embed.c's cleanup knows the pattern.
+#if !defined(__STDC_NO_ATOMICS__)
+    static atomic_uint counter;
+    unsigned seq = atomic_fetch_add(&counter, 1u);
+#else
+    static unsigned counter; // no C11 atomics (MSVC): there is no index worker on Windows anyway
+    unsigned seq = counter++;
+#endif
+    size_t cap = strlen(file_path) + 48;
+    char* tmp = malloc(cap);
     if (!tmp) {
         free(data);
         return false;
     }
-    memcpy(tmp, file_path, n);
-    memcpy(tmp + n, ".tmp", 5);
+    int w = snprintf(tmp, cap, "%s.%ld-%u.tmp", file_path, index_pid(), seq);
+    if (w < 0 || (size_t)w >= cap) {
+        free(tmp);
+        free(data);
+        return false;
+    }
 
+    // No fsync: the index is a cache rebuilt from the notes, and syncing every write costs battery.
     bool ok = false;
     FILE* f = fopen(tmp, "wb");
     if (f) {

@@ -1,12 +1,14 @@
 // test_store.c - host tests for dawn's storage layer: dawn_fsio.c (atomic writes through symlinks,
-// reads, mkdir -p, no-replace moves, quarantine, hashing) in a scratch directory, and the history
-// CRDT (dawn_crdt.c: parse, serialize, merge). Both are linked alone; the CRDT's only ties to the
+// reads, mkdir -p, no-replace moves, quarantine, hashing) in a scratch directory, the note naming
+// rules (dawn_notepath.c: new-note suffixes, conflict copies, versions directories), and the history
+// CRDT (dawn_crdt.c: parse, serialize, merge). Each is linked alone; the CRDT's only ties to the
 // engine (the app global's backend clock, dawn_strdup, dawn_strncpy) are stubbed below.
 
 #define _GNU_SOURCE
 
 #include "dawn_crdt.h"
 #include "dawn_fsio.h"
+#include "dawn_notepath.h"
 #include "dawn_types.h"
 #include "dawn_utils.h"
 
@@ -508,6 +510,106 @@ static void test_hash_and_binary(void)
 
 // #endregion
 
+// #region Note names (dawn_notepath)
+
+static void test_notepath_numbered(void)
+{
+    char out[64];
+    const char* dir = "/notes/dawn/extra";
+    size_t dir_len = strlen("/notes/dawn"); // only a prefix of dir counts
+    CHECK(notepath_numbered(out, sizeof(out), dir, dir_len, '/', "2026-10-07_143005", 1));
+    CHECK(strcmp(out, "/notes/dawn/2026-10-07_143005.md") == 0);
+    CHECK(notepath_numbered(out, sizeof(out), dir, dir_len, '/', "2026-10-07_143005", 2));
+    CHECK(strcmp(out, "/notes/dawn/2026-10-07_143005-2.md") == 0);
+    CHECK(notepath_numbered(out, sizeof(out), dir, dir_len, '/', "eid-plans", 99));
+    CHECK(strcmp(out, "/notes/dawn/eid-plans-99.md") == 0);
+    CHECK(notepath_numbered(out, sizeof(out), "C:\\notes", 8, '\\', "a", 1));
+    CHECK(strcmp(out, "C:\\notes\\a.md") == 0);
+    CHECK(notepath_numbered(out, sizeof(out), NULL, 0, '/', "bare", 3));
+    CHECK(strcmp(out, "bare-3.md") == 0);
+
+    // Never a cut-short path: one byte short of fitting fails, an exact fit works.
+    const char* want = "/notes/dawn/x-2.md";
+    size_t need = strlen(want) + 1;
+    CHECK(!notepath_numbered(out, need - 1, dir, dir_len, '/', "x", 2));
+    CHECK(notepath_numbered(out, need, dir, dir_len, '/', "x", 2) && strcmp(out, want) == 0);
+    CHECK(!notepath_numbered(out, sizeof(out), dir, dir_len, '/', "", 1));
+}
+
+static void test_notepath_stamp_name(void)
+{
+    const char* ok[] = { "2026-10-07_143005", "2026-10-07_143005-2", "2026-10-07_143005-10", "2026-10-07_143005-99" };
+    for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++)
+        CHECK(notepath_is_stamp_name(ok[i], strlen(ok[i])));
+    const char* bad[] = { "2026-10-07_14300", "2026-10-07_143005-", "2026-10-07_143005-1", "2026-10-07_143005-0",
+        "2026-10-07_143005-02", "2026-10-07_143005-100", "2026-10-07_143005-2a", "2026-10-07_143005_2",
+        "2026-10-07-143005", "eid-plans", "" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        CHECK(!notepath_is_stamp_name(bad[i], strlen(bad[i])));
+    // The length given is what counts (the caller passes the name without ".md").
+    CHECK(notepath_is_stamp_name("2026-10-07_143005-3.md", strlen("2026-10-07_143005-3")));
+    CHECK(!notepath_is_stamp_name("2026-10-07_143005-3.md", strlen("2026-10-07_143005-3.md")));
+}
+
+static void test_notepath_conflict(void)
+{
+    char out[128];
+    CHECK(notepath_conflict(out, sizeof(out), "/n/2026-10-07_143005.md", "20261007-150102", 1));
+    CHECK(strcmp(out, "/n/2026-10-07_143005.conflict-20261007-150102.md") == 0);
+    CHECK(notepath_conflict(out, sizeof(out), "/n/eid plans.md", "20261007-150102", 3));
+    CHECK(strcmp(out, "/n/eid plans.conflict-20261007-150102-3.md") == 0);
+    // A file without .md keeps its whole name as the stem; the copy is still a .md.
+    CHECK(notepath_conflict(out, sizeof(out), "/n/todo.txt", "20261007-150102", 1));
+    CHECK(strcmp(out, "/n/todo.txt.conflict-20261007-150102.md") == 0);
+    CHECK(notepath_conflict(out, sizeof(out), "rel.md", "20261007-150102", 1));
+    CHECK(strcmp(out, "rel.conflict-20261007-150102.md") == 0);
+    CHECK(!notepath_conflict(out, sizeof(out), "/n/", "20261007-150102", 1));
+    CHECK(!notepath_conflict(out, 20, "/n/2026-10-07_143005.md", "20261007-150102", 1));
+
+    // Two copies made in one second: the second takes -2, and the copy never lands on the note.
+    char first[PATH_MAX], second[PATH_MAX];
+    CHECK(notepath_conflict(first, sizeof(first), P("note.md"), "20261007-150102", 1));
+    CHECK(notepath_conflict(second, sizeof(second), P("note.md"), "20261007-150102", 2));
+    CHECK(strcmp(first, second) != 0 && strcmp(first, P("note.md")) != 0);
+}
+
+static void test_notepath_version_dir(void)
+{
+    char out[160];
+    // Inside the notes directory: the plain name, as before.
+    CHECK(notepath_version_dir(out, sizeof(out), "/data/dawn/2026-10-07_143005.md", true, 0x1122334455667788ULL));
+    CHECK(strcmp(out, "2026-10-07_143005") == 0);
+    // Elsewhere: the low 32 bits of the path's hash keep same-named notes apart.
+    CHECK(notepath_version_dir(out, sizeof(out), "/home/u/a/todo.md", false, 0x1122334455667788ULL));
+    CHECK(strcmp(out, "todo-55667788") == 0);
+    CHECK(notepath_version_dir(out, sizeof(out), "/home/u/b/todo.md", false, 0xABCDEF0000000001ULL));
+    CHECK(strcmp(out, "todo-00000001") == 0);
+    // Unsafe characters become '_'; nothing left, or a dot name, is "note".
+    CHECK(notepath_version_dir(out, sizeof(out), "/x/a b:c*.md", true, 0));
+    CHECK(strcmp(out, "a_b_c_") == 0);
+    CHECK(notepath_version_dir(out, sizeof(out), "/x/", true, 0) && strcmp(out, "note") == 0);
+    CHECK(notepath_version_dir(out, sizeof(out), "/x/.md", true, 0) && strcmp(out, ".md") == 0); // as before: no stem cut from ".md" alone
+    CHECK(notepath_version_dir(out, sizeof(out), "/x/...md", true, 0) && strcmp(out, "note") == 0);
+    CHECK(notepath_version_dir(out, sizeof(out), "/x/..", true, 0) && strcmp(out, "note") == 0);
+    // A long UTF-8 name is cut to 127 bytes on a character boundary.
+    char longname[400] = "/x/";
+    for (int i = 0; i < 100; i++)
+        strcat(longname, "\xC3\xA9"); // U+00E9, two bytes
+    strcat(longname, ".md");
+    CHECK(notepath_version_dir(out, sizeof(out), longname, true, 0));
+    CHECK(strlen(out) == 126);
+    CHECK(notepath_version_dir(out, sizeof(out), longname, false, 0xFFFFFFFFULL));
+    CHECK(strlen(out) == 126 + 9 && strcmp(out + 126, "-ffffffff") == 0);
+    CHECK(!notepath_version_dir(out, 8, "/x/abcdefgh.md", true, 0));
+
+    size_t stem_len;
+    CHECK(strcmp(notepath_base("/a/b/c.md", &stem_len), "c.md") == 0 && stem_len == 1);
+    CHECK(strcmp(notepath_base("C:\\a\\d.md", &stem_len), "d.md") == 0 && stem_len == 1);
+    CHECK(strcmp(notepath_base("plain", &stem_len), "plain") == 0 && stem_len == 5);
+}
+
+// #endregion
+
 // #region CRDT
 
 static bool same_entry(const CrdtEntry* a, const CrdtEntry* b)
@@ -670,6 +772,10 @@ int main(void)
     test_move_no_replace();
     test_quarantine();
     test_hash_and_binary();
+    test_notepath_numbered();
+    test_notepath_stamp_name();
+    test_notepath_conflict();
+    test_notepath_version_dir();
     test_crdt_round_trip();
     test_crdt_parse_rejects();
     test_crdt_merge();

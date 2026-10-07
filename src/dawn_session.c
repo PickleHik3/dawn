@@ -14,6 +14,7 @@
 #include "dawn_fm.h"
 #include "dawn_gap.h"
 #include "dawn_nav.h"
+#include "dawn_notepath.h"
 #include "dawn_notice.h"
 #include "dawn_utils.h"
 
@@ -1590,28 +1591,32 @@ static bool file_nonempty(const char* path)
 
 bool session_ai_configured(void)
 {
-    const char* home = getenv("HOME");
-    const char* xdg = getenv("XDG_CONFIG_HOME");
-    char path[1024];
+    char path[PATH_MAX];
 
-    // ai.json naming the openai provider with a base_url
-    if (xdg && xdg[0])
-        snprintf(path, sizeof(path), "%s/dawn/ai.json", xdg);
-    else
-        snprintf(path, sizeof(path), "%s/.config/dawn/ai.json", home ? home : ".");
-    FILE* f = fopen(path, "r");
-    if (f) {
-        char buf[4096];
-        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-        fclose(f);
-        buf[n] = '\0';
-        if (strstr(buf, "\"openai\"") && strstr(buf, "\"base_url\""))
+    // ai.json naming the openai provider with a base_url, read whole and parsed the way libai's
+    // config_load() reads it (ai_bridge_openai.c), from the same directory (config_dir() takes
+    // XDG_CONFIG_HOME only when it is absolute, as libai does).
+    if (path_join(path, sizeof(path), config_dir(), "ai.json")) {
+        size_t size = 0;
+        char* text = DAWN_BACKEND(app)->read_file(path, &size);
+        cJSON* root = text ? cJSON_ParseWithLength(text, size) : NULL;
+        free(text);
+        bool openai = false;
+        if (cJSON_IsObject(root)) {
+            const cJSON* provider = cJSON_GetObjectItemCaseSensitive(root, "provider");
+            const cJSON* base_url = cJSON_GetObjectItemCaseSensitive(root, "base_url");
+            openai = cJSON_IsString(provider) && provider->valuestring && strcmp(provider->valuestring, "openai") == 0
+                && cJSON_IsString(base_url) && base_url->valuestring && base_url->valuestring[0];
+        }
+        cJSON_Delete(root);
+        if (openai)
             return true;
     }
 
     // The launcher's TAI endpoint
-    snprintf(path, sizeof(path), "%s/.launcherctl/endpoint", home ? home : ".");
-    return file_nonempty(path);
+    const char* home = getenv("HOME");
+    int w = snprintf(path, sizeof(path), "%s/.launcherctl/endpoint", home ? home : ".");
+    return w > 0 && (size_t)w < sizeof(path) && file_nonempty(path);
 }
 
 bool session_reading(void)
@@ -1662,17 +1667,34 @@ bool session_saw_whole_note(void)
 
 // #region Public: model choice
 
-//! Save the picked model in ~/.config/dawn/state.json, keeping whatever else the file holds.
+//! Save the picked model in ~/.config/dawn/state.json, keeping whatever else the file holds. A
+//! state.json that is not a JSON object is set aside as state.json.corrupt-<time> (with a notice)
+//! rather than replaced; one that cannot be read is left alone and the choice is not saved.
 static bool save_model_choice(const char* id)
 {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/state.json", config_dir());
+    if (!path_join(path, sizeof(path), config_dir(), "state.json"))
+        return false;
     size_t size = 0;
-    char* text = DAWN_BACKEND(app)->read_file(path, &size);
-    cJSON* root = text ? cJSON_Parse(text) : NULL;
+    bool missing = false;
+    char* text = store_read(path, &size, &missing);
+    if (!text && !missing)
+        return false;
+    bool blank = true;
+    for (size_t i = 0; text && i < size && blank; i++)
+        blank = text[i] == ' ' || text[i] == '\t' || text[i] == '\n' || text[i] == '\r';
+    cJSON* root = text && !blank ? cJSON_ParseWithLength(text, size) : NULL;
     free(text);
     if (!cJSON_IsObject(root)) {
         cJSON_Delete(root);
+        if (!blank) {
+            char moved[PATH_MAX];
+            if (!store_quarantine(path, moved, sizeof(moved)))
+                return false;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "state.json was damaged · kept as %s", notepath_base(moved, NULL));
+            notice_post(NOTICE_ERROR, msg);
+        }
         root = cJSON_CreateObject();
     }
     if (!root)

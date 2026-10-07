@@ -57,6 +57,18 @@ void render_toc(void);
 //! Render the search overlay
 void render_search(void);
 
+//! MODE_CONFLICT's choices, in the order the dialog lists them
+enum { CONFLICT_RELOAD, CONFLICT_OVERWRITE, CONFLICT_KEEP, CONFLICT_CHOICES };
+
+//! Render the dialog shown when the note changed elsewhere while it had unsaved edits here
+//! (MODE_CONFLICT): what happened, where the writer's text is kept, and the three choices.
+void render_conflict(void);
+
+//! The choice drawn on screen cell (row, col), both 1-based, in the dialog as last rendered: each
+//! choice owns its row across the dialog's width, so a tap anywhere on it counts.
+//! @return a CONFLICT_* value, or -1 for none
+int32_t render_conflict_hit(int32_t row, int32_t col);
+
 // #endregion
 
 #endif // DAWN_RENDER_H

@@ -110,7 +110,8 @@ bool embed_index_encode(const EmbedIndex* idx, uint8_t** out, size_t* out_len);
 //! corruption, another version) returns false and leaves *out zeroed.
 bool embed_index_decode(const uint8_t* data, size_t len, EmbedIndex* out);
 
-//! Write an index to file_path atomically: a sibling `.tmp` file, then rename over the old one.
+//! Write an index to file_path atomically: a sibling temp file `<file_path>.<pid>-<n>.tmp`,
+//! unique to this process and call, then a rename over the old one. Not synced: it is a cache.
 bool embed_index_write(const char* file_path, const EmbedIndex* idx);
 
 //! Read an index back. False when the file is missing, too big or fails embed_index_decode().
