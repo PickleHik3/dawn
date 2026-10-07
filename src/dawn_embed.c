@@ -382,17 +382,22 @@ static void load_cache(void)
 
 // #region Embedder
 
+//! The vector length an embedder's replies will have, when /v1/models says: the Matryoshka size
+//! asked for, else `_endpoint_dimensions`; 0 when it is learned from the first reply.
+static int32_t embedder_dims(const ai_embedder_t* emb) { return emb->dims > 0 ? emb->dims : emb->native_dims; }
+
 //! Record the embedder found by discovery; a change of id, revision or dims starts a new epoch
 //! (every note is then stale and query vectors are thrown away). Returns whether it changed.
 static bool set_embedder(const ai_embedder_t* emb)
 {
     pthread_mutex_lock(&g_lock);
     bool changed = !g.have_embedder || strcmp(g.embedder.id, emb->id) != 0
-        || strcmp(g.embedder.revision, emb->revision) != 0 || g.embedder.dims != emb->dims;
+        || strcmp(g.embedder.revision, emb->revision) != 0 || g.embedder.dims != emb->dims
+        || g.embedder.native_dims != emb->native_dims;
     g.have_embedder = true;
     if (changed) {
         g.embedder = *emb;
-        g.dims = emb->dims;
+        g.dims = embedder_dims(emb);
         g.epoch++;
     } else {
         g.embedder.max_batch = emb->max_batch;
@@ -946,7 +951,7 @@ static void* worker_main(void* arg)
             if (st == AI_EMBED_OK) {
                 if (set_embedder(&found) || !have) {
                     w.emb = found;
-                    w.dims = found.dims;
+                    w.dims = embedder_dims(&found);
                     w.calibrated = false;
                     w.token_scale = 1.0f;
                     next_scan = 0;

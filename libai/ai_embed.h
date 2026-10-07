@@ -40,6 +40,7 @@ typedef struct {
     char id[AI_EMBED_ID_MAX];
     char revision[AI_EMBED_REVISION_MAX]; //!< "" when the entry has none
     int32_t dims; //!< What to ask for: 256 when the model lists it, 0 to leave `dimensions` out
+    int32_t native_dims; //!< `_endpoint_dimensions` (what a reply holds when dims is 0), 0 if absent
     int32_t max_batch; //!< `_endpoint_max_batch`, clamped to 1..AI_EMBED_BATCH_MAX (16 if absent)
     int32_t context_window; //!< `_endpoint_context_window`, 0 if absent
 } ai_embedder_t;
@@ -69,8 +70,9 @@ typedef struct {
 //! Implemented in ai_bridge_openai.c, which owns the configuration.
 bool ai_openai_endpoint(char** base_url, char** api_key);
 
-//! Find the embedder in GET /v1/models: the first entry whose `_capabilities` include
-//! "text_embeddings", preferring an EmbeddingGemma. AI_EMBED_NONE when there is none.
+//! Find the embedder in GET /v1/models: among the entries whose `_capabilities` include
+//! "text_embeddings", the first whose id holds "embeddinggemma-2", else the first holding
+//! "embeddinggemma", else the first. AI_EMBED_NONE when there is none.
 ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* cancel);
 
 //! Whether a chat reply is being generated now (`runtime.activeGeneration` in GET /v1/ai/runtime).

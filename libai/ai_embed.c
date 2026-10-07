@@ -279,8 +279,10 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
     if (!root)
         return AI_EMBED_ERROR;
 
+    // EmbeddingGemma 2 beats EmbeddingGemma beats any other embedder; the first of a rank wins.
     cJSON* list = cJSON_IsArray(root) ? root : cJSON_GetObjectItemCaseSensitive(root, "data");
     cJSON* chosen = NULL;
+    int32_t chosen_rank = -1;
     cJSON* entry;
     cJSON_ArrayForEach(entry, list)
     {
@@ -288,12 +290,15 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
         if (!cJSON_IsString(id) || !id->valuestring || !id->valuestring[0]
             || strlen(id->valuestring) >= sizeof(out->id) || !has_embedding_capability(entry))
             continue;
-        if (!chosen)
+        int32_t rank = contains_ci(id->valuestring, "embeddinggemma-2") ? 2
+            : contains_ci(id->valuestring, "embeddinggemma")            ? 1
+                                                                        : 0;
+        if (rank > chosen_rank) {
             chosen = entry;
-        if (contains_ci(id->valuestring, "embeddinggemma")) {
-            chosen = entry;
-            break;
+            chosen_rank = rank;
         }
+        if (rank == 2)
+            break;
     }
     if (!chosen) {
         cJSON_Delete(root);
@@ -305,6 +310,9 @@ ai_embed_status_t ai_embed_find_embedder(ai_embedder_t* out, const atomic_bool* 
     if (cJSON_IsString(rev) && rev->valuestring && strlen(rev->valuestring) < sizeof(out->revision))
         snprintf(out->revision, sizeof(out->revision), "%s", rev->valuestring);
     out->dims = pick_dims(chosen);
+    cJSON* native = cJSON_GetObjectItemCaseSensitive(chosen, "_endpoint_dimensions");
+    if (cJSON_IsNumber(native) && native->valuedouble >= 1 && native->valuedouble <= MAX_DIMS)
+        out->native_dims = (int32_t)native->valuedouble;
     cJSON* batch = cJSON_GetObjectItemCaseSensitive(chosen, "_endpoint_max_batch");
     out->max_batch = DEFAULT_BATCH;
     if (cJSON_IsNumber(batch) && batch->valuedouble >= 1)
