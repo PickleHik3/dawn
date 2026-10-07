@@ -1167,18 +1167,6 @@ void render_search(void)
     platform_reset_attrs();
     set_bg(get_modal_bg());
 
-    // Search input
-    int32_t search_row = top + 4;
-    move_to(search_row, content_left);
-    set_fg(get_dim());
-    platform_write_str("find: ");
-    set_fg(get_accent());
-    for (int32_t i = 0; i < search->query_len && i < content_width - 8; i++) {
-        platform_write_char(search->query[i]);
-    }
-    set_fg(get_fg());
-    platform_write_char('_');
-
     // Results count: the exact matches and the "by meaning" rows
     char count_str[32];
     int32_t found = search->count + search->meaning_count;
@@ -1187,6 +1175,27 @@ void render_search(void)
     } else {
         snprintf(count_str, sizeof(count_str), "%d match%s", found, found == 1 ? "" : "es");
     }
+
+    // Search input: a query too long for the room left of the count shows its end, where the
+    // typing is
+    int32_t search_row = top + 4;
+    int32_t query_room = content_width - 6 - 1 - 1 - (int32_t)strlen(count_str); // "find: ", "_", a gap
+    size_t from = 0, qlen = (size_t)search->query_len;
+    while (from < qlen && hist_cols(search->query + from, qlen - from) > query_room) {
+        from++;
+        while (from < qlen && ((unsigned char)search->query[from] & 0xC0) == 0x80)
+            from++; // not in the middle of a character
+    }
+    int32_t query_cols = hist_cols(search->query + from, qlen - from);
+    move_to(search_row, content_left);
+    set_fg(get_dim());
+    platform_write_str("find: ");
+    set_fg(get_accent());
+    for (size_t i = from; i < qlen; i++)
+        platform_write_char(search->query[i]);
+    set_fg(get_fg());
+    platform_write_char('_');
+
     move_to(search_row, content_right - (int32_t)strlen(count_str));
     set_fg(get_dim());
     platform_write_str(count_str);
@@ -1324,7 +1333,7 @@ void render_search(void)
     hist_write_fit("↑↓:nav  enter:jump  ^n/^p:next/prev  esc:close", content_width);
 
     // Position cursor at search
-    move_to(search_row, content_left + 6 + search->query_len);
+    move_to(search_row, content_left + 6 + query_cols);
     platform_set_cursor_visible(true);
 }
 //! Where MODE_CONFLICT's choices were drawn last, for render_conflict_hit().
