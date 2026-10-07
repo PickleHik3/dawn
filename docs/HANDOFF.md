@@ -28,9 +28,21 @@ Checked on the phone (A065, cross build of this branch, launcher `embed-gemma2`)
 - The 440M `.litertlm` loads (about 6 s cold), honours `dimensions` 256, normalises, and the file
   carries no task-prefix template, so the launcher's prefixes are not doubled.
 
+Second device pass, done (launcher `dev` c8e453df4 = adec12b8f + the Android 16 display fix):
+- 440M indexes 20 notes in about a minute; Ctrl+S hits the right note for tomatoes, sourdough,
+  kubernetes, "books I want to read" (a real note) and "settings screen cleanup", and returns
+  nothing for an unrelated query. Status panel bottom-right, help page 3 switch (saved) and `r r`
+  rebuild all work.
+- Fixed here (b8fe373): TAI's /v1/models takes ~12-16 s on the phone, past the indexer's 8 s
+  discovery timeout, so indexing never started; now 30 s. A meaning row whose H1 equals the note
+  title no longer prints the name twice.
+
 Open:
-1. Finish the embedding pass on the phone: index real notes with the 440M, Ctrl+S across notes with
-   the new floors, the status panel and the help page's switch and rebuild.
+1. TAI is slow: /v1/models ~12-16 s and, under memory pressure, /v1/ai/runtime ~15 s. Launcher
+   side, unconfirmed by profiling: `TaiModelSpec.java:517` re-parses each Gemma `.litertlm`
+   (multi-GB) through `ModelInfo.from` 6-10 times per request with no cache. The chat bridge's
+   /models and /ai/runtime timeouts (`libai/ai_bridge_openai.c:378`, `:762`, 8 s) fail the same way.
+   Rebuild ran at ~2 notes/min while TAI was in that state.
 2. Ship: merge `embed-gemma2` into `tl` (ask first), then bump `DAWN_COMMIT` in
    `../tlstore/recipes/cross/build-dawn.sh`; push launcher `dev` when its owner agrees.
 3. A permanent refusal (e.g. `capability_not_supported` from a launcher without the `.litertlm`
