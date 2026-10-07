@@ -2137,19 +2137,49 @@ static bool posix_delete_file(const char* path)
     return unlink(path) == 0;
 }
 
+//! path in single quotes for the shell, each ' inside written as '\''. False if it does not fit.
+static bool shell_quote(const char* path, char* out, size_t out_size)
+{
+    size_t n = 0;
+    if (out_size < 3)
+        return false;
+    out[n++] = '\'';
+    for (const char* p = path; *p; p++) {
+        if (*p == '\'') {
+            if (n + 4 >= out_size)
+                return false;
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else {
+            if (n + 1 >= out_size)
+                return false;
+            out[n++] = *p;
+        }
+    }
+    if (n + 2 > out_size)
+        return false;
+    out[n++] = '\'';
+    out[n] = '\0';
+    return true;
+}
+
+//! The path goes through shell_quote, so a ' in a file name cannot end the quoting and run the
+//! rest as a command; a path that does not fit the command line is not opened at all, never cut.
 static void posix_reveal_in_finder(const char* path)
 {
+    char quoted[PATH_MAX * 4 + 3];
+    char cmd[sizeof(quoted) + 32];
+    if (!path || !shell_quote(path, quoted, sizeof(quoted)))
+        return;
 #ifdef __APPLE__
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "open -R '%s' 2>/dev/null", path);
-    int32_t r = system(cmd);
-    (void)r;
+    int32_t n = snprintf(cmd, sizeof(cmd), "open -R %s 2>/dev/null", quoted);
 #else
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "xdg-open '%s' 2>/dev/null &", path);
+    int32_t n = snprintf(cmd, sizeof(cmd), "xdg-open %s 2>/dev/null &", quoted);
+#endif
+    if (n < 0 || (size_t)n >= sizeof(cmd))
+        return;
     int32_t r = system(cmd);
     (void)r;
-#endif
 }
 
 static int64_t posix_clock(DawnClock kind)
