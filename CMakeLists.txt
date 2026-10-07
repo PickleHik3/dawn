@@ -206,6 +206,29 @@ if(NOT EMSCRIPTEN)
     if(NOT WIN32)
         target_link_libraries(test-embed PRIVATE m)
     endif()
+
+    # Test target for the storage layer: dawn_fsio (atomic writes, reads, mkdir -p, no-replace
+    # moves, quarantine) and the history CRDT, each linked alone with stubs for app and its helpers
+    if(NOT WIN32)
+        add_executable(test-store
+            tests/test_store.c
+            src/dawn_fsio.c
+            src/dawn_crdt.c
+            third-party/cJSON.c
+        )
+
+        target_include_directories(test-store PRIVATE src third-party)
+
+        target_compile_options(test-store PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-store PRIVATE ${SANITIZER_FLAGS})
+        endif()
+        target_link_libraries(test-store PRIVATE m)
+    endif()
 else()
     file(GLOB WEB_SRCS src/dawn*.c)
     list(FILTER WEB_SRCS EXCLUDE REGEX "dawn_args.c")
