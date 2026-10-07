@@ -8,9 +8,12 @@
 // callback, and an "alive" flag that embed_shutdown() waits on for a moment before freeing.
 //
 // Sharing. g_lock guards the store (the in-memory copy of every note's index), the embedder
-// description, the pending live texts and the query slot and cache. The worker is the store's
+// description, the pending live texts, the query slot and cache, and the status the worker
+// publishes for embed_status() (phase, progress, current title, error). The worker is the store's
 // only writer, so it reads the store without the lock and takes it only to swap entries in or
-// out; dawn's thread holds it while it ranks, which is a few milliseconds at most.
+// out; dawn's thread holds it while it ranks, which is a few milliseconds at most. The enable
+// switch and a rebuild request are atomics the worker reads at the top of its loop; every wait it
+// makes gives way to them, and a disabled worker's HTTP calls abort through the `halt` flag.
 
 #include "dawn_embed.h"
 
@@ -44,14 +47,19 @@ bool embed_hit_matches(const EmbedHit* hit, const char* slice, size_t slice_len)
 #define EMBED_DISCOVER_OK_MS (10 * 60 * 1000) //!< Look at /v1/models again (catches `_revision`)
 #define EMBED_DISCOVER_NONE_MS (5 * 60 * 1000) //!< ...and this often while there is no embedder
 #define EMBED_DISCOVER_FAIL_MS (60 * 1000) //!< ...and after the endpoint did not answer
+#define EMBED_SWAP_BACKOFF_MS 5000 //!< First wait before asking again when /v1/embeddings turns the
+                                   //!< embedder away a second time; doubles each time
+#define EMBED_SWAP_BACKOFF_MAX_MS (5 * 60 * 1000) //!< ...up to this
 #define EMBED_RESCAN_MS (5 * 60 * 1000) //!< Rescan the notes directory for changed files
 #define EMBED_IDLE_WAIT_MS 30000 //!< Longest sleep with nothing to do
 #define EMBED_BUSY_POLL_MS 3000 //!< How often to re-check a running chat reply
 #define EMBED_MAX_RETRIES 6 //!< Retries of one batch before the note waits for the next scan
+#define EMBED_PREFIX_TOKENS 64 //!< Room left in the model's window for its prefix and the title
 #define EMBED_QUERY_MAX 512 //!< Query bytes kept (longer queries are cut)
 #define EMBED_QUERY_DEBOUNCE_MS 250 //!< A query goes out once typing pauses this long
 #define EMBED_QUERY_CACHE 4 //!< Query vectors remembered
-#define EMBED_QUERY_RETRY_MS 10000 //!< A failed query may be tried again after this
+#define EMBED_QUERY_RETRY_MS 10000 //!< A failed query may be tried again after this (or Retry-After)
+#define EMBED_QUERY_WAIT_MAX_MS 15000 //!< Longest Retry-After a query waits out before resending
 #define EMBED_RELATED_CACHE 8 //!< embed_related() answers remembered for the current note
 
 // #endregion
@@ -76,7 +84,9 @@ typedef struct {
     uint64_t hash;
     uint64_t epoch; //!< g.epoch when it was embedded; any other epoch makes it unusable
     bool failed;
+    bool announced; //!< A failure whose retry time came: embed_poll() has said so
     int64_t done_ms;
+    int64_t retry_at_ms; //!< When a failure may be tried again
     int64_t used; //!< LRU tick
     int32_t dims;
     float* vec;
@@ -91,6 +101,9 @@ static struct {
     atomic_bool worker_alive;
     atomic_bool query_alive;
     atomic_bool news; //!< For embed_poll()
+    atomic_bool disabled; //!< embed_set_enabled(false)
+    atomic_bool halt; //!< stop || disabled: the worker's cancel flag for its HTTP calls
+    atomic_bool rebuild; //!< embed_rebuild() asked; the worker clears it
 
     // Set once by embed_start(), read-only afterwards.
     char notes_dir[EMBED_PATH_MAX];
@@ -104,6 +117,11 @@ static struct {
     int32_t note_cap;
     uint64_t generation; //!< Bumped on every store change
     bool have_embedder;
+    char error[AI_EMBED_ERROR_MAX]; //!< Why indexing stopped for good (an error code), "" when it runs
+    EmbedPhase phase; //!< What the worker is doing, for embed_status()
+    int32_t notes_total, notes_done; //!< This pass
+    char current_title[EMBED_TITLE_MAX]; //!< The note being embedded, "" otherwise
+    int64_t retry_at_ms; //!< For EMBED_PHASE_WAITING, else 0
     ai_embedder_t embedder;
     int32_t dims; //!< Vector length in use: embedder.dims, or learned from the first reply
     uint64_t epoch; //!< Bumped whenever the embedder's id, revision or dims change
@@ -138,10 +156,11 @@ static void sleep_ms(int64_t ms)
     nanosleep(&ts, NULL);
 }
 
-//! Sleep up to ms, waking early for embed_note_changed() or embed_shutdown().
+//! Sleep up to ms, waking early for embed_note_changed(), embed_set_enabled(), embed_rebuild() or
+//! embed_shutdown().
 static void worker_wait(int64_t ms)
 {
-    if (ms <= 0 || atomic_load(&g.stop))
+    if (ms <= 0 || atomic_load(&g.stop) || atomic_load(&g.rebuild))
         return;
     if (ms > EMBED_IDLE_WAIT_MS)
         ms = EMBED_IDLE_WAIT_MS;
@@ -154,8 +173,17 @@ static void worker_wait(int64_t ms)
         until.tv_nsec -= 1000000000L;
     }
     pthread_mutex_lock(&g_lock);
-    if (!atomic_load(&g.stop))
+    if (!atomic_load(&g.stop) && !atomic_load(&g.rebuild))
         pthread_cond_timedwait(&g_wake, &g_lock, &until);
+    pthread_mutex_unlock(&g_lock);
+}
+
+//! While disabled: sleep until embed_set_enabled(true), embed_rebuild() or embed_shutdown().
+static void off_wait(void)
+{
+    pthread_mutex_lock(&g_lock);
+    while (atomic_load(&g.disabled) && !atomic_load(&g.stop) && !atomic_load(&g.rebuild))
+        pthread_cond_wait(&g_wake, &g_lock);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -192,6 +220,45 @@ static void mkdir_p(const char* path)
         buf[i] = '/';
     }
     mkdir(buf, 0700);
+}
+
+// #endregion
+
+// #region Status
+
+//! Publish the worker's phase; embed_poll() reports a change.
+static void status_phase(EmbedPhase phase, int64_t retry_at_ms)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = g.phase != phase || g.retry_at_ms != retry_at_ms;
+    g.phase = phase;
+    g.retry_at_ms = retry_at_ms;
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
+}
+
+//! Publish how far this pass has come.
+static void status_progress(int32_t done, int32_t total)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = g.notes_done != done || g.notes_total != total;
+    g.notes_done = done;
+    g.notes_total = total;
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
+}
+
+//! Publish the title of the note being embedded ("" when none).
+static void status_title(const char* title)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = strcmp(g.current_title, title) != 0;
+    snprintf(g.current_title, sizeof(g.current_title), "%s", title);
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
 }
 
 // #endregion
@@ -342,6 +409,37 @@ static bool index_is_current(const EmbedIndex* idx, const ai_embedder_t* emb, in
         && (dims == 0 || idx->dims == dims);
 }
 
+//! embed_rebuild(): empty the store and delete every index file (and leftover .tmp) in the cache.
+//! Worker thread only.
+static void store_clear(void)
+{
+    pthread_mutex_lock(&g_lock);
+    StoreNote** notes = g.notes;
+    int32_t count = g.note_count;
+    g.notes = NULL;
+    g.note_count = g.note_cap = 0;
+    g.generation++;
+    pthread_mutex_unlock(&g_lock);
+    for (int32_t i = 0; i < count; i++)
+        store_note_free(notes[i]);
+    free(notes);
+
+    DIR* dir = opendir(g.cache_dir);
+    if (dir) {
+        struct dirent* e;
+        while ((e = readdir(dir)) != NULL) {
+            size_t n = strlen(e->d_name);
+            char file[EMBED_PATH_MAX];
+            bool ours = (n > 4 && strcmp(e->d_name + n - 4, ".idx") == 0)
+                || (n > 8 && strcmp(e->d_name + n - 8, ".idx.tmp") == 0);
+            if (ours && join_path(file, sizeof(file), g.cache_dir, e->d_name))
+                remove(file);
+        }
+        closedir(dir);
+    }
+    atomic_store(&g.news, true);
+}
+
 //! Read every index file in the cache into the store; a file that fails to read (truncated,
 //! corrupt, another version, misnamed) is deleted and its note rebuilt later.
 static void load_cache(void)
@@ -382,17 +480,22 @@ static void load_cache(void)
 
 // #region Embedder
 
+//! The vector length an embedder's replies will have, when /v1/models says: the Matryoshka size
+//! asked for, else `_endpoint_dimensions`; 0 when it is learned from the first reply.
+static int32_t embedder_dims(const ai_embedder_t* emb) { return emb->dims > 0 ? emb->dims : emb->native_dims; }
+
 //! Record the embedder found by discovery; a change of id, revision or dims starts a new epoch
 //! (every note is then stale and query vectors are thrown away). Returns whether it changed.
 static bool set_embedder(const ai_embedder_t* emb)
 {
     pthread_mutex_lock(&g_lock);
     bool changed = !g.have_embedder || strcmp(g.embedder.id, emb->id) != 0
-        || strcmp(g.embedder.revision, emb->revision) != 0 || g.embedder.dims != emb->dims;
+        || strcmp(g.embedder.revision, emb->revision) != 0 || g.embedder.dims != emb->dims
+        || g.embedder.native_dims != emb->native_dims;
     g.have_embedder = true;
     if (changed) {
         g.embedder = *emb;
-        g.dims = emb->dims;
+        g.dims = embedder_dims(emb);
         g.epoch++;
     } else {
         g.embedder.max_batch = emb->max_batch;
@@ -402,6 +505,28 @@ static bool set_embedder(const ai_embedder_t* emb)
     if (changed)
         atomic_store(&g.news, true);
     return changed;
+}
+
+//! The embedder kept its id and revision but its replies changed length (it lists no sizes, so
+//! the length was learned): a new epoch at the new length.
+static void adopt_dims(int32_t dims)
+{
+    pthread_mutex_lock(&g_lock);
+    g.dims = dims;
+    g.epoch++;
+    pthread_mutex_unlock(&g_lock);
+    atomic_store(&g.news, true);
+}
+
+//! Record (code) or clear (NULL) the permanent failure that stops indexing.
+static void set_failure(const char* code)
+{
+    pthread_mutex_lock(&g_lock);
+    bool changed = strcmp(g.error, code ? code : "") != 0;
+    snprintf(g.error, sizeof(g.error), "%s", code ? code : "");
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        atomic_store(&g.news, true);
 }
 
 static void clear_embedder(void)
@@ -525,7 +650,10 @@ static void scan_build(ScanList* out, const ai_embedder_t* emb, int32_t dims)
         int32_t at = store_find(se->path);
         if (at >= 0) {
             const EmbedIndex* idx = &g.notes[at]->idx;
-            if (index_is_current(idx, emb, dims) && idx->mtime == se->mtime && idx->size == se->size) {
+            // A note stored as "Untitled" (before such notes were named by their content) is
+            // listed once more; its text is unchanged, so that costs no request.
+            if (index_is_current(idx, emb, dims) && idx->mtime == se->mtime && idx->size == se->size
+                && strcmp(idx->title, "Untitled") != 0) {
                 free(se->path);
                 continue;
             }
@@ -551,12 +679,16 @@ static void scan_build(ScanList* out, const ai_embedder_t* emb, int32_t dims)
 
 // #region Indexing one note
 
-typedef enum { JOB_DONE, JOB_FAILED, JOB_NO_EMBEDDER, JOB_CANCELLED } JobResult;
+//! How indexing one note ended. JOB_FAILED is the note's own problem (it waits for the next scan);
+//! JOB_NO_EMBEDDER and JOB_REFUSED are the embedder's (the note goes back in line).
+typedef enum { JOB_DONE, JOB_FAILED, JOB_NO_EMBEDDER, JOB_REFUSED, JOB_CANCELLED } JobResult;
 
 //! What the worker carries from note to note.
 typedef struct {
     ai_embedder_t emb;
     int32_t dims; //!< 0 until the first reply when the model lists no Matryoshka sizes
+    int32_t reply_dims; //!< The length of a reply that did not match dims, 0 for none
+    char error[AI_EMBED_ERROR_MAX]; //!< The code of the last AI_EMBED_REFUSED
     float token_scale; //!< The model's tokens over the estimate
     bool calibrated; //!< /v1/tokenize was tried for this embedder
     int64_t last_request_ms;
@@ -564,25 +696,45 @@ typedef struct {
     bool busy;
 } Worker;
 
-//! Block while a chat reply is generating (checked at most every EMBED_BUSY_POLL_MS). False when
-//! asked to stop.
+//! Whether the worker should drop what it is waiting for: stopping, disabled, or a rebuild asked.
+static bool interrupted(void) { return atomic_load(&g.halt) || atomic_load(&g.rebuild); }
+
+//! Block while a chat reply is generating (checked at most every EMBED_BUSY_POLL_MS), showing
+//! EMBED_PHASE_PAUSED meanwhile. False when interrupted().
 static bool wait_until_idle(Worker* w)
 {
     for (;;) {
-        if (atomic_load(&g.stop))
+        if (interrupted())
             return false;
         int64_t now = now_ms();
         if (now - w->busy_checked_ms >= EMBED_BUSY_POLL_MS || w->busy_checked_ms == 0) {
             bool active = false;
-            ai_embed_status_t st = ai_embed_generation_active(&active, &g.stop);
+            ai_embed_status_t st = ai_embed_generation_active(&active, &g.halt);
             if (st == AI_EMBED_CANCELLED)
                 return false;
             w->busy = st == AI_EMBED_OK && active;
             w->busy_checked_ms = now_ms();
         }
-        if (!w->busy)
+        if (!w->busy) {
+            status_phase(EMBED_PHASE_INDEXING, 0);
             return true;
+        }
+        status_phase(EMBED_PHASE_PAUSED, 0);
         worker_wait(EMBED_BUSY_POLL_MS);
+    }
+}
+
+//! Wait until the monotonic time until_ms (worker_wait() alone stops at EMBED_IDLE_WAIT_MS).
+//! False when interrupted().
+static bool wait_until(int64_t until_ms)
+{
+    for (;;) {
+        if (interrupted())
+            return false;
+        int64_t left = until_ms - now_ms();
+        if (left <= 0)
+            return true;
+        worker_wait(left);
     }
 }
 
@@ -599,7 +751,7 @@ static void calibrate(Worker* w, const char* body, size_t len)
         n--;
     int32_t est = embed_estimate_tokens(body, n);
     int32_t tokens = 0;
-    if (est > 0 && ai_embed_tokenize(w->emb.id, body, n, &tokens, &g.stop) == AI_EMBED_OK && tokens > 0) {
+    if (est > 0 && ai_embed_tokenize(w->emb.id, body, n, &tokens, &g.halt) == AI_EMBED_OK && tokens > 0) {
         float s = (float)tokens / (float)est;
         w->token_scale = s < 0.5f ? 0.5f : s > 3.0f ? 3.0f : s;
     }
@@ -620,10 +772,7 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
     for (;;) {
         if (!wait_until_idle(w))
             return JOB_CANCELLED;
-        int64_t gap = w->last_request_ms + EMBED_REQUEST_GAP_MS - now_ms();
-        if (gap > 0)
-            worker_wait(gap);
-        if (atomic_load(&g.stop))
+        if (!wait_until(w->last_request_ms + EMBED_REQUEST_GAP_MS))
             return JOB_CANCELLED;
 
         ai_embed_request_t req = {
@@ -636,11 +785,13 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
             .title = title,
         };
         int32_t retry_ms = 0;
-        ai_embed_status_t st = ai_embed_vectors(&req, res, &retry_ms, &g.stop);
+        ai_embed_status_t st = ai_embed_vectors(&req, res, &retry_ms, &g.halt);
         w->last_request_ms = now_ms();
         switch (st) {
         case AI_EMBED_OK:
             if (res->dims < 1 || res->dims > EMBED_MAX_DIMS || (w->dims > 0 && res->dims != w->dims)) {
+                if (res->dims >= 1 && res->dims <= EMBED_MAX_DIMS)
+                    w->reply_dims = res->dims;
                 ai_embed_result_free(res);
                 return JOB_NO_EMBEDDER; // the model changed under us: look again
             }
@@ -651,18 +802,26 @@ static JobResult embed_batch(Worker* w, const char* const* texts, const size_t* 
             return JOB_NO_EMBEDDER;
         case AI_EMBED_REJECTED:
             return JOB_FAILED;
+        case AI_EMBED_REFUSED:
+            snprintf(w->error, sizeof(w->error), "%s", res->error[0] ? res->error : "refused");
+            return JOB_REFUSED;
         case AI_EMBED_RETRY:
         case AI_EMBED_ERROR:
             break;
         }
         if (++retries > EMBED_MAX_RETRIES)
             return JOB_FAILED;
-        worker_wait(retry_ms > 0 ? retry_ms : 10000);
+        int64_t until = now_ms() + (retry_ms > 0 ? retry_ms : 10000);
+        status_phase(EMBED_PHASE_WAITING, until);
+        if (!wait_until(until))
+            return JOB_CANCELLED;
+        status_phase(EMBED_PHASE_INDEXING, 0);
     }
 }
 
 //! Read a note file: its title and its body (frontmatter removed, LF endings), malloc'd.
-static char* read_note(const char* path, char* title, size_t title_size, size_t* body_len)
+static char* read_note(const char* path, char* title, size_t title_size, EmbedTitleSource* source,
+    size_t* body_len)
 {
     *body_len = 0;
     FILE* f = fopen(path, "rb");
@@ -682,7 +841,7 @@ static char* read_note(const char* path, char* title, size_t title_size, size_t*
         free(raw);
         return NULL;
     }
-    embed_note_title(raw, n, path, title, title_size);
+    *source = embed_note_title(raw, n, path, title, title_size);
     size_t off = embed_body_offset(raw, n);
     size_t len = n - off;
     memmove(raw, raw + off, len);
@@ -692,26 +851,25 @@ static char* read_note(const char* path, char* title, size_t title_size, size_t*
     return raw;
 }
 
-//! Bring one note's index up to date. body is taken over (NULL: read the file). Pieces whose text
-//! and heading are unchanged keep their vectors; only the rest are embedded.
-static JobResult index_note(Worker* w, const char* path, char* body, size_t len, const char* live_title,
-    int64_t mtime, uint64_t size)
+//! The most tokens a piece may hold for the embedder in use: room for the prefix and title inside
+//! `_endpoint_context_window` when that is below the chunker's default cap, else 0 (the default).
+static int32_t piece_token_cap(const Worker* w)
 {
-    char title[EMBED_TITLE_MAX];
-    if (!body) {
-        body = read_note(path, title, sizeof(title), &len);
-        if (!body)
-            return JOB_FAILED;
-    } else if (live_title && live_title[0]) {
-        snprintf(title, sizeof(title), "%s", live_title);
-    } else {
-        embed_note_title(body, len, path, title, sizeof(title));
-    }
-    if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
-        free(body);
-        return JOB_FAILED;
-    }
+    int32_t window = w->emb.context_window;
+    if (window <= 0 || window - EMBED_PREFIX_TOKENS >= EMBED_MAX_TOKENS)
+        return 0;
+    return window - EMBED_PREFIX_TOKENS > 1 ? window - EMBED_PREFIX_TOKENS : 1;
+}
 
+//! One pass over a note's body (borrowed): cut it into pieces at token scale `scale`, keep the
+//! vectors of pieces whose text and heading are unchanged, embed the rest and store the result.
+//! title is what hits show; note_heading is the `title` sent with pieces above the first heading
+//! ("" for none). force skips the shortcut for an unchanged body. *truncated gets how many pieces
+//! the server cut to fit its window.
+static JobResult index_pass(Worker* w, const char* path, const char* body, size_t len, const char* title,
+    const char* note_heading, int64_t mtime, uint64_t size, float scale, bool force, int32_t* truncated)
+{
+    *truncated = 0;
     uint64_t body_hash = embed_hash(body, len);
     int32_t at = store_find(path);
     const EmbedIndex* old = at >= 0 ? &g.notes[at]->idx : NULL;
@@ -728,8 +886,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     idx.size = size;
 
     // Same text, same model: only the file's metadata (or the title) moved. No request needed.
-    if (reusable && old->body_hash == body_hash && old->body_len == len) {
-        free(body);
+    if (!force && reusable && old->body_hash == body_hash && old->body_len == len) {
         idx.dims = old->dims;
         idx.count = old->count;
         if (idx.count > 0) {
@@ -748,11 +905,9 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     calibrate(w, body, len);
     int32_t cap = (int32_t)(len / 4 + 8 < EMBED_MAX_PIECES ? len / 4 + 8 : EMBED_MAX_PIECES);
     idx.chunks = malloc(sizeof(EmbedChunk) * (size_t)cap);
-    if (!idx.chunks) {
-        free(body);
+    if (!idx.chunks)
         return JOB_FAILED;
-    }
-    idx.count = embed_chunk(body, len, w->token_scale, idx.chunks, cap);
+    idx.count = embed_chunk(body, len, scale, piece_token_cap(w), idx.chunks, cap);
     idx.dims = w->dims;
 
     JobResult result = JOB_DONE;
@@ -795,9 +950,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
     }
 
     // Embed the rest, in batches of consecutive pieces that share one heading (a request carries
-    // one `title`). Pieces above the first heading go under the note's title, unless it is dawn's
-    // placeholder, which would only add noise ("none" is what the model was trained with).
-    const char* note_heading = strcmp(title, "Untitled") == 0 ? "" : title;
+    // one `title`). Pieces above the first heading go under note_heading.
     for (int32_t i = 0; i < idx.count && result == JOB_DONE;) {
         if (have[i]) {
             i++;
@@ -843,6 +996,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
             }
         }
         if (res.dims != idx.dims) {
+            w->reply_dims = res.dims;
             ai_embed_result_free(&res);
             result = JOB_NO_EMBEDDER;
             break;
@@ -853,6 +1007,7 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
             embed_normalize(dst, idx.dims);
             have[slots[k]] = true;
         }
+        *truncated += res.truncated;
         // The model's count includes the prefix; close enough to steer the next split.
         if (res.tokens > 0 && est > 0) {
             float s = (float)res.tokens / (float)est;
@@ -870,7 +1025,6 @@ static JobResult index_note(Worker* w, const char* path, char* body, size_t len,
         goto fail;
     }
     free(have);
-    free(body);
 
 store: {
     char name[32], file[EMBED_PATH_MAX];
@@ -887,9 +1041,48 @@ store: {
 
 fail:
     free(have);
-    free(body);
     embed_index_free(&idx);
     return result;
+}
+
+//! Bring one note's index up to date. live_body is the note's text when dawn handed it over
+//! (borrowed), or NULL to read the file. Pieces whose text and heading are unchanged keep their
+//! vectors; only the rest are embedded. When the server cut a piece to fit its window, the result
+//! is kept but the note is cut again at a token scale 25% higher (once), so its pieces come out
+//! small enough.
+static JobResult index_note(Worker* w, const char* path, const char* live_body, size_t len,
+    const char* live_title, int64_t mtime, uint64_t size)
+{
+    // dawn names every new note "Untitled": that is no title, so it falls through to the note's
+    // heading, its first line or its file name (embed_note_title()).
+    char title[EMBED_TITLE_MAX];
+    EmbedTitleSource source = EMBED_TITLE_FRONTMATTER;
+    char* owned = NULL;
+    const char* body = live_body;
+    if (!body) {
+        body = owned = read_note(path, title, sizeof(title), &source, &len);
+        if (!body)
+            return JOB_FAILED;
+    } else if (live_title && live_title[0] && strcmp(live_title, "Untitled") != 0) {
+        snprintf(title, sizeof(title), "%s", live_title);
+    } else {
+        source = embed_note_title(body, len, path, title, sizeof(title));
+    }
+    if (len > EMBED_NOTE_MAX || strlen(path) >= EMBED_PATH_MAX) {
+        free(owned);
+        return JOB_FAILED;
+    }
+    status_title(title);
+    // A title made from the first line would only repeat that line to the model.
+    const char* note_heading = source == EMBED_TITLE_FIRST_LINE ? "" : title;
+
+    int32_t truncated = 0;
+    JobResult r = index_pass(w, path, body, len, title, note_heading, mtime, size, w->token_scale, false, &truncated);
+    if (r == JOB_DONE && truncated > 0)
+        r = index_pass(w, path, body, len, title, note_heading, mtime, size, w->token_scale * 1.25f, true,
+            &truncated);
+    free(owned);
+    return r;
 }
 
 // #endregion
@@ -924,6 +1117,38 @@ static bool take_live(LiveText* out, int64_t now, int64_t* next_ms)
     return found;
 }
 
+static void live_free(LiveText* t)
+{
+    free(t->path);
+    free(t->title);
+    free(t->body);
+    memset(t, 0, sizeof(*t));
+}
+
+//! Put a live text the embedder could not take back at the front of the queue (taken over), unless
+//! a newer text for its path has arrived since or the queue is full: then it is dropped, and the
+//! newer text or the next scan stands in for it.
+static void live_requeue(LiveText* t)
+{
+    bool kept = false;
+    pthread_mutex_lock(&g_lock);
+    bool newer = false;
+    for (int32_t i = 0; i < g.live_count; i++)
+        if (strcmp(g.live[i].path, t->path) == 0)
+            newer = true;
+    if (!newer && g.live_count < EMBED_LIVE_MAX) {
+        memmove(&g.live[1], &g.live[0], sizeof(LiveText) * (size_t)g.live_count);
+        g.live[0] = *t;
+        g.live_count++;
+        kept = true;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (kept)
+        memset(t, 0, sizeof(*t));
+    else
+        live_free(t);
+}
+
 static void* worker_main(void* arg)
 {
     (void)arg;
@@ -932,58 +1157,132 @@ static void* worker_main(void* arg)
 
     Worker w = { .token_scale = 1.0f };
     bool have = false;
+    bool stalled = false; //!< /v1/embeddings turned the embedder away: index nothing until discovery
+    bool failed = false; //!< A permanent refusal: index nothing until a discovery succeeds
+    bool was_off = false; //!< Disabled until now: look at everything afresh
+    bool none = false; //!< The last discovery found no embedder
     int64_t next_discover = 0, next_scan = 0;
+    int64_t swap_backoff = 0; //!< Wait before the next rediscovery after a turn-away (0: at once)
+    int32_t pass_total = 0, pass_done = 0; //!< Notes in this pass and how many are through
     ScanList scan = { 0 };
 
     while (!atomic_load(&g.stop)) {
+        if (atomic_exchange(&g.rebuild, false)) {
+            // embed_rebuild(): forget every vector, then look at the embedder and every note anew.
+            store_clear();
+            scan_free(&scan);
+            w.calibrated = false;
+            w.token_scale = 1.0f;
+            next_discover = next_scan = 0;
+            swap_backoff = 0;
+            pass_total = pass_done = 0;
+            status_progress(0, 0);
+        }
+        if (atomic_load(&g.disabled)) {
+            // embed_set_enabled(false): send nothing; embed_set_enabled(true) wakes us.
+            status_phase(EMBED_PHASE_OFF, 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
+            was_off = true;
+            off_wait();
+            continue;
+        }
+        if (was_off) {
+            was_off = false;
+            next_discover = next_scan = 0; // the endpoint and the notes may have moved on meanwhile
+        }
+
         apply_renames();
         int64_t now = now_ms();
         if (now >= next_discover) {
+            // A routine look while indexing runs keeps the phase; otherwise this is the news.
+            if (!have || stalled || failed)
+                status_phase(EMBED_PHASE_DISCOVERING, 0);
             ai_embedder_t found;
-            ai_embed_status_t st = ai_embed_find_embedder(&found, &g.stop);
+            ai_embed_status_t st = ai_embed_find_embedder(&found, &g.halt);
             if (st == AI_EMBED_CANCELLED)
-                break;
+                continue; // stopping or disabled: the loop's top decides
             if (st == AI_EMBED_OK) {
-                if (set_embedder(&found) || !have) {
+                // Only a different embedder (or one back from being gone) means a rebuild and a
+                // rescan; the same one listed again just lets the stalled work carry on.
+                bool changed = set_embedder(&found);
+                int32_t dims = embedder_dims(&found);
+                if (!changed && have && dims == 0 && w.reply_dims > 0 && w.reply_dims != w.dims) {
+                    dims = w.reply_dims; // swapped behind the same name: rebuild at the new length
+                    adopt_dims(dims);
+                    changed = true;
+                }
+                w.reply_dims = 0;
+                none = false;
+                if (changed || !have) {
                     w.emb = found;
-                    w.dims = found.dims;
+                    w.dims = dims;
                     w.calibrated = false;
                     w.token_scale = 1.0f;
                     next_scan = 0;
+                    swap_backoff = 0;
                 }
                 w.emb.max_batch = found.max_batch;
+                w.emb.context_window = found.context_window;
                 have = true;
+                stalled = false;
+                failed = false;
+                set_failure(NULL);
                 next_discover = now + EMBED_DISCOVER_OK_MS;
             } else if (st == AI_EMBED_NONE) {
                 clear_embedder();
                 have = false;
+                none = true;
+                stalled = false;
+                failed = false;
+                set_failure(NULL);
                 next_discover = now + EMBED_DISCOVER_NONE_MS;
+            } else if (st == AI_EMBED_REFUSED) {
+                failed = true; // the key is wrong: nothing else will work either
+                set_failure("unauthorized");
+                next_discover = now + EMBED_DISCOVER_FAIL_MS;
             } else {
                 next_discover = now + EMBED_DISCOVER_FAIL_MS;
             }
         }
-        if (!have) {
+        if (!have || stalled || failed) {
+            EmbedPhase phase = failed ? EMBED_PHASE_FAILED
+                : !have && none       ? EMBED_PHASE_NO_EMBEDDER
+                                      : EMBED_PHASE_WAITING;
+            status_phase(phase, phase == EMBED_PHASE_WAITING ? next_discover : 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
             worker_wait(next_discover - now);
             continue;
         }
         if (now >= next_scan) {
             scan_build(&scan, &w.emb, w.dims);
             next_scan = now + EMBED_RESCAN_MS;
+            pass_total = scan.count;
+            pass_done = 0;
         }
 
         JobResult r;
-        LiveText live;
+        LiveText live = { 0 };
+        bool is_live = false;
         int64_t live_wait;
         if (take_live(&live, now, &live_wait)) {
             // Live text has no file time: a later scan re-reads the file and, finding the same
             // text, only records its time.
+            is_live = true;
+            pass_total++;
+            status_phase(EMBED_PHASE_INDEXING, 0);
+            status_progress(pass_done, pass_total);
             r = index_note(&w, live.path, live.body, live.len, live.title, 0, 0);
-            free(live.path);
-            free(live.title);
         } else if (scan.next < scan.count) {
             ScanEntry* se = &scan.items[scan.next++];
+            status_phase(EMBED_PHASE_INDEXING, 0);
+            status_progress(pass_done, pass_total);
             r = index_note(&w, se->path, NULL, 0, NULL, se->mtime, se->size);
         } else {
+            status_phase(EMBED_PHASE_IDLE, 0);
+            status_progress(0, 0);
+            pass_total = pass_done = 0;
             int64_t wait = live_wait;
             if (next_scan - now < wait)
                 wait = next_scan - now;
@@ -992,13 +1291,43 @@ static void* worker_main(void* arg)
             worker_wait(wait);
             continue;
         }
+        status_title("");
+
+        // A note the embedder turned away (or that embed_set_enabled(false) interrupted) is not
+        // the note's fault: it goes back in line.
+        bool again = r == JOB_NO_EMBEDDER || r == JOB_REFUSED || (r == JOB_CANCELLED && !atomic_load(&g.stop));
+        if (again && is_live) {
+            live_requeue(&live);
+            pass_total--; // counted again when it is taken
+        } else if (again) {
+            scan.next--;
+        } else {
+            if (is_live)
+                live_free(&live);
+            pass_done++;
+            status_progress(pass_done, pass_total);
+        }
 
         if (r == JOB_CANCELLED)
-            break;
+            continue; // stopping or disabled: the loop's top decides
+        if (r == JOB_DONE)
+            swap_backoff = 0;
+        if (r == JOB_REFUSED) {
+            // 401, or a 400 naming the model's setup (embedding_tokenizer_missing,
+            // invalid_dimensions, capability_not_supported): every note would fail the same way.
+            // Stop until discovery, on its usual timer, finds the endpoint working again.
+            failed = true;
+            set_failure(w.error);
+        }
         if (r == JOB_NO_EMBEDDER) {
-            clear_embedder();
-            have = false;
-            next_discover = now_ms() + 5000; // look again soon: it may have been replaced
+            // 404 model_not_found, or vectors of another length: the model may have been swapped.
+            // Ask /v1/models at once, then back off 5 s, 10 s, ... 5 min while it keeps happening.
+            // Discovery decides whether this is a new embedder; the notes are not rescanned for it.
+            stalled = true;
+            next_discover = now_ms() + swap_backoff;
+            swap_backoff = swap_backoff == 0             ? EMBED_SWAP_BACKOFF_MS
+                : swap_backoff * 2 > EMBED_SWAP_BACKOFF_MAX_MS ? EMBED_SWAP_BACKOFF_MAX_MS
+                                                         : swap_backoff * 2;
         }
     }
 
@@ -1019,8 +1348,9 @@ static QueryVec* qcache_find(uint64_t hash)
     return NULL;
 }
 
-//! Store a query's outcome (vec taken over; NULL when it failed). Caller holds g_lock.
-static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims)
+//! Store a query's outcome (vec taken over; NULL when it failed, and then it is not sent again
+//! for EMBED_QUERY_RETRY_MS or retry_ms, whichever is longer). Caller holds g_lock.
+static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims, int64_t retry_ms)
 {
     QueryVec* slot = &g.qcache[0];
     for (int32_t i = 0; i < EMBED_QUERY_CACHE; i++) {
@@ -1037,8 +1367,28 @@ static void qcache_put(uint64_t hash, uint64_t epoch, float* vec, int32_t dims)
     slot->vec = vec;
     slot->dims = dims;
     slot->failed = vec == NULL;
+    slot->announced = false;
     slot->done_ms = now_ms();
+    slot->retry_at_ms = slot->done_ms + (retry_ms > EMBED_QUERY_RETRY_MS ? retry_ms : EMBED_QUERY_RETRY_MS);
     slot->used = ++g.q_tick;
+}
+
+//! Sleep out a query's Retry-After. False when asked to stop or when a newer query is waiting,
+//! which matters more than this one.
+static bool query_wait(int64_t ms, uint64_t hash)
+{
+    int64_t until = now_ms() + ms;
+    for (;;) {
+        pthread_mutex_lock(&g_lock);
+        bool superseded = g.q_pending && g.q_hash != hash;
+        pthread_mutex_unlock(&g_lock);
+        if (atomic_load(&g.stop) || superseded)
+            return false;
+        int64_t left = until - now_ms();
+        if (left <= 0)
+            return true;
+        sleep_ms(left < 50 ? left : 50);
+    }
 }
 
 static void* query_main(void* arg)
@@ -1072,26 +1422,36 @@ static void* query_main(void* arg)
 
         float* vec = NULL;
         int32_t got = 0;
+        int32_t retry_ms = 0;
         if (have) {
             const char* inputs[1] = { text };
             size_t lens[1] = { len };
             ai_embed_request_t req = {
                 .model = emb.id, .inputs = inputs, .inputs_len = lens, .count = 1, .dims = emb.dims, .query = true
             };
-            ai_embed_result_t res;
-            int32_t retry_ms;
-            if (ai_embed_vectors(&req, &res, &retry_ms, &g.stop) == AI_EMBED_OK
-                && (dims == 0 || res.dims == dims)) {
-                vec = res.vectors;
-                got = res.dims;
-                res.vectors = NULL;
-                embed_normalize(vec, got);
+            // A 429/503 is waited out (Retry-After) and the same query sent once more, while the
+            // caller keeps getting EMBED_PENDING; a wait too long for someone typing fails at once
+            // and the failure lasts until Retry-After has passed.
+            for (int32_t attempt = 0; attempt < 2; attempt++) {
+                ai_embed_result_t res;
+                ai_embed_status_t st = ai_embed_vectors(&req, &res, &retry_ms, &g.stop);
+                if (st == AI_EMBED_OK && (dims == 0 || res.dims == dims)) {
+                    vec = res.vectors;
+                    got = res.dims;
+                    res.vectors = NULL;
+                    embed_normalize(vec, got);
+                }
+                ai_embed_result_free(&res);
+                if (st != AI_EMBED_RETRY)
+                    retry_ms = 0;
+                if (vec || st != AI_EMBED_RETRY || attempt > 0 || retry_ms > EMBED_QUERY_WAIT_MAX_MS
+                    || !query_wait(retry_ms, hash))
+                    break;
             }
-            ai_embed_result_free(&res);
         }
 
         pthread_mutex_lock(&g_lock);
-        qcache_put(hash, epoch, vec, got);
+        qcache_put(hash, epoch, vec, got, retry_ms);
         g.q_inflight = 0;
         pthread_mutex_unlock(&g_lock);
         atomic_store(&g.news, true);
@@ -1132,6 +1492,8 @@ void embed_start(const char* notes_dir, const char* const* extra_paths, int32_t 
     }
 
     atomic_store(&g.stop, false);
+    atomic_store(&g.halt, atomic_load(&g.disabled));
+    g.phase = atomic_load(&g.disabled) ? EMBED_PHASE_OFF : EMBED_PHASE_DISCOVERING;
     atomic_store(&g.worker_alive, true);
     pthread_t t;
     if (pthread_create(&t, NULL, worker_main, NULL) != 0) {
@@ -1148,6 +1510,7 @@ void embed_shutdown(void)
         return;
     pthread_mutex_lock(&g_lock);
     atomic_store(&g.stop, true);
+    atomic_store(&g.halt, true);
     pthread_cond_broadcast(&g_wake);
     pthread_mutex_unlock(&g_lock);
 
@@ -1258,7 +1621,7 @@ void embed_note_renamed(const char* old_path, const char* new_path)
 
 bool embed_ready(void)
 {
-    if (!g.started)
+    if (!g.started || atomic_load(&g.disabled))
         return false;
     pthread_mutex_lock(&g_lock);
     bool ready = g.have_embedder && g.note_count > 0;
@@ -1266,7 +1629,73 @@ bool embed_ready(void)
     return ready;
 }
 
-bool embed_poll(void) { return g.started && atomic_exchange(&g.news, false); }
+bool embed_poll(void)
+{
+    if (!g.started)
+        return false;
+    // A failed query whose retry time has come: a caller showing nothing for it should ask again.
+    int64_t now = now_ms();
+    bool due = false;
+    pthread_mutex_lock(&g_lock);
+    for (int32_t i = 0; i < EMBED_QUERY_CACHE; i++) {
+        QueryVec* q = &g.qcache[i];
+        if (q->failed && !q->announced && now >= q->retry_at_ms) {
+            q->announced = true;
+            due = true;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return atomic_exchange(&g.news, false) || due;
+}
+
+void embed_status(EmbedStatus* out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->phase = EMBED_PHASE_OFF;
+    if (!g.started)
+        return;
+    pthread_mutex_lock(&g_lock);
+    out->notes_indexed = g.note_count;
+    if (g.have_embedder)
+        snprintf(out->model, sizeof(out->model), "%s", g.embedder.id);
+    if (!atomic_load(&g.disabled)) {
+        out->phase = g.phase;
+        out->notes_total = g.notes_total;
+        out->notes_done = g.notes_done;
+        snprintf(out->current_title, sizeof(out->current_title), "%s", g.current_title);
+        if (g.phase == EMBED_PHASE_FAILED)
+            snprintf(out->error, sizeof(out->error), "%s", g.error);
+        if (g.phase == EMBED_PHASE_WAITING)
+            out->retry_at_ms = g.retry_at_ms;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void embed_set_enabled(bool enabled)
+{
+    pthread_mutex_lock(&g_lock);
+    bool was = !atomic_load(&g.disabled);
+    atomic_store(&g.disabled, !enabled);
+    atomic_store(&g.halt, atomic_load(&g.stop) || !enabled);
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    if (was != enabled)
+        atomic_store(&g.news, true);
+}
+
+bool embed_enabled(void) { return !atomic_load(&g.disabled); }
+
+void embed_rebuild(void)
+{
+    if (!g.started)
+        return;
+    pthread_mutex_lock(&g_lock);
+    atomic_store(&g.rebuild, true);
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+}
 
 //! Whether a stored note can be compared with vectors of the current embedder. Caller holds g_lock.
 static bool note_comparable(const StoreNote* n, int32_t dims)
@@ -1354,11 +1783,11 @@ EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* op
     EmbedState state = EMBED_PENDING;
     bool spawn = false;
     pthread_mutex_lock(&g_lock);
-    if (!g.have_embedder || g.note_count == 0) {
+    if (!g.have_embedder || g.note_count == 0 || atomic_load(&g.disabled)) {
         state = EMBED_UNAVAILABLE;
     } else {
         QueryVec* qv = qcache_find(hash);
-        if (qv && qv->failed && now_ms() - qv->done_ms < EMBED_QUERY_RETRY_MS) {
+        if (qv && qv->failed && now_ms() < qv->retry_at_ms) {
             state = EMBED_UNAVAILABLE;
         } else if (qv && qv->vec) {
             qv->used = ++g.q_tick;
@@ -1418,7 +1847,7 @@ static struct {
 
 int32_t embed_related(const char* path, float min_score, EmbedHit* out, int32_t max)
 {
-    if (!g.started || !path || !out || max <= 0)
+    if (!g.started || !path || !out || max <= 0 || atomic_load(&g.disabled))
         return 0;
     if (max > EMBED_RELATED_CACHE)
         max = EMBED_RELATED_CACHE;
@@ -1507,6 +1936,20 @@ void embed_note_renamed(const char* old_path, const char* new_path)
 bool embed_ready(void) { return false; }
 
 bool embed_poll(void) { return false; }
+
+void embed_status(EmbedStatus* out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->phase = EMBED_PHASE_OFF;
+}
+
+void embed_set_enabled(bool enabled) { (void)enabled; }
+
+bool embed_enabled(void) { return false; }
+
+void embed_rebuild(void) { }
 
 EmbedState embed_search(const char* query, size_t len, const EmbedSearchOpts* opts, EmbedHit* hits,
     int32_t max, int32_t* count)

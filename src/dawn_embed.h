@@ -9,6 +9,17 @@
 // call here reports "unavailable" and the UI must show nothing (spec: "until a model exists,
 // nothing changes and nothing mentions it").
 //
+// The embedder is the /v1/models entry with "text_embeddings" (EmbeddingGemma 2 first, then
+// EmbeddingGemma). Pieces are kept inside its context window. When /v1/embeddings turns it away
+// (404, or vectors of another length) the worker asks /v1/models again at once, backing off up to
+// 5 minutes, and rebuilds only if the embedder really changed. A permanent refusal (401,
+// embedding_tokenizer_missing, invalid_dimensions, capability_not_supported) stops indexing until
+// the next discovery that succeeds.
+//
+// What the worker is doing is published for a settings screen: embed_status() (phase, progress,
+// model, error), embed_set_enabled() to turn the whole thing off and on, embed_rebuild() to start
+// over. None of it draws anything.
+//
 // Everything below is called from dawn's own thread. Search queries are embedded on a short-lived
 // thread of their own, so a call never blocks: it answers EMBED_PENDING, and embed_poll() says
 // when to ask again.
@@ -34,6 +45,7 @@
 #define EMBED_HITS_MAX 64 //!< Most hits one call returns
 #define EMBED_SEARCH_MIN_SCORE 0.35f //!< Suggested floor for Ctrl+S's "by meaning" group
 #define EMBED_RELATED_MIN_SCORE 0.60f //!< Suggested floor for the chat's "also in:" line
+#define EMBED_ERROR_MAX 64 //!< EmbedStatus.error, bytes including the NUL
 
 // #region Types
 
@@ -53,6 +65,32 @@ typedef struct {
     uint64_t text_hash; //!< embed_hash() of the piece when it was indexed; see embed_hit_matches()
     float score; //!< Cosine similarity, -1..1
 } EmbedHit;
+
+//! What the background indexer is doing (embed_status()).
+typedef enum {
+    EMBED_PHASE_OFF, //!< Disabled by settings (embed_set_enabled(false)) or not started
+    EMBED_PHASE_DISCOVERING, //!< Asking /v1/models
+    EMBED_PHASE_NO_EMBEDDER, //!< No text_embeddings model is installed
+    EMBED_PHASE_INDEXING, //!< notes_done of notes_total
+    EMBED_PHASE_PAUSED, //!< Waiting for a chat reply to finish
+    EMBED_PHASE_WAITING, //!< Retry-After or backoff (or the endpoint not answering); see retry_at_ms
+    EMBED_PHASE_IDLE, //!< The index is current
+    EMBED_PHASE_FAILED, //!< A permanent error; error holds its code
+} EmbedPhase;
+
+//! A snapshot of the indexer for a status line or settings screen.
+typedef struct {
+    EmbedPhase phase;
+    int32_t notes_total; //!< Notes in this pass (0 when not indexing)
+    int32_t notes_done; //!< Of those, how many are through
+    int32_t notes_indexed; //!< Notes in the store
+    char current_title[EMBED_TITLE_MAX]; //!< The note being embedded, "" otherwise
+    char model[EMBED_MODEL_MAX]; //!< The embedder's id, "" when there is none
+    char error[EMBED_ERROR_MAX]; //!< The error code for EMBED_PHASE_FAILED (e.g. "unauthorized",
+                                 //!< "embedding_tokenizer_missing"), "" otherwise
+    int64_t retry_at_ms; //!< For EMBED_PHASE_WAITING: when the next try is due, in the backend's
+                         //!< DAWN_CLOCK_MS time (CLOCK_MONOTONIC milliseconds); else 0
+} EmbedStatus;
 
 //! How embed_search() filters and groups.
 typedef struct {
@@ -89,9 +127,28 @@ void embed_note_renamed(const char* old_path, const char* new_path);
 //! indexed. When false the UI shows nothing embedding-related.
 bool embed_ready(void);
 
-//! Call once per frame: true when a query finished or the index changed since the last call,
-//! meaning a caller showing results should ask again (and redraw).
+//! Call once per frame: true when a query finished, a failed query may be tried again, the index
+//! changed, or the indexer's phase or progress moved since the last call, meaning a caller showing
+//! results or status should ask again (and redraw).
 bool embed_poll(void);
+
+//! A consistent snapshot of what the indexer is doing. Cheap (one short lock); callable every
+//! frame. EMBED_PHASE_OFF before embed_start(), while disabled, and on builds without embeddings.
+void embed_status(EmbedStatus* out);
+
+//! Turn meaning features off (false) or back on (true); on by default, and may be called before
+//! embed_start(). Off: the worker drops the batch in flight (its HTTP call aborts within about a
+//! second; that note is redone later), sends nothing more, and embed_ready(), embed_search() and
+//! embed_related() answer as if there were no embedder; the index on disk is kept. On again:
+//! discovery and a rescan run at once.
+void embed_set_enabled(bool enabled);
+
+//! The switch embed_set_enabled() sets (always false on builds without embeddings).
+bool embed_enabled(void);
+
+//! Start over: the worker drops every note from the index, deletes every index file in the cache
+//! directory, looks for the embedder again and re-embeds every note. Returns at once.
+void embed_rebuild(void);
 
 // #endregion
 
