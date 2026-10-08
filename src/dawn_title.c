@@ -17,7 +17,7 @@
 #include <string.h>
 #include <strings.h>
 
-#define TITLE_FIRST_CHARS 160 //!< The first title comes once the note has this much text
+#define TITLE_FIRST_CHARS 60 //!< The first title comes once the note has this much text (a quick list is short)
 #define TITLE_IDLE_MS 8000 //!< … and the writer paused this long
 #define TITLE_EVERY_MS (2 * 60 * 1000) //!< At most one title this often per note
 #define TITLE_MAX_PER_NOTE 5
@@ -115,8 +115,33 @@ static void first_heading(char* out, size_t cap)
     }
 }
 
-//! Whether the cursor sits at the end of a sentence or a paragraph: nothing but spaces after it on
-//! its line, and before it (past spaces) sentence-ending punctuation or a line break.
+//! Whether the line holding byte p - 1 is a list item: past its indent, "-", "*", "+" or "•" then a
+//! space, or digits then "." or ")" then a space.
+static bool in_list_item(size_t p)
+{
+    size_t q = p;
+    while (q > 0 && gap_at(&app.text, q - 1) != '\n')
+        q--;
+    while (q < p && (gap_at(&app.text, q) == ' ' || gap_at(&app.text, q) == '\t'))
+        q++;
+    if (q + 1 >= p)
+        return false;
+    char c = gap_at(&app.text, q);
+    if ((c == '-' || c == '*' || c == '+') && gap_at(&app.text, q + 1) == ' ')
+        return true;
+    if (q + 3 < p && (unsigned char)c == 0xE2 && (unsigned char)gap_at(&app.text, q + 1) == 0x80
+        && (unsigned char)gap_at(&app.text, q + 2) == 0xA2 && gap_at(&app.text, q + 3) == ' ') // •
+        return true;
+    size_t d = q;
+    while (d < p && isdigit((unsigned char)gap_at(&app.text, d)))
+        d++;
+    return d > q && d + 1 < p && (gap_at(&app.text, d) == '.' || gap_at(&app.text, d) == ')')
+        && gap_at(&app.text, d + 1) == ' ';
+}
+
+//! Whether the cursor sits at the end of a sentence, a paragraph or a list item: nothing but spaces
+//! after it on its line, and before it (past spaces) sentence-ending punctuation, a line break or
+//! the end of a list item's text (quick notes are lists that rarely end in a period).
 static bool at_sentence_end(void)
 {
     size_t len = gap_len(&app.text);
@@ -144,7 +169,7 @@ static bool at_sentence_end(void)
         return true;
     if (b1 == 0xD8 && (unsigned char)c == 0x9F) // ؟
         return true;
-    return line_break;
+    return line_break || in_list_item(p);
 }
 
 // #endregion
