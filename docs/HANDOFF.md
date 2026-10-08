@@ -4,6 +4,17 @@ A rolling note for the next agent. Read it before starting; before ending a sess
 move finished items out, add what you left open, and date your entry. Newest session first. Keep
 it short: a line per item, with file:line or the command that shows it.
 
+## 2026-10-08 · earlier live titles for short notes
+
+Done: `20caf6c` (`src/dawn_title.c`) lowers the first live title from 160 to 60 characters and lets
+the end of a list item's text count as a pause (`in_list_item`), so a quick bullet list with no
+final period gets titled. Shipped: tlstore `ab3ca66` pins it, build.yml made `bins-2026.10.08`,
+release.yml cut store release `2026.10.08` (catalog dawn `0.1.3+20caf6c.1`); tlstore dev = main.
+
+Open:
+1. Not tried on the phone or against mock_tai: watch whether 60 characters gives titles from too
+   little text; if so raise `TITLE_FIRST_CHARS` (`src/dawn_title.c:20`) to 80-100.
+
 ## 2026-10-07 · meaning index UI, EmbeddingGemma 2, first device pass
 
 On `embed-gemma2` (27 commits over `tl`, not merged into `tl`; it already contains all of `tl`):
@@ -48,10 +59,7 @@ Open:
    on the welcome screen. Checked on the phone in tmux: ready row, cap, icon, the sweep during a
    load (`🮊██▎`), and the launcher's own rendering in a screenshot. Popup masks are no longer
    sent inside tmux (`e78affc`), where they became the window title.
-3. Ship: `embed-gemma2` is merged into `tl` (7c2fc93, pushed with 70fe1b0) and `DAWN_COMMIT`
-   bumped in tlstore (`2528266`, pushed to tlstore `dev`). Not built yet: tlstore's build.yml runs
-   on `main`, which is 2 commits behind `dev`; fast-forward it (`git push origin origin/dev:main`)
-   and run `gh workflow run build.yml --ref main -f tools=dawn`. The user does this by hand.
+3. Ship: done 2026-10-08 (see the entry above; release `2026.10.08` carries 70fe1b0's work too).
 8. Launcher read-aloud (not dawn code, but dawn shares the speaker): Read aloud from the selection
    toolbar now goes a sentence per `/v1/ai/speak` call and the runtime gained additive pause /
    resume / state ops; dawn's `/v1/ai/speak` contract is unchanged, and a stop from either side
