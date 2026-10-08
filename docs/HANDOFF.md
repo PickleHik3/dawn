@@ -4,6 +4,18 @@ A rolling note for the next agent. Read it before starting; before ending a sess
 move finished items out, add what you left open, and date your entry. Newest session first. Keep
 it short: a line per item, with file:line or the command that shows it.
 
+## 2026-10-08 · chat requests name the dawn_chat feature
+
+Done: `5ae91ba` (`libai/ai_bridge_openai.c` `build_body`) sends `"function": "dawn_chat"` when the
+provider is TAI (never to an `openai` provider, which rejects unknown fields). The launcher's feature
+load plan (launcher branch `feat/tai-feature-plan`, spec
+`project-docs/active/tai-feature-load-plan-2026-10-08.md`) then loads Dawn chat by its own plan and
+keeps the note search model loaded beside it.
+
+Open:
+1. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
+   Ship it with the launcher release that carries `feat/tai-feature-plan`; an older launcher ignores the field.
+
 ## 2026-10-08 · earlier live titles for short notes
 
 Done: `20caf6c` (`src/dawn_title.c`) lowers the first live title from 160 to 60 characters and lets
