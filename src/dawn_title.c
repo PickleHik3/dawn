@@ -354,6 +354,13 @@ static bool title_valid(const char* reply, const char* current, char* out, size_
     size_t n = strlen(reply);
     while (n > 0 && isspace((unsigned char)reply[n - 1]))
         n--;
+    // Markdown the model added anyway: "# Title", "**Title**".
+    while (n > 0 && strchr("#*_` ", *reply)) {
+        reply++;
+        n--;
+    }
+    while (n > 0 && strchr("*_` ", reply[n - 1]))
+        n--;
     static const char* const quotes[][2] = { { "\"", "\"" }, { "'", "'" },
         { "\xe2\x80\x9c", "\xe2\x80\x9d" }, { "\xe2\x80\x98", "\xe2\x80\x99" } };
     for (size_t i = 0; i < sizeof(quotes) / sizeof(quotes[0]); i++) {

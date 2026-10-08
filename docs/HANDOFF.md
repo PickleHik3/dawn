@@ -12,8 +12,13 @@ final period gets titled. Shipped: tlstore `ab3ca66` pins it, build.yml made `bi
 release.yml cut store release `2026.10.08` (catalog dawn `0.1.3+20caf6c.1`); tlstore dev = main.
 
 Open:
-1. Not tried on the phone or against mock_tai: watch whether 60 characters gives titles from too
-   little text; if so raise `TITLE_FIRST_CHARS` (`src/dawn_title.c:20`) to 80-100.
+1. Checked on the A065 with the tlstore build: a 6-bullet list ending without a period got
+   "# Acees Status and Actions" (~40 s, cause unknown: maybe a rejected first reply + 30 s retry);
+   a 2-bullet ~64-char note got "Renewal tasks" in ~8 s. The stray "# " is fixed in the commit
+   after 20caf6c (`title_valid` strips Markdown) but not pinned in tlstore or released yet.
+2. Chat "hi" on an empty note made the model call set_title ("Ready to Write"); a chat title has
+   no title-source: ai, so live titles never touch that note again. Not fixed.
+3. Gemma 4 E4B failed to load on the A065 with ~4 GB free ("Not enough free memory"); E2B loads.
 
 ## 2026-10-07 · meaning index UI, EmbeddingGemma 2, first device pass
 
