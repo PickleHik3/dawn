@@ -3,6 +3,7 @@
 #include "dawn_render.h"
 #include "dawn_block.h"
 #include "dawn_gap.h"
+#include "dawn_hit.h"
 #include "dawn_image.h"
 #include "dawn_modal.h"
 #include "dawn_notepath.h"
@@ -65,15 +66,26 @@ void render_clear(void)
     }
 }
 
+//! The column render_center_text() starts text at
+static int32_t center_col(const char* text)
+{
+    int32_t col = (app.cols - (int32_t)strlen(text) + 2) / 2;
+    return col < 1 ? 1 : col;
+}
+
 void render_center_text(int32_t row, const char* text, DawnColor fg)
 {
-    int32_t len = (int32_t)strlen(text);
-    int32_t col = (app.cols - len + 2) / 2;
-    if (col < 1)
-        col = 1;
-    move_to(row, col);
+    move_to(row, center_col(text));
     set_fg(fg);
     platform_write_str(text);
+}
+
+//! render_center_text() for a hint line, whose hints ("[esc] back") are then tappable
+static void render_center_hints(int32_t row, const char* text, DawnColor fg)
+{
+    render_center_text(row, text, fg);
+    int32_t col = center_col(text);
+    hit_add_hints(col, row, text, app.cols - col + 1, true);
 }
 
 void render_popup_box(int32_t width, int32_t height, int32_t* out_top, int32_t* out_left)
@@ -203,6 +215,14 @@ void render_welcome(void)
     render_text_at(row, col2, "?", get_accent());
     render_text_at(row, col2 + 2, " help", get_dim());
 
+    // Each action, key and word, is also a tap on that key.
+    hit_add(col1, actions_row, 12, 1, HIT_KEY, '\r', 0); // "enter  write"
+    hit_add(col2, actions_row, 10, 1, HIT_KEY, 'h', 0); // "h  history"
+    hit_add(col1, actions_row + 2, 12, 1, HIT_KEY, 't', 0); // "t      timer"
+    hit_add(col2, actions_row + 2, 8, 1, HIT_KEY, 'd', 0); // "d  theme"
+    hit_add(col1, actions_row + 4, 11, 1, HIT_KEY, 'q', 0); // "q      quit"
+    hit_add(col2, actions_row + 4, 7, 1, HIT_KEY, '?', 0); // "?  help"
+
     // The status panel (dawn_status) goes in the bottom right of the space under the actions, a
     // blank row below them where there is room, at most four rows. It also says "ai ready" here.
     int32_t panel_last = bottom_row - 1;
@@ -219,13 +239,13 @@ void render_welcome(void)
 
     // Left: timer setting
     set_fg(get_dim());
-    if (app.timer_mins == 0) {
-        platform_write_str("no timer");
-    } else {
-        char timer_str[16];
+    char timer_str[16];
+    if (app.timer_mins == 0)
+        snprintf(timer_str, sizeof(timer_str), "no timer");
+    else
         snprintf(timer_str, sizeof(timer_str), "%d min", app.timer_mins);
-        platform_write_str(timer_str);
-    }
+    platform_write_str(timer_str);
+    hit_add(content_left, bottom_row, (int32_t)strlen(timer_str), 1, HIT_KEY, 't', 0);
 
     // Right: theme
     const char* theme_str = app.theme == THEME_DARK ? "dark" : "light";
@@ -233,6 +253,7 @@ void render_welcome(void)
     move_to(bottom_row, theme_col);
     set_fg(get_dim());
     platform_write_str(theme_str);
+    hit_add(theme_col, bottom_row, (int32_t)strlen(theme_str), 1, HIT_KEY, 'd', 0);
 }
 
 void render_timer_select(void)
@@ -256,9 +277,11 @@ void render_timer_select(void)
         }
         render_center_text(cy - 2 + (int32_t)i, buf,
             (int32_t)i == app.preset_idx ? get_accent() : get_dim());
+        // A tap anywhere on the row picks it and confirms, as j/k then enter would.
+        hit_add(1, cy - 2 + (int32_t)i, app.cols, 1, HIT_ROW, '\r', (int32_t)i);
     }
 
-    render_center_text(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
+    render_center_hints(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
 }
 
 void render_style_select(void)
@@ -279,9 +302,10 @@ void render_style_select(void)
             i == (int32_t)app.style ? "<" : " ");
         render_center_text(cy - 1 + i * 2, buf, i == (int32_t)app.style ? get_accent() : get_dim());
         render_center_text(cy + i * 2, descs[i], get_dim());
+        hit_add(1, cy - 1 + i * 2, app.cols, 2, HIT_ROW, '\r', i); // the name and its line
     }
 
-    render_center_text(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
+    render_center_hints(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
 }
 
 //! "2 min ago" / "3 hr ago" / "just now" for the activity list. then_sec/now_sec are both
@@ -303,6 +327,15 @@ static void format_relative_time(int64_t then_sec, int64_t now_sec, char* buf, s
         int64_t days = d / 86400;
         snprintf(buf, n, "%lld d ago", (long long)days);
     }
+}
+
+//! A help page's footer at (row, col), its hints tappable up to the box's right border at end_col
+static void help_footer(int32_t row, int32_t col, const char* footer, int32_t end_col)
+{
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str(footer);
+    hit_add_hints(col, row, footer, end_col - col, true);
 }
 
 //! MODE_HELP's second page: the activity list (notice_history()), newest first, with relative
@@ -354,20 +387,11 @@ static void render_help_activity(int32_t top, int32_t left, int32_t width, int32
 
     // Where there is a meaning page, this footer points on to it as the first page's points here.
     const char* footer = DAWN_EMBED_LIVE ? "[<-] keys [tab] meaning [esc] close" : "[<-] shortcuts   [esc] close";
-    move_to(top + height - 2, left + (width - (int32_t)strlen(footer)) / 2);
-    set_fg(get_dim());
-    platform_write_str(footer);
+    help_footer(top + height - 2, left + (width - (int32_t)strlen(footer)) / 2, footer, left + width - 1);
 }
 
 static int32_t hist_write_fit(const char* s, int32_t max_cols);
 static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, size_t* lens, int32_t max);
-
-//! Where MODE_HELP's meaning page drew its box and its two actions last, for render_help_hit().
-static struct {
-    bool shown;
-    int32_t top, left, width, height; //!< The box
-    int32_t toggle_row, rebuild_row; //!< The actions' rows
-} help_geo;
 
 //! What the meaning index is doing, in words, for the help page the writer went to: unlike the
 //! search box it also says when there is no embedder yet and how to get one.
@@ -445,6 +469,7 @@ static void render_help_meaning(int32_t width)
 
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
     set_bg(get_modal_bg());
 
     int32_t col = left + 3;
@@ -484,7 +509,8 @@ static void render_help_meaning(int32_t width)
     platform_write_str(notes);
     row++;
 
-    help_geo.toggle_row = row;
+    // Each action owns its row across the box's width, so a tap anywhere on it counts.
+    hit_add(left, row, width, 1, HIT_KEY, 'm', 0);
     move_to(row, col);
     set_fg(get_accent());
     platform_write_str("[m] ");
@@ -493,7 +519,7 @@ static void render_help_meaning(int32_t width)
     row += 1 + gap;
 
     // Off, a rebuild would wait unseen until the index is switched on again, so it is not offered.
-    help_geo.rebuild_row = row;
+    hit_add(left, row, width, 1, HIT_KEY, 'r', 0);
     bool armed = app.help_rebuild_armed
         && DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS;
     move_to(row, col);
@@ -502,27 +528,7 @@ static void render_help_meaning(int32_t width)
     set_fg(!on ? get_dim() : armed ? get_accent() : get_fg());
     hist_write_fit(!on ? "rebuild (turn it on first)" : armed ? "press r again to rebuild" : "rebuild the index", text_w - 4);
 
-    move_to(top + height - 2, left + (width - 27) / 2);
-    set_fg(get_dim());
-    platform_write_str("[<-] activity   [esc] close");
-
-    help_geo.shown = true;
-    help_geo.top = top;
-    help_geo.left = left;
-    help_geo.width = width;
-    help_geo.height = height;
-}
-
-int32_t render_help_hit(int32_t row, int32_t col)
-{
-    if (!help_geo.shown || row < help_geo.top || row >= help_geo.top + help_geo.height
-        || col < help_geo.left || col >= help_geo.left + help_geo.width)
-        return HELP_HIT_OUTSIDE;
-    if (row == help_geo.toggle_row)
-        return HELP_HIT_TOGGLE;
-    if (row == help_geo.rebuild_row)
-        return HELP_HIT_REBUILD;
-    return HELP_HIT_BOX;
+    help_footer(top + height - 2, left + (width - 27) / 2, "[<-] activity   [esc] close", left + width - 1);
 }
 
 void render_help(void)
@@ -531,7 +537,6 @@ void render_help(void)
     int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
     if (width < 24)
         width = app.cols < 24 ? app.cols : 24;
-    help_geo.shown = false;
     if (app.help_page == 2 && DAWN_EMBED_LIVE) {
         render_help_meaning(width);
         return;
@@ -540,6 +545,8 @@ void render_help(void)
     int32_t height = 26;
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
+    // A tap inside the box that is on none of its hints does nothing; outside it closes help.
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
 
     if (app.help_page == 1) {
         render_help_activity(top, left, width, height);
@@ -648,9 +655,7 @@ void render_help(void)
 #endif
 
     // Footer
-    move_to(top + height - 2, left + (width - 30) / 2);
-    set_fg(get_dim());
-    platform_write_str("[tab] activity   [esc] close");
+    help_footer(top + height - 2, left + (width - 30) / 2, "[tab] activity   [esc] close", left + width - 1);
 }
 
 //! Display columns of a UTF-8 string, counting each code point as one column
@@ -702,7 +707,7 @@ void render_history(void)
 
     if (app.hist_count == 0) {
         render_center_text(app.rows / 2, "no history yet", get_dim());
-        render_center_text(app.rows / 2 + 2, "[esc] back", get_dim());
+        render_center_hints(app.rows / 2 + 2, "[esc] back", get_dim());
         return;
     }
 
@@ -718,6 +723,8 @@ void render_history(void)
     for (int32_t i = 0; i < visible && start + i < app.hist_count; i++) {
         int32_t idx = start + i;
         HistoryEntry* entry = &app.history[idx];
+        // A tap on the row (the width its highlight spans) opens that note, as enter would.
+        hit_add(2, 4 + i, app.cols - 2, 1, HIT_ROW, '\r', idx);
 
         if (idx == app.hist_sel) {
             // The selected row sits one rung above the page (surface_container_highest)
@@ -798,6 +805,7 @@ void render_history(void)
     move_to(app.rows - 1, 4);
     set_fg(get_dim());
     hist_write_fit(hint_buf, hint_room);
+    hit_add_hints(4, app.rows - 1, hint_buf, hint_room, true);
 }
 
 void render_finished(void)
@@ -828,11 +836,11 @@ void render_finished(void)
     }
     render_center_text(cy + 1, stats, get_accent());
 
-    render_center_text(cy + 4, "[c] continue   [enter] new   [esc] menu", get_dim());
-    render_center_text(cy + 5, "[o] finder   [q] quit", get_dim());
+    render_center_hints(cy + 4, "[c] continue   [enter] new   [esc] menu", get_dim());
+    render_center_hints(cy + 5, "[o] finder   [q] quit", get_dim());
 #if HAS_LIBAI
     if (app.ai_ready) {
-        render_center_text(cy + 7, "[/] reflect with ai", get_dim());
+        render_center_hints(cy + 7, "[/] reflect with ai", get_dim());
     }
 #endif
 }
@@ -891,6 +899,7 @@ void render_fm_edit(void)
     for (int32_t i = 0; i < app.fm_edit.field_count && row < top + box_height - 3; i++) {
         FmEditField* field = &app.fm_edit.fields[i];
         bool is_current = (i == app.fm_edit.current_field);
+        int32_t field_row = row;
 
         move_to(row, content_left);
         FM_KEY_LABEL(field->key, is_current);
@@ -1017,6 +1026,8 @@ void render_fm_edit(void)
             break;
         }
         }
+        // A tap on a field's rows makes it the current field, as tab would.
+        hit_add(content_left, field_row, content_width, row - field_row + 1, HIT_ROW, 0, i);
         row++;
     }
 
@@ -1033,27 +1044,30 @@ void render_fm_edit(void)
     }
 
     move_to(top + box_height - 2, content_left);
+    const char* hint;
     if (app.fm_edit.adding_field) {
-        FM_HINT("enter:add  esc:cancel");
+        hint = "enter:add  esc:cancel";
     } else if (app.fm_edit.current_field >= 0 && app.fm_edit.current_field < app.fm_edit.field_count) {
         FmEditField* f = &app.fm_edit.fields[app.fm_edit.current_field];
         switch (f->kind) {
         case FM_FIELD_BOOL:
-            FM_HINT("tab:next  space:toggle  enter:save  esc:cancel");
+            hint = "tab:next  space:toggle  enter:save  esc:cancel";
             break;
         case FM_FIELD_DATETIME:
-            FM_HINT("tab:next  </>:part  +/-:adj  enter:save  esc:cancel");
+            hint = "tab:next  </>:part  +/-:adj  enter:save  esc:cancel";
             break;
         case FM_FIELD_LIST:
-            FM_HINT("tab:next  ^N:add  ^D/bksp:del  ^←/→:item  enter:save  esc:cancel");
+            hint = "tab:next  ^N:add  ^D/bksp:del  ^←/→:item  enter:save  esc:cancel";
             break;
         default:
-            FM_HINT("tab:next  +:add  ^S:save  esc:cancel");
+            hint = "tab:next  +:add  ^S:save  esc:cancel";
             break;
         }
     } else {
-        FM_HINT("tab:next  +:add field  enter:save  esc:cancel");
+        hint = "tab:next  +:add field  enter:save  esc:cancel";
     }
+    FM_HINT(hint);
+    hit_add_hints(content_left, top + box_height - 2, hint, app.cols - content_left + 1, false);
 
     move_to(cursor_row, cursor_col);
     platform_set_cursor_visible(true);
@@ -1074,6 +1088,14 @@ static void render_block_edit_image(void)
         app.block_edit.image.height_len, app.block_edit.image.height_pct, 3);
 
     MODAL_HELP(9, "tab:field  p:%/px  enter:save  esc:cancel");
+
+    // A tap on a field's row makes it the current field; the hints are taps on their keys, but
+    // not p, which alt and title would take as text.
+    static const int32_t field_rows[] = { 0, 1, 3, 4 };
+    for (int32_t f = 0; f < 4; f++)
+        hit_add(_modal_content_left, _modal_field_row + field_rows[f], _modal_content_width, 1, HIT_ROW, 0, f);
+    hit_add_hints(_modal_content_left, _modal_content_top + 9, "tab:field  p:%/px  enter:save  esc:cancel",
+        _modal_content_width, false);
 
     MODAL_END();
 }
@@ -1164,6 +1186,8 @@ void render_toc(void)
 
         int32_t entry_idx = toc->filtered[idx];
         TocEntry* entry = &toc->entries[entry_idx];
+        // A tap on the row (the width its highlight spans) jumps to that heading, as enter would.
+        hit_add(left + 1, list_start + i, width - 2, 1, HIT_ROW, '\r', idx);
 
         // The selected row sits one rung above the modal (surface_container_highest)
         if (idx == toc->selected) {
@@ -1210,22 +1234,25 @@ void render_toc(void)
         set_bg(get_modal_bg());
     }
 
-    // Scroll indicators
+    // Scroll indicators, each a tap that pages that way (two columns, room for a finger)
     if (toc->scroll > 0) {
         move_to(list_start, content_right);
         set_fg(get_dim());
         platform_write_str("↑");
+        hit_add(content_right - 1, list_start, 2, 1, HIT_KEY, DAWN_KEY_PGUP, 0);
     }
     if (toc->scroll + visible < toc->filtered_count) {
         move_to(list_start + visible - 1, content_right);
         set_fg(get_dim());
         platform_write_str("↓");
+        hit_add(content_right - 1, list_start + visible - 1, 2, 1, HIT_KEY, DAWN_KEY_PGDN, 0);
     }
 
     // Footer
     move_to(top + height - 2, content_left);
     set_fg(get_dim());
     platform_write_str("↑↓:nav  enter:jump  esc:close");
+    hit_add_hints(content_left, top + height - 2, "↑↓:nav  enter:jump  esc:close", content_width, true);
 
     // Position cursor at filter
     move_to(filter_row, content_left + 8 + toc->filter_len);
@@ -1519,12 +1546,6 @@ void render_search(void)
     move_to(search_row, content_left + 6 + query_cols);
     platform_set_cursor_visible(true);
 }
-//! Where MODE_CONFLICT's choices were drawn last, for render_conflict_hit().
-static struct {
-    bool shown;
-    int32_t left, width; //!< The dialog's columns
-    int32_t rows[CONFLICT_CHOICES]; //!< Each choice's row
-} conflict_geo;
 
 //! Break text into lines of at most width code points, at spaces where a word fits and inside a
 //! word that alone is wider. Returns the number of lines (at most max).
@@ -1622,11 +1643,14 @@ void render_conflict(void)
     }
     row++;
 
-    conflict_geo.shown = true;
-    conflict_geo.left = left;
-    conflict_geo.width = width;
+    // Each choice owns its row across the dialog's width, so a tap anywhere on it is its key.
+    static const int32_t keys[CONFLICT_CHOICES] = {
+        [CONFLICT_RELOAD] = 'r',
+        [CONFLICT_OVERWRITE] = 'o',
+        [CONFLICT_KEEP] = 'k',
+    };
     for (int32_t c = 0; c < CONFLICT_CHOICES; c++) {
-        conflict_geo.rows[c] = row;
+        hit_add(left, row, width, 1, HIT_KEY, keys[c], 0);
         move_to(row, col);
         set_fg(get_accent());
         platform_write_str(labels[c]);
@@ -1639,16 +1663,6 @@ void render_conflict(void)
         }
         row += 1 + gap;
     }
-}
-
-int32_t render_conflict_hit(int32_t row, int32_t col)
-{
-    if (!conflict_geo.shown || col < conflict_geo.left || col >= conflict_geo.left + conflict_geo.width)
-        return -1;
-    for (int32_t c = 0; c < CONFLICT_CHOICES; c++)
-        if (row == conflict_geo.rows[c])
-            return c;
-    return -1;
 }
 
 // #endregion

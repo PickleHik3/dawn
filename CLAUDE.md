@@ -114,8 +114,11 @@ keys are raw integers in nested `switch` statements (`case 12: // Ctrl+L`); ther
 A new Ctrl key goes in `handle_writing` (and `handle_ai_input` if it should work with the chat focused),
 guarded by `CAN_EDIT()`/`CAN_MODIFY()`, and into `render_help()` in `dawn_render.c`. A new modal needs an
 `AppMode` value, a `render()` case (usually `render_writing()` then the overlay) and a `handle_input()`
-case. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side panel or, at phone
-width, a bottom sheet.
+case. Touch: anything tappable registers a hit region while it renders (`hit_add` in `src/dawn_hit.c`,
+cleared at the top of `render()`), and `handle_input` turns a tap on it into the key it stands for before
+the mode's switch, so a tap and its key share one path; a tap on no region reaches the mode as
+`DAWN_KEY_MOUSE_CLICK`. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+panel or, at phone width, a bottom sheet.
 
 ### AI: libai and TAI
 

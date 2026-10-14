@@ -15,6 +15,7 @@
 #include "dawn_footnote.h"
 #include "dawn_gap.h"
 #include "dawn_highlight.h"
+#include "dawn_hit.h"
 #include "dawn_image.h"
 #include "dawn_input.h"
 #include "dawn_nav.h"
@@ -3986,6 +3987,8 @@ static void render(void)
         last_mode = app.mode;
     }
 
+    // Taps are looked up in what this frame draws (dawn_hit): each screen registers its own.
+    hit_frame_begin();
     sync_begin();
     cursor_visible(false);
     scrollind_frame_begin();
@@ -5434,22 +5437,13 @@ static void handle_ai_input(int32_t key)
 
 //! A key on MODE_HELP's meaning page: m switches the index off or on (and remembers it in
 //! settings.json), r arms a rebuild and a second r within HELP_REBUILD_CONFIRM_MS starts it; a tap
-//! on either row does the same. A tap elsewhere in the box, and the release, drag and scroll that
-//! come with taps, do nothing (the release after a tap on a row would otherwise close help).
+//! on either row arrives as that key (render_help registers them). A swipe over the page does
+//! nothing.
 //! @return false for any other key, which closes help
 static bool help_meaning_key(int32_t key)
 {
-    if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_SCROLL_UP
-        || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
+    if (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
         return true;
-    if (key == DAWN_KEY_MOUSE_CLICK) {
-        int32_t hit = render_help_hit(input_last_mouse_row(), input_last_mouse_col());
-        if (hit == HELP_HIT_OUTSIDE)
-            return false;
-        if (hit == HELP_HIT_BOX)
-            return true;
-        key = hit == HELP_HIT_TOGGLE ? 'm' : 'r';
-    }
     if (key == 'm') {
         app.meaning_index = !app.meaning_index;
         embed_set_enabled(app.meaning_index);
@@ -5472,6 +5466,150 @@ static bool help_meaning_key(int32_t key)
     }
     return false;
 }
+
+// #region Taps on hit regions (dawn_hit)
+
+//! A drag of a scroll pill in progress: the press landed on its track (HIT_PILL), and every
+//! DAWN_KEY_MOUSE_DRAG until the release moves the pane's content with the finger.
+static struct {
+    bool active;
+    ScrollIndPane pane;
+    int32_t grab; //!< scrollind_grab(): how far down the pill the finger holds it, in pixels
+} pill_drag;
+
+//! Scroll the dragged pane so its pill sits under a finger on screen row row. The note detaches
+//! from the cursor, as a swipe does, so render_writing() doesn't scroll it back.
+static void pill_follow(int32_t row)
+{
+    int32_t offset = scrollind_offset_at(pill_drag.pane, row, pill_drag.grab);
+    if (pill_drag.pane == SCROLLIND_CHAT) {
+        // chat_scroll counts rows up from the newest; the offset counts down from the oldest.
+        app.chat_scroll = chat_max_scroll - offset;
+        if (app.chat_scroll < 0)
+            app.chat_scroll = 0;
+    } else {
+        app.view_detached = true;
+        app.scroll_y = offset;
+    }
+}
+
+//! A press on a pane's pill track: hold the pill where the finger landed on it, or jump it to
+//! centre on a finger beside it. A press while the chat's model picker is open is the picker's.
+//! @return false when the press is not the pill's after all
+static bool pill_press(int32_t pane, int32_t row)
+{
+    if (pane < 0 || pane >= SCROLLIND_PANE_COUNT)
+        return false;
+#if HAS_LIBAI
+    // The picker lies over the chat's messages, and its rows reach the pill's columns.
+    if (pane == SCROLLIND_CHAT && chat_picker.open)
+        return false;
+#endif
+    pill_drag.active = true;
+    pill_drag.pane = (ScrollIndPane)pane;
+    bool on_pill = false;
+    pill_drag.grab = scrollind_grab(pill_drag.pane, row, &on_pill);
+    touch_state.press_active = false;
+    touch_state.tap_run = 0;
+    if (!on_pill)
+        pill_follow(row);
+    return true;
+}
+
+//! Pick row row of the current screen's list (HIT_ROW), before the region's key is pressed.
+//! @return false when the screen has no such row
+static bool hit_pick_row(int32_t row)
+{
+    if (row < 0)
+        return false;
+    switch (app.mode) {
+    case MODE_HISTORY:
+        if (row >= app.hist_count)
+            return false;
+        app.hist_sel = row;
+        return true;
+    case MODE_TIMER_SELECT:
+        if (row >= (int32_t)NUM_PRESETS)
+            return false;
+        app.preset_idx = row;
+        app.timer_mins = TIMER_PRESETS[row];
+        settings_save();
+        return true;
+    case MODE_STYLE:
+        if (row > STYLE_ELEGANT)
+            return false;
+        app.style = (WritingStyle)row;
+        return true;
+    case MODE_TOC: {
+        TocState* toc = (TocState*)app.toc_state;
+        if (!toc || row >= toc->filtered_count)
+            return false;
+        toc->selected = row;
+        return true;
+    }
+    case MODE_FM_EDIT:
+        // While a new field's name is being typed the rows stay put.
+        if (app.fm_edit.adding_field || row >= app.fm_edit.field_count)
+            return false;
+        app.fm_edit.current_field = row;
+        return true;
+    case MODE_BLOCK_EDIT:
+        if (row > 3)
+            return false;
+        app.block_edit.field = row;
+        return true;
+    default:
+        return false;
+    }
+}
+
+//! Touch before the mode sees the key: a press looks up what the last frame drew under the finger
+//! (dawn_hit). A key region becomes that key, which the mode then handles like a typed one; a
+//! list row is picked, then its key pressed; a pill track starts a drag that the following drag
+//! events move and the release ends; a box with nothing there swallows the press. A press on
+//! nothing reaches the mode unchanged (the note's own cursor and selection taps), and a swipe
+//! over a list moves its highlight.
+//! @return the key for the mode to handle, or DAWN_KEY_NONE when the touch is used up
+static int32_t touch_to_key(int32_t key)
+{
+    if (pill_drag.active && app.mode != MODE_WRITING)
+        pill_drag.active = false;
+
+    if (key == DAWN_KEY_MOUSE_CLICK) {
+        pill_drag.active = false;
+        int32_t row = input_last_mouse_row();
+        HitTarget t;
+        if (!hit_find(input_last_mouse_col(), row, &t))
+            return key;
+        switch (t.kind) {
+        case HIT_KEY:
+            return t.key;
+        case HIT_ROW:
+            return hit_pick_row(t.arg) && t.key ? t.key : DAWN_KEY_NONE;
+        case HIT_PILL:
+            return pill_press(t.arg, row) ? DAWN_KEY_NONE : key;
+        case HIT_INERT:
+            return DAWN_KEY_NONE;
+        }
+        return key;
+    }
+
+    if (pill_drag.active && (key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_RELEASE)) {
+        if (key == DAWN_KEY_MOUSE_DRAG)
+            pill_follow(input_last_mouse_row());
+        else
+            pill_drag.active = false;
+        return DAWN_KEY_NONE;
+    }
+
+    if ((app.mode == MODE_HISTORY || app.mode == MODE_TOC)
+        && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
+        return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_UP : DAWN_KEY_DOWN;
+
+    return key;
+}
+
+// #endregion
 
 static void handle_input(void)
 {
@@ -5503,6 +5641,11 @@ static void handle_input(void)
 
     // Voice helpers (dawn_voice): dictation events, Ctrl+Q read-aloud, any key stopping it.
     if (voice_handle_key(key))
+        return;
+
+    // A tap on something drawn as tappable is the key it stands for (dawn_hit).
+    key = touch_to_key(key);
+    if (key == DAWN_KEY_NONE)
         return;
 
     switch (app.mode) {
@@ -6189,11 +6332,9 @@ static void handle_input(void)
         break;
 
     case MODE_CONFLICT: {
-        // r / o / k (or esc), or a tap on one of the three rows.
+        // r / o / k (or esc); a tap on one of the three rows arrives as its key (render_conflict).
         int32_t choice = -1;
-        if (key == DAWN_KEY_MOUSE_CLICK)
-            choice = render_conflict_hit(input_last_mouse_row(), input_last_mouse_col());
-        else if (key == 'r' || key == 'R')
+        if (key == 'r' || key == 'R')
             choice = CONFLICT_RELOAD;
         else if (key == 'o' || key == 'O')
             choice = CONFLICT_OVERWRITE;
@@ -6219,7 +6360,12 @@ static void handle_input(void)
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
         // A third, where the meaning index is compiled in, shows what it is doing and has its
-        // switch and its rebuild. Any other key closes help.
+        // switch and its rebuild. Any other key closes help, and so does a tap outside the box
+        // (render_help makes its footer hints taps on their keys and the rest of the box inert).
+        // The release and drag that follow a tap are no keys: the one after the tap that opened
+        // help, or turned its page, would otherwise close it at once.
+        if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
+            break;
         int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
         if (key == '\t' || key == DAWN_KEY_RIGHT) {
             if (app.help_page < last_page)
