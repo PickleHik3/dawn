@@ -4328,7 +4328,12 @@ static void render(void)
         render_fm_edit();
         break;
     case MODE_HELP:
-        render_writing();
+        // Help over what it was opened from: the start screen's ? would otherwise show the last
+        // note's status line under the box.
+        if (app.prev_mode == MODE_WELCOME)
+            render_welcome();
+        else
+            render_writing();
         render_help();
         break;
     case MODE_BLOCK_EDIT:

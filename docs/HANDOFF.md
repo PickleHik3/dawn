@@ -53,8 +53,7 @@ Open:
    malloc fails (`src/dawn_scrollind.c`); a hint cut mid-word by an ellipsis still registers its
    key over the stub (`hit_add_hints`); when settings.json cannot be written the tour returns on
    the next launch. Known warts: a kitty-scaled heading paints over the top rows of a popup (menu, search) and
-   leaves a grey block beside the menu box at its rows (pre-existing with search); help opened from
-   the welcome screen shows the last note's status line underneath (pre-existing).
+   leaves a grey block beside the menu box at its rows (pre-existing with search).
 
 ## 2026-10-08 · chat requests name the dawn_chat feature
 
