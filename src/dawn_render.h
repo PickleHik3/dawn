@@ -3,6 +3,7 @@
 #ifndef DAWN_RENDER_H
 #define DAWN_RENDER_H
 
+#include "dawn_commands.h"
 #include "dawn_types.h"
 
 // #region Utility Functions
@@ -75,6 +76,12 @@ enum { CONFLICT_RELOAD, CONFLICT_OVERWRITE, CONFLICT_KEEP, CONFLICT_CHOICES };
 //! (MODE_CONFLICT): what happened, where the writer's text is kept, and the three choices, each
 //! a tap on its key (r, o, k) across the dialog's width.
 void render_conflict(void);
+
+//! Render the command menu (MODE_MENU) over the note: every command of dawn_commands under its
+//! group's heading, its shortcut right-aligned, the selection highlighted and kept in view (m's
+//! scroll is updated), commands that cannot run now drawn dim. Each command that can run is a
+//! tap on its row; the rest of the box swallows taps.
+void render_menu(MenuState* m);
 
 // #endregion
 
