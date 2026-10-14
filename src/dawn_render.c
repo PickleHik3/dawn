@@ -487,7 +487,9 @@ bool render_help_neighbour(int32_t dir, HelpPage* page, int32_t* screen)
 
 //! A help page's footer on row, centred in the box: [<-] back where there is a page before, [tab]
 //! and the page it turns to where there is one after ("next" within a page), and [esc] close.
-//! Its hints are tappable up to the box's right border.
+//! Each item has a slot of its own, the same on every screen and left blank where the item has
+//! nothing to do, so a finger tapping one spot turns screen after screen. Its hints are tappable
+//! up to the box's right border.
 static void help_footer(int32_t row, int32_t left, int32_t width)
 {
     HelpPage page;
@@ -496,11 +498,20 @@ static void help_footer(int32_t row, int32_t left, int32_t width)
     bool next = render_help_neighbour(1, &page, &screen);
     const char* next_name = !next ? "" : page == app.help_page ? "next" : HELP_PAGE_NAMES[page];
 
-    char footer[80];
-    snprintf(footer, sizeof(footer), "%s%s%s%s[esc] close", back ? "[<-] back  " : "", next ? "[tab] " : "",
-        next_name, next ? "  " : "");
+    // The tab slot holds the longest name tab can turn to (any page but the first).
+    int32_t name_w = (int32_t)strlen("next");
+    for (int32_t p = 1; p < HELP_PAGE_COUNT; p++) {
+        if ((int32_t)strlen(HELP_PAGE_NAMES[p]) > name_w)
+            name_w = (int32_t)strlen(HELP_PAGE_NAMES[p]);
+    }
+    char tab[32] = "";
+    if (next)
+        snprintf(tab, sizeof(tab), "[tab] %s", next_name);
+
+    char footer[96];
+    snprintf(footer, sizeof(footer), "%-11s%-*s[esc] close", back ? "[<-] back" : "", (int)(6 + name_w + 2), tab);
     if ((int32_t)strlen(footer) > width - 4) // too narrow for the words: the keys alone still turn and close
-        snprintf(footer, sizeof(footer), "%s%s[esc]", back ? "[<-]  " : "", next ? "[tab]  " : "");
+        snprintf(footer, sizeof(footer), "%-6s%-7s[esc]", back ? "[<-]" : "", next ? "[tab]" : "");
 
     int32_t col = left + (width - (int32_t)strlen(footer)) / 2;
     if (col < left + 1)
