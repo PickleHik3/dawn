@@ -14,6 +14,7 @@
 #include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_footnote.h"
+#include "dawn_format.h"
 #include "dawn_gap.h"
 #include "dawn_highlight.h"
 #include "dawn_hit.h"
@@ -47,6 +48,12 @@
 //! Maximum nesting depth for inline markdown styles
 #define MAX_STYLE_DEPTH 8
 
+//! Fewest text rows the formatting ribbon leaves the note; on a shorter screen it does not show
+#define RIBBON_MIN_NOTE_ROWS 3
+
+// A ribbon button's key minus DAWN_KEY_FMT_BOLD is its FormatOp.
+_Static_assert(DAWN_KEY_FMT_CODE_BLOCK - DAWN_KEY_FMT_BOLD + 1 == FORMAT_COUNT, "one format key per FormatOp");
+
 //! Layout calculation result
 typedef struct {
     int32_t text_area_cols;
@@ -61,6 +68,8 @@ typedef struct {
     int32_t text_width;
     int32_t top_margin;
     int32_t text_height;
+    int32_t ribbon_top; //!< First screen row of the formatting ribbon (when ribbon_rows > 0)
+    int32_t ribbon_rows; //!< Rows the ribbon takes from the note; 0 when it does not show
 } Layout;
 
 //! Render context passed to rendering functions
@@ -178,6 +187,18 @@ static inline Layout calc_layout(void)
     l.text_height = l.ai_sheet ? l.note_rows - l.top_margin : app.rows - l.top_margin - 2;
     if (l.text_height < 1)
         l.text_height = 1;
+    // The formatting ribbon, while it is on, takes its rows from the bottom of the text: they sit
+    // on top of the action bar's row (a blank one without the bar), with the one blank row kept
+    // between them and the text, so the note never draws under a button. Never with a chat open,
+    // in preview or print, nor when it would leave the note fewer than RIBBON_MIN_NOTE_ROWS.
+    if (app.ribbon && !app.ai_open && !app.preview_mode && app.ctx.mode != DAWN_MODE_PRINT) {
+        int32_t rows = commands_ribbon_rows(l.text_width);
+        if (rows > 0 && l.text_height - rows >= RIBBON_MIN_NOTE_ROWS) {
+            l.ribbon_rows = rows;
+            l.ribbon_top = app.rows - 1 - rows;
+            l.text_height -= rows;
+        }
+    }
     return l;
 }
 
@@ -3092,7 +3113,7 @@ skip_chat:
 
 // #endregion
 
-// #region Commands: the phone action bar and the command menu
+// #region Commands: the phone action bar, the formatting ribbon and the command menu
 
 //! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
 static MenuState menu;
@@ -3106,8 +3127,6 @@ static bool command_enabled(const Command* cmd)
 {
     if (!cmd)
         return false;
-    if (cmd->key == DAWN_KEY_CMD_RIBBON)
-        return false; // reserved: the formatting ribbon is not built yet
     if ((cmd->flags & CMD_NEEDS_EDIT) && !CAN_EDIT())
         return false;
     if ((cmd->flags & CMD_NEEDS_MODIFY) && !CAN_MODIFY())
@@ -3139,9 +3158,9 @@ static bool action_bar_shown(const Layout* L)
 
 //! The action bar, on the blank row above the status line: the commands dawn_commands places on
 //! the bar ("undo   find   Aa   AI"), then "more" for the command menu, in the status line's dim,
-//! a command that cannot run now dimmer. Each is a tap on its key (its text and a cell either
-//! side), registered only on the writing screen itself. Items are dropped from the right when the
-//! row is too narrow; "more" always stays.
+//! a command that cannot run now dimmer, "Aa" underlined (pressed) while the ribbon is on. Each is
+//! a tap on its key (its text and a cell either side), registered only on the writing screen
+//! itself. Items are dropped from the right when the row is too narrow; "more" always stays.
 static void render_action_bar(const Layout* L)
 {
     if (!action_bar_shown(L))
@@ -3168,7 +3187,12 @@ static void render_action_bar(const Layout* L)
         int32_t w = i < kept ? widths[i] : more_w;
         move_to(row, col);
         set_fg(command_enabled(c) ? get_dim() : get_border());
+        bool pressed = c->key == DAWN_KEY_CMD_RIBBON && app.ribbon; // like a pressed ribbon button
+        if (pressed)
+            set_underline(UNDERLINE_STYLE_SINGLE);
         out_str(commands_bar_label(c));
+        if (pressed)
+            clear_underline();
         if (taps) {
             int32_t from = col > 1 ? col - 1 : col;
             int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
@@ -3176,6 +3200,86 @@ static void render_action_bar(const Layout* L)
         }
         col += w + BAR_GAP;
     }
+}
+
+//! The cursor and selection as dawn_format takes them
+static FormatCursor format_cursor(void)
+{
+    return (FormatCursor) {
+        .cursor = app.cursor,
+        .anchor = app.selecting ? app.sel_anchor : app.cursor,
+        .selecting = app.selecting,
+    };
+}
+
+//! A ribbon button's key: its FormatOp on the cursor or the selection, as one undo step. The
+//! cursor and selection follow the text (an insert selects the part to type over).
+static void format_key(int32_t key)
+{
+    FormatCursor fc = format_cursor();
+    bool was_dirty = app.dirty;
+    save_undo_state(); // the note as it was: Ctrl+Z comes back here
+    if (!format_apply(&app.text, (FormatOp)(key - DAWN_KEY_FMT_BOLD), &fc)) {
+        app.dirty = was_dirty;
+        return;
+    }
+    app.cursor = fc.cursor;
+    app.sel_anchor = fc.anchor;
+    app.selecting = fc.selecting;
+    // The block cache reparses on a length change only; a same-length edit must say so.
+    if (app.block_cache)
+        block_cache_invalidate((BlockCache*)app.block_cache);
+}
+
+//! The formatting ribbon: the format group's buttons ("B  I  S  `  H1 ...") on the rows calc_layout
+//! keeps for it, in the status line's dim, wrapped between clusters when the row is narrow. A
+//! style that is on at the cursor or over the selection is underlined, a pressed button; when the
+//! note cannot be edited (focus mode) every button is dimmer. Each is a tap on its key (its text
+//! and a cell either side) and the rest of the ribbon swallows taps, registered only on the
+//! writing screen itself.
+static void render_ribbon(const Layout* L)
+{
+    if (L->ribbon_rows <= 0)
+        return;
+    const Command* items[RIBBON_MAX];
+    RibbonSlot slots[RIBBON_MAX];
+    int32_t n = commands_ribbon(items, RIBBON_MAX);
+    if (commands_ribbon_layout(items, n, L->text_width, slots) <= 0)
+        return;
+
+    bool taps = app.mode == MODE_WRITING;
+    bool can = CAN_EDIT();
+    FormatCursor fc = format_cursor();
+    if (taps)
+        hit_add(1, L->ribbon_top, L->text_area_cols, L->ribbon_rows, HIT_INERT, 0, 0);
+    set_bg(get_bg());
+    for (int32_t i = 0; i < n; i++) {
+        int32_t row = L->ribbon_top + slots[i].row;
+        int32_t col = L->margin + 1 + slots[i].col;
+        int32_t w = slots[i].width;
+        bool pressed = can && format_state(&app.text, &fc, (FormatOp)(items[i]->key - DAWN_KEY_FMT_BOLD));
+        move_to(row, col);
+        set_fg(can ? get_dim() : get_border());
+        if (pressed)
+            set_underline(UNDERLINE_STYLE_SINGLE);
+        out_str(commands_bar_label(items[i]));
+        if (pressed)
+            clear_underline();
+        if (taps) {
+            int32_t from = col > 1 ? col - 1 : col;
+            int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
+            hit_add(from, row, to - from + 1, 1, HIT_KEY, items[i]->key, 0);
+        }
+    }
+}
+
+//! The status panel's corner (dawn_status) on the writing screen without a chat sheet: the blank
+//! rows between the text and the status line, less the ribbon's and the action bar's.
+static void status_area_writing(const Layout* L)
+{
+    int32_t top = app.rows - 2 - L->ribbon_rows;
+    int32_t bottom = action_bar_shown(L) || L->ribbon_rows > 0 ? top : app.rows - 1;
+    status_area(top, bottom, L->text_area_cols, status_panel_cols(L), false);
 }
 
 //! Rows the command menu's list shows (render_menu's box less its border, title and hints)
@@ -3948,12 +4052,12 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
-    // Plain text has no status line, but the action bar still shows (on a phone it is the way back
-    // out). The status panel's corner (dawn_status): the two blank rows under the text, or the one
-    // above the bar.
+    // Plain text has no status line, but the action bar and the ribbon still show (on a phone the
+    // bar is the way back out). The status panel's corner (dawn_status): the blank rows under the
+    // text.
+    render_ribbon(&L);
     render_action_bar(&L);
-    status_area(app.rows - 2, action_bar_shown(&L) ? app.rows - 2 : app.rows - 1, L.text_area_cols,
-        status_panel_cols(&L), false);
+    status_area_writing(&L);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
     status_cursor(cursor_screen_row, cursor_screen_col);
@@ -4840,6 +4944,14 @@ static void handle_writing(int32_t key)
     // this is where a touch-detached view reattaches to the cursor (dawn_touch).
     app.view_detached = false;
 
+    // The formatting ribbon's buttons, one key per FormatOp (a range, which a portable switch
+    // cannot spell as one case).
+    if (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK) {
+        if (CAN_EDIT())
+            format_key(key);
+        return;
+    }
+
     switch (key) {
     case '\x1b':
         if (app.ai_open)
@@ -4897,8 +5009,12 @@ static void handle_writing(int32_t key)
         menu_build(&menu, command_enabled);
         MODE_PUSH(MODE_MENU);
         break;
-    case DAWN_KEY_CMD_RIBBON:
-        break; // reserved for the formatting ribbon
+    case DAWN_KEY_CMD_RIBBON: // "Aa" on the action bar, "formatting" in the menu
+        if (!CAN_MODIFY())
+            break;
+        app.ribbon = !app.ribbon;
+        settings_save();
+        break;
 
     case 12: // Ctrl+L - Table of Contents
     {
@@ -6731,6 +6847,7 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
         app.nerd_font = app.launcher_term;
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
+    app.ribbon = false; // the formatting ribbon is off until "Aa" turns it on ("ribbon": true)
     settings_load();
     embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
@@ -7526,15 +7643,16 @@ static void render_writing(void)
     // Under a sheet the note has no status line: the chat's input line is the bottom edge.
     if (!L.ai_sheet)
         render_status_bar(&L);
+    render_ribbon(&L);
     render_action_bar(&L);
 
     // The status panel's corner (dawn_status): the two blank rows between the text and the status
-    // line (one when the action bar takes the lower), or the one between the text and a chat sheet.
+    // line (one when the action bar or the ribbon takes the lower), or the one between the text and
+    // a chat sheet.
     if (L.ai_sheet)
         status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
     else
-        status_area(app.rows - 2, action_bar_shown(&L) ? app.rows - 2 : app.rows - 1, L.text_area_cols,
-            status_panel_cols(&L), false);
+        status_area_writing(&L);
 
     if (app.ai_open) {
         render_ai_panel(&L);

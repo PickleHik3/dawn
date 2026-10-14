@@ -50,7 +50,7 @@ Tests are six plain executables, no framework, no ctest:
 ./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
 ./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
 ./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
-./build/test-commands                              # the command table, action bar fit, menu lines (dawn_commands); exits non-zero on failure
+./build/test-commands                              # the command table, action bar fit, ribbon layout, menu lines (dawn_commands); exits non-zero on failure
 ```
 
 `test-block` links `dawn_block`, `dawn_gap`, `dawn_md`, `dawn_wrap` alone and stubs the theme/image/tex
@@ -127,11 +127,17 @@ the mode's switch, so a tap and its key share one path; a tap on no region reach
 `handle_writing` takes, the shortcut as printed, what each needs, its place on the action bar). The
 phone action bar (`render_action_bar` in `dawn.c`, on the blank row above the status line when
 `app.cols < AI_PANEL_MIN_COLS` or `app.launcher_term`) and the command menu (`MODE_MENU`, "more" on the
-bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and the help page and the formatting
-ribbon are meant to; a new command goes in that table. Running one from the bar or the menu presses its
-key (the menu through `pending_key`), so it behaves as the shortcut does. Commands with no chord are the
-virtual keys `DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` (reserved, ignored until the ribbon exists) and
-`DAWN_KEY_CMD_CHEATSHEET` (help, page 0 for now) in `dawn_backend.h`. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and the help page is meant to; a new
+command goes in that table. Running one from the bar or the menu presses its key (the menu through
+`pending_key`), so it behaves as the shortcut does. Commands with no chord are the virtual keys
+`DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` and `DAWN_KEY_CMD_CHEATSHEET` (help, page 0 for now) in
+`dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
+left out of the menu: toggled by `Aa` on the bar, "formatting" in the menu or `DAWN_KEY_CMD_RIBBON`, off
+by default and saved as `"ribbon"` in settings.json, it takes rows from the note's bottom (`ribbon_rows`
+in `calc_layout`) above the bar's row, wrapping between clusters (`commands_ribbon_layout`). Each button
+is a `DAWN_KEY_FMT_*` key, one per `FormatOp` in order, which `handle_writing` turns into one
+`format_apply` (`dawn_format.c`) and one undo step; a style that `format_state` says is on draws
+underlined. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
 
 ### AI: libai and TAI
@@ -176,7 +182,8 @@ UI rule: show nothing unless `embed_ready()` returned true and the query returne
   light/dark switches arriving as CSI ?997 reports after `?2031h`.
 - Clipboard is OSC 52 under `__ANDROID__`; the xclip/xsel path must stay compiled out there.
 - OSC 8 hyperlinks are gated on `DAWN_CAP_HYPERLINKS`.
-- Notes live in `$XDG_DATA_HOME/dawn` (fallback `~/.dawn`); settings in `<config>/dawn/settings.json`.
+- Notes live in `$XDG_DATA_HOME/dawn` (fallback `~/.dawn`); settings in `<config>/dawn/settings.json`
+  (`theme`, `timer_mins`, `nerd_font`, `meaning_index`, `ribbon`; a save keeps keys it does not know).
 - Storage: every write goes through `dawn_fsio` (temp file, fsync, rename, then a directory fsync).
   `save_session` in `dawn_file.c` compares the file with what dawn last saw and never overwrites
   a change made elsewhere: it writes a `.conflict-<time>.md` copy and opens `MODE_CONFLICT`.
