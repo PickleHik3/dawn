@@ -116,7 +116,7 @@ scroll pill use kitty graphics. `dawn_render.c` draws every non-writing screen a
 key, runs `notice_ack`, the theme-report keys and `voice_handle_key`, then switches on `app.mode`. Ctrl
 keys are raw integers in nested `switch` statements (`case 12: // Ctrl+L`); there is no binding table.
 A new Ctrl key goes in `handle_writing` (and `handle_ai_input` if it should work with the chat focused),
-guarded by `CAN_EDIT()`/`CAN_MODIFY()`, and into `render_help()` in `dawn_render.c`. A new modal needs an
+guarded by `CAN_EDIT()`/`CAN_MODIFY()`, and into the command table below; help lists it from there. A new modal needs an
 `AppMode` value, a `render()` case (usually `render_writing()` then the overlay) and a `handle_input()`
 case. Touch: anything tappable registers a hit region while it renders (`hit_add` in `src/dawn_hit.c`,
 cleared at the top of `render()`), and `handle_input` turns a tap on it into the key it stands for before
@@ -127,11 +127,15 @@ the mode's switch, so a tap and its key share one path; a tap on no region reach
 `handle_writing` takes, the shortcut as printed, what each needs, its place on the action bar). The
 phone action bar (`render_action_bar` in `dawn.c`, on the blank row above the status line when
 `app.cols < AI_PANEL_MIN_COLS` or `app.launcher_term`) and the command menu (`MODE_MENU`, "more" on the
-bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and the help page is meant to; a new
-command goes in that table. Running one from the bar or the menu presses its key (the menu through
-`pending_key`), so it behaves as the shortcut does. Commands with no chord are the virtual keys
-`DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` and `DAWN_KEY_CMD_CHEATSHEET` (help, page 0 for now) in
-`dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
+bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and so does help (`MODE_HELP`, Ctrl+O):
+its shortcut pages list every command by group with its key and its tap ("bar", "ribbon" or "menu"),
+from `help_rows`/`help_paginate`, after a hand-written "move and select" group; a new command goes in
+that table and nowhere else. Help's pages are `HelpPage` (`dawn_types.h`: shortcuts, Markdown cheatsheet,
+activity, meaning index), each over as many screens as the screen's height needs (`app.help_screen`,
+`render_help_screens`); tab and <- turn through them via `render_help_neighbour`. Running a command from
+the bar or the menu presses its key (the menu through `pending_key`), so it behaves as the shortcut does.
+Commands with no chord are the virtual keys `DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` and
+`DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
 left out of the menu: toggled by `Aa` on the bar, "formatting" in the menu or `DAWN_KEY_CMD_RIBBON`, off
 by default and saved as `"ribbon"` in settings.json, it takes rows from the note's bottom (`ribbon_rows`
 in `calc_layout`) above the bar's row, wrapping between clusters (`commands_ribbon_layout`). Each button

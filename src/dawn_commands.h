@@ -1,8 +1,8 @@
 // dawn_commands.h - The writing screen's commands, one table read by every place that lists them
 //
 // Each command is the key dawn's writing handler already takes for it, with the words and the
-// shortcut a person sees. The action bar, the command menu, the formatting ribbon (and later the
-// help page) draw from this table, so a button and the key it teaches cannot disagree.
+// shortcut a person sees. The action bar, the command menu, the formatting ribbon and the help
+// pages draw from this table, so a button and the key it teaches cannot disagree.
 // Pure: no app, no backend; whether a command can run right now is decided in dawn.c.
 
 #ifndef DAWN_COMMANDS_H
@@ -129,6 +129,56 @@ int32_t menu_step(const MenuState* m, int32_t from, int32_t dir, int32_t steps);
 //! Scroll m so its selection shows in visible lines, with its group's heading too when the
 //! selection is the group's first command.
 void menu_scroll_to(MenuState* m, int32_t visible);
+
+// #endregion
+
+// #region Help pages
+
+//! What one line of a help page holds
+typedef enum {
+    HELP_ROW_BLANK, //!< Space between two groups
+    HELP_ROW_HEADING, //!< A group's name
+    HELP_ROW_ITEM, //!< Something to do, its key and how to do it by touch
+} HelpRowKind;
+
+//! One line of the shortcut pages
+typedef struct {
+    HelpRowKind kind;
+    const char* text; //!< The heading's words or what the item does ("undo"); "" on a blank
+    const char* key; //!< The item's key as printed ("^Z"), "" when it has none
+    const char* tap; //!< How to do it by touch: "bar", "ribbon", "menu" or a gesture ("swipe"); "" when none
+    const char* tap_label; //!< The bar's or the ribbon's button text ("Aa", "B"), NULL when none
+} HelpRow;
+
+//! Most lines help_rows() writes
+#define HELP_ROWS_MAX 96
+
+//! The shortcut pages' lines: a hand-written "move and select" group (the arrow and selection keys
+//! are not commands), then every command under its group's heading in table order, the format
+//! group as the ribbon's buttons, a blank between groups.
+//! @return how many were written to out (at most max)
+int32_t help_rows(HelpRow* out, int32_t max);
+
+//! One page of a paginated list of lines
+typedef struct {
+    int32_t first; //!< Index of the page's first line
+    int32_t end; //!< One past its last
+    int32_t heading; //!< A heading drawn above first when the page opens inside its group, -1 when none
+} HelpSpan;
+
+//! Split n lines into pages of per_page lines. A page never starts or ends with a blank and never
+//! ends with a heading (it moves to the next page with the line it heads); a page that opens
+//! inside a group repeats that group's heading, which counts toward per_page.
+//! @return pages written to pages (at most max)
+int32_t help_paginate(const HelpRow* rows, int32_t n, int32_t per_page, HelpSpan* pages, int32_t max);
+
+//! Split n lines that end with a one-line note into pages of per_page lines. The lines are spread
+//! evenly so the last page, which carries the note (under a blank when there is room), is never
+//! left with the note alone unless a page holds a single line.
+//! @param rows_per receives how many lines each page but the last holds (the last holds the rest)
+//! @param blank receives whether a blank goes between the last line and the note
+//! @return the number of pages, 1 or more
+int32_t help_pages_with_note(int32_t n, int32_t per_page, int32_t* rows_per, bool* blank);
 
 // #endregion
 

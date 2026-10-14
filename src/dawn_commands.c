@@ -7,16 +7,17 @@
 // place, and the command menu ("more" on the bar, or Ctrl+]) lists all of them with the shortcut
 // beside each, so every button also teaches its key. The formatting ribbon draws the format group,
 // one button per FormatOp, laid out here in rows that wrap between clusters; the menu leaves that
-// group out, since sixteen rows of styles would bury the rest. The help page is meant to read the
-// same table.
+// group out, since sixteen rows of styles would bury the rest. The help pages read the same
+// table: every command by task, with its key and how to reach it by touch (its bar button, its
+// ribbon button, or the menu), so a new command is listed in help by adding it here.
 //
 // Running a command means pressing its key: the bar registers a tap region for the key, the menu
 // feeds the key to the writing handler, so a command behaves exactly as its shortcut does. Keys
 // with no physical chord (the menu itself, the ribbon and its buttons, the cheatsheet) are virtual
 // DawnKeys that handle_writing takes like any other.
 //
-// The menu's line list (headings between groups, the highlighted line, scrolling) lives here too,
-// as plain data. Pure: no app, no backend, so tests/test_commands.c links this file alone. Whether
+// The menu's line list (headings between groups, the highlighted line, scrolling) and the help
+// pages' lines and page breaks live here too, as plain data. Pure: no app, no backend, so tests/test_commands.c links this file alone. Whether
 // a command can run right now (selection, focus mode, a model) is decided by command_enabled() in
 // dawn.c from the CommandFlag bits.
 
@@ -300,6 +301,121 @@ void menu_scroll_to(MenuState* m, int32_t visible)
         m->scroll = max_scroll;
     if (m->scroll < 0)
         m->scroll = 0;
+}
+
+// #endregion
+
+// #region Help pages
+
+//! The help pages' first group: moving and selecting are keys of the editor, not commands, and on
+//! a phone they are gestures on the note itself.
+static const HelpRow MOVE_ROWS[] = {
+    { HELP_ROW_HEADING, "move and select", "", "", NULL },
+    { HELP_ROW_ITEM, "move the cursor", "arrows", "tap", NULL },
+    { HELP_ROW_ITEM, "jump a word", "^arrows", "", NULL },
+    { HELP_ROW_ITEM, "line start or end", "home/end", "", NULL },
+    { HELP_ROW_ITEM, "scroll", "pgup/pgdn", "swipe", NULL },
+    { HELP_ROW_ITEM, "select", "shift+arrows", "hold, drag", NULL },
+    { HELP_ROW_ITEM, "select a word", "", "double tap", NULL },
+    { HELP_ROW_ITEM, "select a paragraph", "", "triple tap", NULL },
+};
+
+#define MOVE_ROW_COUNT ((int32_t)(sizeof(MOVE_ROWS) / sizeof(MOVE_ROWS[0])))
+
+int32_t help_rows(HelpRow* out, int32_t max)
+{
+    int32_t n = 0;
+    for (int32_t i = 0; i < MOVE_ROW_COUNT && n < max; i++)
+        out[n++] = MOVE_ROWS[i];
+
+    int32_t last_group = -1;
+    for (int32_t i = 0; i < COMMAND_COUNT; i++) {
+        const Command* c = &COMMANDS[i];
+        if ((int32_t)c->group != last_group) {
+            if (n + 2 > max)
+                break;
+            out[n++] = (HelpRow) { .kind = HELP_ROW_BLANK, .text = "", .key = "", .tap = "", .tap_label = NULL };
+            out[n++] = (HelpRow) { .kind = HELP_ROW_HEADING, .text = commands_group_name(c->group), .key = "", .tap = "", .tap_label = NULL };
+            last_group = (int32_t)c->group;
+        }
+        if (n >= max)
+            break;
+        HelpRow r = { .kind = HELP_ROW_ITEM, .text = c->label, .key = c->shortcut, .tap = "menu", .tap_label = NULL };
+        if (c->group == CMD_GROUP_FORMAT) {
+            r.tap = "ribbon";
+            r.tap_label = commands_bar_label(c);
+        } else if (c->bar > 0) {
+            r.tap = "bar";
+            r.tap_label = commands_bar_label(c);
+        }
+        out[n++] = r;
+    }
+    return n;
+}
+
+int32_t help_paginate(const HelpRow* rows, int32_t n, int32_t per_page, HelpSpan* pages, int32_t max)
+{
+    if (per_page < 1)
+        per_page = 1;
+    int32_t count = 0;
+    int32_t heading = -1; // the heading of the group line i belongs to, -1 outside any
+    int32_t i = 0;
+    while (i < n && count < max) {
+        while (i < n && rows[i].kind == HELP_ROW_BLANK) {
+            heading = -1;
+            i++;
+        }
+        if (i >= n)
+            break;
+        HelpSpan page = { .first = i, .end = i, .heading = -1 };
+        int32_t used = 0;
+        if (rows[i].kind == HELP_ROW_ITEM && heading >= 0 && per_page > 1) {
+            page.heading = heading;
+            used = 1;
+        }
+        while (i < n && used < per_page) {
+            // A heading goes down to the next page unless the line it heads fits beside it here.
+            if (rows[i].kind == HELP_ROW_HEADING && used > 0 && used + 2 > per_page)
+                break;
+            if (rows[i].kind == HELP_ROW_HEADING)
+                heading = i;
+            else if (rows[i].kind == HELP_ROW_BLANK)
+                heading = -1;
+            used++;
+            i++;
+        }
+        page.end = i;
+        while (page.end > page.first && rows[page.end - 1].kind == HELP_ROW_BLANK)
+            page.end--;
+        pages[count++] = page;
+    }
+    return count;
+}
+
+int32_t help_pages_with_note(int32_t n, int32_t per_page, int32_t* rows_per, bool* blank)
+{
+    if (per_page < 1)
+        per_page = 1;
+    if (n < 0)
+        n = 0;
+    // The fewest pages whose last one, holding what the others leave, still has room for the note:
+    // first with a line left beside the note, then (a page of one line) with the note alone.
+    for (int32_t pass = 0; pass < 2; pass++) {
+        int32_t least_last = pass == 0 && n > 0 ? 1 : 0;
+        for (int32_t pages = 1; pages <= n + 1; pages++) {
+            int32_t each = (n + pages - 1) / pages;
+            int32_t last = n - (pages - 1) * each;
+            if (each > per_page || last < least_last || last + 1 > per_page)
+                continue;
+            *rows_per = each;
+            *blank = last > 0 && last + 2 <= per_page;
+            return pages;
+        }
+    }
+    // Not reached: n + 1 pages of one line each always fit.
+    *rows_per = 1;
+    *blank = false;
+    return n + 1;
 }
 
 // #endregion

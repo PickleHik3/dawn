@@ -1,6 +1,7 @@
 // test_commands.c - host tests for the command table (dawn_commands.c): every entry complete,
 // keys unique, groups in display order, the action bar's items and fit, and the menu's lines,
-// stepping and scrolling. Built with USE_LIBAI and DAWN_HAS_SPEAK so the fullest table is checked.
+// stepping and scrolling, and the help pages' lines and page breaks. Built with USE_LIBAI and
+// DAWN_HAS_SPEAK so the fullest table is checked.
 
 #include "dawn_backend.h"
 #include "dawn_commands.h"
@@ -215,12 +216,144 @@ static void test_menu(void)
     CHECK(m.scroll == 0);
 }
 
+static void test_help_rows(void)
+{
+    HelpRow rows[HELP_ROWS_MAX];
+    int32_t n = help_rows(rows, HELP_ROWS_MAX);
+    CHECK(n > 40 && n < HELP_ROWS_MAX);
+    CHECK(rows[0].kind == HELP_ROW_HEADING && strcmp(rows[0].text, "move and select") == 0);
+    CHECK(rows[n - 1].kind == HELP_ROW_ITEM);
+
+    // Every command is listed once, under its group's heading, with how to reach it by touch.
+    int32_t count = 0;
+    const Command* all = commands_all(&count);
+    for (int32_t c = 0; c < count; c++) {
+        int32_t found = 0;
+        for (int32_t i = 0; i < n; i++) {
+            if (rows[i].kind != HELP_ROW_ITEM || rows[i].text != all[c].label)
+                continue;
+            found++;
+            CHECK(strcmp(rows[i].key, all[c].shortcut) == 0);
+            if (all[c].group == CMD_GROUP_FORMAT) {
+                CHECK(strcmp(rows[i].tap, "ribbon") == 0);
+                CHECK(rows[i].tap_label && strcmp(rows[i].tap_label, commands_bar_label(&all[c])) == 0);
+            } else if (all[c].bar > 0) {
+                CHECK(strcmp(rows[i].tap, "bar") == 0);
+                CHECK(rows[i].tap_label && strcmp(rows[i].tap_label, commands_bar_label(&all[c])) == 0);
+            } else {
+                CHECK(strcmp(rows[i].tap, "menu") == 0);
+                CHECK(rows[i].tap_label == NULL);
+            }
+            int32_t h = i;
+            while (h >= 0 && rows[h].kind != HELP_ROW_HEADING)
+                h--;
+            CHECK(h >= 0 && strcmp(rows[h].text, commands_group_name(all[c].group)) == 0);
+        }
+        CHECK(found == 1);
+    }
+    const Command* aa = commands_find(DAWN_KEY_CMD_RIBBON);
+    CHECK(aa && aa->bar > 0 && strcmp(commands_bar_label(aa), "Aa") == 0);
+    const Command* cheat = commands_find(DAWN_KEY_CMD_CHEATSHEET);
+    CHECK(cheat && cheat->group == CMD_GROUP_HELP && strcmp(cheat->label, "markdown cheatsheet") == 0);
+
+    // Groups come in table order, a blank before each heading but the first.
+    int32_t headings = 0;
+    int32_t last_group = -1;
+    for (int32_t i = 1; i < n; i++) {
+        if (rows[i].kind != HELP_ROW_HEADING)
+            continue;
+        headings++;
+        CHECK(rows[i - 1].kind == HELP_ROW_BLANK);
+        int32_t g = 0;
+        while (g < CMD_GROUP_COUNT && strcmp(commands_group_name((CommandGroup)g), rows[i].text) != 0)
+            g++;
+        CHECK(g < CMD_GROUP_COUNT && g > last_group);
+        last_group = g;
+    }
+    CHECK(headings == CMD_GROUP_COUNT); // every group has commands in the fullest table
+    for (int32_t i = 0; i < n; i++)
+        CHECK(rows[i].text && rows[i].key && rows[i].tap);
+}
+
+static void test_help_paginate(void)
+{
+    HelpRow rows[HELP_ROWS_MAX];
+    int32_t n = help_rows(rows, HELP_ROWS_MAX);
+    HelpSpan pages[HELP_ROWS_MAX];
+    for (int32_t per = 1; per <= 40; per++) {
+        int32_t count = help_paginate(rows, n, per, pages, HELP_ROWS_MAX);
+        CHECK(count >= 1);
+        int32_t next = 0; // every line but blanks is on exactly one page, in order
+        for (int32_t p = 0; p < count; p++) {
+            const HelpSpan* s = &pages[p];
+            CHECK(s->first < s->end);
+            while (next < s->first) {
+                CHECK(rows[next].kind == HELP_ROW_BLANK);
+                next++;
+            }
+            CHECK(next == s->first);
+            next = s->end;
+            CHECK(rows[s->first].kind != HELP_ROW_BLANK);
+            CHECK(rows[s->end - 1].kind != HELP_ROW_BLANK);
+            CHECK(s->end - s->first + (s->heading >= 0 ? 1 : 0) <= per);
+            // Headings never orphan at a page's bottom.
+            if (per >= 2)
+                CHECK(rows[s->end - 1].kind != HELP_ROW_HEADING);
+            // A page that opens inside a group repeats that group's heading.
+            int32_t h = s->first - 1;
+            while (h >= 0 && rows[h].kind == HELP_ROW_ITEM)
+                h--;
+            bool inside = rows[s->first].kind == HELP_ROW_ITEM && h >= 0 && rows[h].kind == HELP_ROW_HEADING;
+            if (per >= 2)
+                CHECK(s->heading == (inside ? h : -1));
+            else
+                CHECK(s->heading == -1);
+        }
+        while (next < n && rows[next].kind == HELP_ROW_BLANK)
+            next++;
+        CHECK(next == n);
+    }
+    // The phone pane, 24 rows (17 lines) and 12 rows with the keyboard up (8 lines)
+    printf("shortcut pages: %d at 17 lines, %d at 8, %d at 19\n", help_paginate(rows, n, 17, pages, HELP_ROWS_MAX),
+        help_paginate(rows, n, 8, pages, HELP_ROWS_MAX), help_paginate(rows, n, 19, pages, HELP_ROWS_MAX));
+}
+
+static void test_help_note(void)
+{
+    for (int32_t n = 0; n <= 24; n++) {
+        for (int32_t per = 1; per <= 24; per++) {
+            int32_t each = -1;
+            bool blank = true;
+            int32_t pages = help_pages_with_note(n, per, &each, &blank);
+            CHECK(pages >= 1);
+            CHECK(each >= 0 && each <= per);
+            int32_t last = n - (pages - 1) * each;
+            CHECK(last >= 0 && last <= (pages > 1 ? each : n));
+            CHECK(last + 1 + (blank ? 1 : 0) <= per);
+            if (n > 0 && per >= 2)
+                CHECK(last >= 1); // the note is never alone where a page holds two lines
+            if (n + 1 <= per)
+                CHECK(pages == 1);
+            if (blank)
+                CHECK(last > 0);
+        }
+    }
+    // The cheatsheet's 16 rows: one page at 24 rows (17 lines), three of 6, 6 and 4 at 12 (8 lines).
+    int32_t each = 0;
+    bool blank = false;
+    CHECK(help_pages_with_note(16, 17, &each, &blank) == 1 && !blank);
+    CHECK(help_pages_with_note(16, 8, &each, &blank) == 3 && each == 6 && blank);
+}
+
 int main(void)
 {
     test_entries();
     test_bar();
     test_ribbon();
     test_menu();
+    test_help_rows();
+    test_help_paginate();
+    test_help_note();
     printf("%d/%d checks passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;
 }
