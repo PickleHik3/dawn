@@ -37,11 +37,21 @@ void render_timer_select(void);
 //! Render the style selection screen
 void render_style_select(void);
 
-//! Render the help screen: app.help_page 0 = keyboard shortcuts, 1 = activity (notices), 2 = the
-//! meaning index's state with its switch and rebuild (drawn only where DAWN_EMBED_LIVE). The box
-//! swallows taps (HIT_INERT); its footer hints and the meaning page's two action rows are taps on
-//! their keys.
+//! Render the help screen app.help_screen of page app.help_page (HelpPage): the shortcuts by task
+//! from the command table, the Markdown cheatsheet, the activity list (notices), or the meaning
+//! index's state with its switch and rebuild (only where DAWN_EMBED_LIVE). The box swallows taps
+//! (HIT_INERT); its footer hints and the meaning page's two action rows are taps on their keys.
 void render_help(void);
+
+//! How many screens page takes at the screen's current size: the shortcuts and the cheatsheet
+//! split over as many as their lines need, the others take one, and the meaning page none where
+//! the meaning index is not compiled in.
+int32_t render_help_screens(HelpPage page);
+
+//! The help screen after (dir 1) or before (dir -1) the one shown, as tab and <- turn to it:
+//! the next screen of the same page, else the first (or last) screen of the next page that has one.
+//! @return false when there is none that way
+bool render_help_neighbour(int32_t dir, HelpPage* page, int32_t* screen);
 
 //! How long the meaning page's rebuild waits for its confirming second r (or tap)
 #define HELP_REBUILD_CONFIRM_MS 3000

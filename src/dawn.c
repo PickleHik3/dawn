@@ -4996,11 +4996,13 @@ static void handle_writing(int32_t key)
         footnote_jump(&app.text, &app.cursor);
         break;
     case 15:
-        app.help_page = 0;
+        app.help_page = HELP_PAGE_SHORTCUTS;
+        app.help_screen = 0;
         MODE_PUSH(MODE_HELP);
         break;
     case DAWN_KEY_CMD_CHEATSHEET:
-        app.help_page = 0; // the Markdown cheatsheet page comes with the help page's rewrite
+        app.help_page = HELP_PAGE_CHEATSHEET;
+        app.help_screen = 0;
         MODE_PUSH(MODE_HELP);
         break;
 
@@ -5915,7 +5917,8 @@ static void handle_input(void)
             settings_save();
             break;
         case '?':
-            app.help_page = 0;
+            app.help_page = HELP_PAGE_SHORTCUTS;
+            app.help_screen = 0;
             MODE_PUSH(MODE_HELP);
             break;
         }
@@ -6643,26 +6646,27 @@ static void handle_input(void)
         break;
 
     case MODE_HELP: {
-        // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
-        // failed save or an AI edit can be found again without adding anything to the page itself.
-        // A third, where the meaning index is compiled in, shows what it is doing and has its
-        // switch and its rebuild. Any other key closes help, and so does a tap outside the box
-        // (render_help makes its footer hints taps on their keys and the rest of the box inert).
-        // The release and drag that follow a tap are no keys: the one after the tap that opened
-        // help, or turned its page, would otherwise close it at once.
+        // Tab or -> turns to the next screen, <- back (HelpPage order): the shortcuts and the
+        // Markdown cheatsheet over as many screens as the box needs at this height, then the
+        // notices newest-first, so a failed save or an AI edit can be found again, then, where the
+        // meaning index is compiled in, what it is doing with its switch and its rebuild. Any
+        // other key closes help, and so does a tap outside the box (render_help makes its footer
+        // hints taps on their keys and the rest of the box inert). The release and drag that
+        // follow a tap are no keys: the one after the tap that opened help, or turned its page,
+        // would otherwise close it at once.
         if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
             break;
-        int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
-        if (key == '\t' || key == DAWN_KEY_RIGHT) {
-            if (app.help_page < last_page)
-                app.help_page++;
-        } else if (key == DAWN_KEY_LEFT) {
-            if (app.help_page > 0)
-                app.help_page--;
-        } else if (app.help_page != 2 || !help_meaning_key(key)) {
+        if (key == '\t' || key == DAWN_KEY_RIGHT || key == DAWN_KEY_LEFT) {
+            HelpPage page;
+            int32_t screen;
+            if (render_help_neighbour(key == DAWN_KEY_LEFT ? -1 : 1, &page, &screen)) {
+                app.help_page = page;
+                app.help_screen = screen;
+            }
+        } else if (app.help_page != HELP_PAGE_MEANING || !help_meaning_key(key)) {
             MODE_POP();
         }
-        if (app.help_page != 2)
+        if (app.help_page != HELP_PAGE_MEANING)
             app.help_rebuild_armed = 0;
         break;
     }
