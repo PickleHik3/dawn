@@ -257,6 +257,31 @@ if(NOT EMSCRIPTEN)
         target_link_libraries(test-store PRIVATE m)
     endif()
 
+    # Test target for the one-shot tips' seen set (dawn_tips) and its "tips_seen" array in
+    # settings.json; pure, so it links alone with cJSON
+    add_executable(test-tips
+        tests/test_tips.c
+        src/dawn_tips.c
+        third-party/cJSON.c
+    )
+
+    target_include_directories(test-tips PRIVATE src third-party)
+
+    if(MSVC)
+        target_compile_options(test-tips PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-tips PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-tips PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-tips PRIVATE ${SANITIZER_FLAGS})
+        endif()
+        target_link_libraries(test-tips PRIVATE m)
+    endif()
+
     # Test target for the hit-region registry (dawn_hit), which turns taps into keys; pure, so
     # it links alone
     add_executable(test-hit

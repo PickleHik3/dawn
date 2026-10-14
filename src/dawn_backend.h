@@ -79,6 +79,7 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_CMD_MENU, //!< Open the command menu (also Ctrl+])
     DAWN_KEY_CMD_RIBBON, //!< Show or hide the formatting ribbon
     DAWN_KEY_CMD_CHEATSHEET, //!< Open help on its Markdown cheatsheet page
+    DAWN_KEY_CMD_TOUR, //!< Open the first-run tour again (MODE_TOUR)
     // The formatting ribbon's buttons, in FormatOp order (dawn_format.h): the op is
     // key - DAWN_KEY_FMT_BOLD.
     DAWN_KEY_FMT_BOLD,

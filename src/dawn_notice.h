@@ -12,6 +12,8 @@ typedef enum {
     NOTICE_INFO, //!< e.g. "model ready"
     NOTICE_AI_CHANGE, //!< the AI changed the note or its title; Ctrl+Z right after reverts it
     NOTICE_ERROR, //!< e.g. "couldn't save" — stays until acknowledged
+    NOTICE_TIP, //!< a one-shot tip (dawn_tips); fades like INFO, and the writing screen gives it the
+        //!< whole status line
 } NoticeKind;
 
 //! Post a notice. The text is copied; keep it short and lower-case ("renamed · Eid plans").

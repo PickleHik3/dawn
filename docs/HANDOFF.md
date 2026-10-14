@@ -4,6 +4,42 @@ A rolling note for the next agent. Read it before starting; before ending a sess
 move finished items out, add what you left open, and date your entry. Newest session first. Keep
 it short: a line per item, with file:line or the command that shows it.
 
+## 2026-10-14 · touch and onboarding
+
+Done (on `tl`):
+- Hit regions and taps on every screen, and the draggable scroll pill: merge `0bd05f7` (`src/dawn_hit.c`).
+- The help box shrinks to a 24-row pane so its footer taps land: `4242eab`.
+- The pure format module (bold, lists, headings, inserts on the gap buffer): `3b830e6` (`src/dawn_format.c`).
+- The command table, the phone action bar and the command menu (Ctrl+], "more"): merge `18c1b5b` (`src/dawn_commands.c`).
+- The formatting ribbon toggled by `Aa`: merge `28fe8ca`.
+- Help by task with keys and taps, and the Markdown cheatsheet page: merge `bfc7186`.
+- First-run tour (`MODE_TOUR`, `render_tour` in `src/dawn_render.c`, `tour_key` in `src/dawn.c`) and the
+  one-shot tips' seen set (`src/dawn_tips.c`, `"onboarded"` and `"tips_seen"` in settings.json,
+  `./build/test-tips`): `9b6b594`. "welcome tour" in the menu's help group opens the tour again.
+- Help footer items keep their columns on every screen (blank back slot on the first): `2488424`.
+
+- Two one-shot tips, each shown once as a `NOTICE_TIP` that has the writing screen's whole status
+  line to itself (`tip_show`, `tip_drawn` and `render_status_bar` in `src/dawn.c`): the first
+  selection ("selected · Aa formats it, AI can rewrite it") and the first autosave of a note with
+  text ("saved · dawn saves as you type"). A tip is marked seen only once the line drew it: `6ce9eb1`.
+  The other two tips planned (leaving a note, the first Markdown mark) were dropped: the tour's
+  cards say both, the start screen draws no notices, and ? types a question mark in a note.
+
+Open:
+1. Tips: the save tip comes only from the 5-second autosave, not the frontmatter editor's save or
+   esc. "Aa" in the selection tip names the phone's action bar, which a wide desktop terminal does
+   not draw.
+2. Device checks owed on the phone (A065, 53x24 and with the keyboard up, about 53x12): tap every
+   screen's items; drag the note and chat pills; the bar, the menu and Ctrl+] from the in-app keyboard;
+   both ribbon rows and the pressed underline; help pages, the cheatsheet and the meaning page's m/r
+   taps; the tour's three cards, a tap on "[enter] next", esc, and "welcome tour" from the menu; the
+   selection tip after a drag and after a double tap, the save tip, each once. The tour, the tips and
+   the help footer were compiled and unit-tested only, never run in tmux by the worker.
+3. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
+4. Launcher side, not done: a dawn-aware extra-keys row (esc, ctrl, tab, arrows). Long press was
+   explicitly not done.
+5. Known wart: a format op that changes nothing still pushes an undo state (`format_key` in `src/dawn.c`).
+
 ## 2026-10-08 · chat requests name the dawn_chat feature
 
 Done: `5ae91ba` (`libai/ai_bridge_openai.c` `build_body`) sends `"function": "dawn_chat"` when the

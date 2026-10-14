@@ -41,7 +41,7 @@ Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`). `USE_LIBAI` is OFF by 
 so build with it ON before claiming a change compiles. Source files are globbed (`src/dawn*.c`,
 `src/highlight/lang/*.c`), so re-run cmake after adding a file.
 
-Tests are six plain executables, no framework, no ctest:
+Tests are seven plain executables, no framework, no ctest:
 
 ```sh
 ./build/test-block                                 # block + inline parsing; exits non-zero on failure
@@ -51,6 +51,7 @@ Tests are six plain executables, no framework, no ctest:
 ./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
 ./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
 ./build/test-commands                              # the command table, action bar fit, ribbon layout, menu lines (dawn_commands); exits non-zero on failure
+./build/test-tips                                  # the one-shot tips' seen set and its "tips_seen" JSON (dawn_tips); exits non-zero on failure
 ```
 
 `test-block` links `dawn_block`, `dawn_gap`, `dawn_md`, `dawn_wrap` alone and stubs the theme/image/tex
@@ -58,7 +59,8 @@ getters at the top of `tests/test_block.c`. When `dawn_md.c` starts calling a ne
 there or the test stops linking. `test-embed` links only `dawn_embed_index.c`; keep that file free of
 globals, backend calls, threads and network so it stays that way. `test-store` (not on Windows) links
 `dawn_fsio.c`, `dawn_crdt.c`, `dawn_notepath.c` and cJSON with stubs; keep those three pure too.
-`test-hit`, `test-format` (with `dawn_gap.c`) and `test-commands` each link their module alone.
+`test-hit`, `test-format` (with `dawn_gap.c`), `test-commands` and `test-tips` (with cJSON) each link
+their module alone.
 
 Format with `.clang-format` (WebKit base, 4 spaces, `char* p`, no column limit, function brace on its own line).
 
@@ -135,7 +137,7 @@ activity, meaning index), each over as many screens as the screen's height needs
 `render_help_screens`); tab and <- turn through them via `render_help_neighbour`. Running a command from
 the bar or the menu presses its key (the menu through `pending_key`), so it behaves as the shortcut does.
 Commands with no chord are the virtual keys `DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` and
-`DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
+`DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) and `DAWN_KEY_CMD_TOUR` in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
 left out of the menu: toggled by `Aa` on the bar, "formatting" in the menu or `DAWN_KEY_CMD_RIBBON`, off
 by default and saved as `"ribbon"` in settings.json, it takes rows from the note's bottom (`ribbon_rows`
 in `calc_layout`) above the bar's row, wrapping between clusters (`commands_ribbon_layout`). Each button
@@ -143,6 +145,15 @@ is a `DAWN_KEY_FMT_*` key, one per `FormatOp` in order, which `handle_writing` t
 `format_apply` (`dawn_format.c`) and one undo step; a style that `format_state` says is on draws
 underlined. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
+
+First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards
+in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` in `dawn.c`; enter and the
+arrows or a swipe turn cards, esc or enter on the last one sets `onboarded` and goes to the start screen).
+"welcome tour" in the help group of the command table (`DAWN_KEY_CMD_TOUR`) pushes it again, and then it
+pops back. Two one-shot tips, the first selection and the first save, go through `tip_show` in
+`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` draws alone across the whole status line; a tip
+counts as given only once drawn, never off the writing screen. `src/dawn_tips.c` is the pure set of
+tips given (`TipId`, `tips_seen`, `tips_mark`), saved by name as `"tips_seen"` in settings.json.
 
 ### AI: libai and TAI
 
@@ -187,7 +198,8 @@ UI rule: show nothing unless `embed_ready()` returned true and the query returne
 - Clipboard is OSC 52 under `__ANDROID__`; the xclip/xsel path must stay compiled out there.
 - OSC 8 hyperlinks are gated on `DAWN_CAP_HYPERLINKS`.
 - Notes live in `$XDG_DATA_HOME/dawn` (fallback `~/.dawn`); settings in `<config>/dawn/settings.json`
-  (`theme`, `timer_mins`, `nerd_font`, `meaning_index`, `ribbon`; a save keeps keys it does not know).
+  (`theme`, `timer_mins`, `nerd_font`, `meaning_index`, `ribbon`, `onboarded`, `tips_seen`; a save keeps
+  keys it does not know, and tip names in `tips_seen` it does not know).
 - Storage: every write goes through `dawn_fsio` (temp file, fsync, rename, then a directory fsync).
   `save_session` in `dawn_file.c` compares the file with what dawn last saw and never overwrites
   a change made elsewhere: it writes a `.conflict-<time>.md` copy and opens `MODE_CONFLICT`.

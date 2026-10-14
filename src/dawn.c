@@ -33,6 +33,7 @@
 #include "dawn_theme.h"
 #include "dawn_title.h"
 #include "dawn_timer.h"
+#include "dawn_tips.h"
 #include "dawn_toc.h"
 #include "dawn_utils.h"
 #include "dawn_voice.h"
@@ -3291,6 +3292,49 @@ static int32_t menu_page(void)
 
 // #endregion
 
+// #region One-shot tips
+
+//! The tip posted and not yet drawn, TIP_COUNT for none: a tip counts as given (and is saved as
+//! seen) only once render_status_bar() has drawn it.
+static TipId tip_pending = TIP_COUNT;
+
+//! Give a one-shot tip (dawn_tips) as a NOTICE_TIP, which takes the writing screen's whole status
+//! line. Only where that line is drawn and shows notices: the writing screen, not printing or
+//! previewing, not in focus mode, not under the chat's bottom sheet; and never over another
+//! notice (a sticky error among them). The moment comes again, and the tip waits for it.
+static void tip_show(TipId id, const char* text)
+{
+    if (tips_seen(id) || IS_PRINT_MODE() || app.mode != MODE_WRITING || app.preview_mode || app.focus_mode)
+        return;
+    if (notice_current(NULL, NULL, NULL) || calc_layout().ai_sheet)
+        return;
+    notice_post(NOTICE_TIP, text);
+    tip_pending = id;
+}
+
+//! The status line drew a NOTICE_TIP: the tip behind it is given, and remembered.
+static void tip_drawn(void)
+{
+    if (tip_pending == TIP_COUNT)
+        return;
+    tips_mark(tip_pending);
+    tip_pending = TIP_COUNT;
+    settings_save();
+}
+
+//! Bytes of s's first cols code points (each counted as one column)
+static size_t tip_prefix(const char* s, int32_t cols)
+{
+    size_t n = 0;
+    for (; s[n]; n++) {
+        if (((unsigned char)s[n] & 0xC0) != 0x80 && cols-- <= 0)
+            break;
+    }
+    return n;
+}
+
+// #endregion
+
 // #region Status Bar Rendering
 
 //! Render status bar
@@ -3303,6 +3347,26 @@ static void render_status_bar(const Layout* L)
     move_to(app.rows, 1);
     for (int32_t i = 0; i < L->text_area_cols; i++)
         out_char(' ');
+
+    // A one-shot tip (dawn_tips) has the line to itself while it shows, dim and fading like any
+    // notice: no word count, timer, selection or hints, so all of the text width is its own.
+    const char* tip_text;
+    NoticeKind tip_kind;
+    float tip_fresh;
+    if (!app.focus_mode && notice_current(&tip_text, &tip_kind, &tip_fresh) && tip_kind == NOTICE_TIP) {
+        int32_t room = status_right - status_left + 1;
+        size_t len = strlen(tip_text);
+        bool cut = room > 1 && tip_prefix(tip_text, room) < len;
+        if (cut)
+            len = tip_prefix(tip_text, room - 1);
+        move_to(app.rows, status_left);
+        set_fg(color_lerp(get_bg(), get_dim(), tip_fresh));
+        out_str_n(tip_text, len);
+        if (cut)
+            out_str("…");
+        tip_drawn();
+        return;
+    }
 
     move_to(app.rows, status_left);
     set_fg(get_dim());
@@ -4251,6 +4315,9 @@ static void render(void)
         render_writing();
         render_menu(&menu);
         break;
+    case MODE_TOUR:
+        render_tour();
+        break;
     }
 
     // The status panel slides out over the note (not in focus mode) or the welcome screen, never
@@ -5004,6 +5071,11 @@ static void handle_writing(int32_t key)
         app.help_page = HELP_PAGE_CHEATSHEET;
         app.help_screen = 0;
         MODE_PUSH(MODE_HELP);
+        break;
+    case DAWN_KEY_CMD_TOUR: // "welcome tour" in the menu: the first-run cards again, back to the note after
+        app.tour_card = 0;
+        app.tour_pushed = true;
+        MODE_PUSH(MODE_TOUR);
         break;
 
     case 29: // Ctrl+] - the command menu (dawn_commands), also "more" on the action bar
@@ -5846,7 +5918,57 @@ static int32_t touch_to_key(int32_t key)
         && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
         return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_UP : DAWN_KEY_DOWN;
 
+    // A swipe over the tour turns its cards like the arrows.
+    if (app.mode == MODE_TOUR && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
+        return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_LEFT : DAWN_KEY_RIGHT;
+
     return key;
+}
+
+//! End the tour (enter on its last card, esc on any): remember it was seen, then go to the start
+//! screen, or back where it was opened from when a command opened it again.
+static void tour_end(void)
+{
+    if (!app.onboarded) {
+        app.onboarded = true;
+        settings_save();
+    }
+    app.tour_card = 0;
+    if (app.tour_pushed) {
+        app.tour_pushed = false;
+        MODE_POP();
+    } else {
+        app.mode = MODE_WELCOME;
+    }
+}
+
+//! A key on MODE_TOUR: enter or -> turns to the next card, <- to the one before (a swipe and a
+//! tap on the footer's hints arrive as these keys); enter on the last card, or esc, ends it.
+static void tour_key(int32_t key)
+{
+    int32_t cards = render_tour_cards();
+    switch (key) {
+    case DAWN_KEY_RIGHT:
+        if (app.tour_card < cards - 1)
+            app.tour_card++;
+        break;
+    case DAWN_KEY_LEFT:
+        if (app.tour_card > 0)
+            app.tour_card--;
+        break;
+    case '\r':
+    case '\n':
+        if (app.tour_card < cards - 1)
+            app.tour_card++;
+        else
+            tour_end();
+        break;
+    case '\x1b':
+        tour_end();
+        break;
+    default:
+        break;
+    }
 }
 
 // #endregion
@@ -6645,6 +6767,10 @@ static void handle_input(void)
         }
         break;
 
+    case MODE_TOUR:
+        tour_key(key);
+        break;
+
     case MODE_HELP: {
         // Tab or -> turns to the next screen, <- back (HelpPage order): the shortcuts and the
         // Markdown cheatsheet over as many screens as the box needs at this height, then the
@@ -6852,7 +6978,16 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
     app.ribbon = false; // the formatting ribbon is off until "Aa" turns it on ("ribbon": true)
+    app.onboarded = false; // the tour shows until settings.json says "onboarded": true
     settings_load();
+    // A first run opens on the tour's cards instead of the start screen; a note named on the
+    // command line still opens straight away (it sets MODE_WRITING after this), and the tour
+    // waits for a later start.
+    if (!app.onboarded) {
+        app.mode = MODE_TOUR;
+        app.tour_card = 0;
+        app.tour_pushed = false;
+    }
     embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;
@@ -6942,6 +7077,7 @@ static bool on_note_screen(void)
     case MODE_SEARCH:
     case MODE_CONFLICT:
     case MODE_MENU:
+    case MODE_TOUR:
         return app.prev_mode == MODE_WRITING;
     default:
         return false;
@@ -7031,8 +7167,10 @@ bool dawn_frame(void)
         if (app.last_save_time == 0)
             app.last_save_time = now;
         else if (now - app.last_save_time >= 5) {
-            if (!app.save_paused || note_conflict_text_changed())
-                save_session();
+            // The first save that wrote a note with text gives its tip (once, on the status line).
+            if ((!app.save_paused || note_conflict_text_changed()) && save_session() && !app.dirty
+                && !app.save_paused && gap_len(&app.text) > 0)
+                tip_show(TIP_FIRST_SAVE, "saved · dawn saves as you type");
             app.last_save_time = now;
         }
     }
@@ -7065,6 +7203,10 @@ bool dawn_frame(void)
         embed_tell_failure();
     }
     handle_input();
+    // The first selection on the writing screen, however it was made (shift and arrows, a drag,
+    // a double tap, select all), gives its tip once.
+    if (app.mode == MODE_WRITING && !tips_seen(TIP_FIRST_SELECT) && has_selection())
+        tip_show(TIP_FIRST_SELECT, "selected · Aa formats it, AI can rewrite it");
     render();
 
     return true;
