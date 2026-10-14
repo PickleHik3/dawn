@@ -33,6 +33,7 @@
 #include "dawn_theme.h"
 #include "dawn_title.h"
 #include "dawn_timer.h"
+#include "dawn_tips.h"
 #include "dawn_toc.h"
 #include "dawn_utils.h"
 #include "dawn_voice.h"
@@ -3291,6 +3292,49 @@ static int32_t menu_page(void)
 
 // #endregion
 
+// #region One-shot tips
+
+//! The tip posted and not yet drawn, TIP_COUNT for none: a tip counts as given (and is saved as
+//! seen) only once render_status_bar() has drawn it.
+static TipId tip_pending = TIP_COUNT;
+
+//! Give a one-shot tip (dawn_tips) as a NOTICE_TIP, which takes the writing screen's whole status
+//! line. Only where that line is drawn and shows notices: the writing screen, not printing or
+//! previewing, not in focus mode, not under the chat's bottom sheet; and never over another
+//! notice (a sticky error among them). The moment comes again, and the tip waits for it.
+static void tip_show(TipId id, const char* text)
+{
+    if (tips_seen(id) || IS_PRINT_MODE() || app.mode != MODE_WRITING || app.preview_mode || app.focus_mode)
+        return;
+    if (notice_current(NULL, NULL, NULL) || calc_layout().ai_sheet)
+        return;
+    notice_post(NOTICE_TIP, text);
+    tip_pending = id;
+}
+
+//! The status line drew a NOTICE_TIP: the tip behind it is given, and remembered.
+static void tip_drawn(void)
+{
+    if (tip_pending == TIP_COUNT)
+        return;
+    tips_mark(tip_pending);
+    tip_pending = TIP_COUNT;
+    settings_save();
+}
+
+//! Bytes of s's first cols code points (each counted as one column)
+static size_t tip_prefix(const char* s, int32_t cols)
+{
+    size_t n = 0;
+    for (; s[n]; n++) {
+        if (((unsigned char)s[n] & 0xC0) != 0x80 && cols-- <= 0)
+            break;
+    }
+    return n;
+}
+
+// #endregion
+
 // #region Status Bar Rendering
 
 //! Render status bar
@@ -3303,6 +3347,26 @@ static void render_status_bar(const Layout* L)
     move_to(app.rows, 1);
     for (int32_t i = 0; i < L->text_area_cols; i++)
         out_char(' ');
+
+    // A one-shot tip (dawn_tips) has the line to itself while it shows, dim and fading like any
+    // notice: no word count, timer, selection or hints, so all of the text width is its own.
+    const char* tip_text;
+    NoticeKind tip_kind;
+    float tip_fresh;
+    if (!app.focus_mode && notice_current(&tip_text, &tip_kind, &tip_fresh) && tip_kind == NOTICE_TIP) {
+        int32_t room = status_right - status_left + 1;
+        size_t len = strlen(tip_text);
+        bool cut = room > 1 && tip_prefix(tip_text, room) < len;
+        if (cut)
+            len = tip_prefix(tip_text, room - 1);
+        move_to(app.rows, status_left);
+        set_fg(color_lerp(get_bg(), get_dim(), tip_fresh));
+        out_str_n(tip_text, len);
+        if (cut)
+            out_str("…");
+        tip_drawn();
+        return;
+    }
 
     move_to(app.rows, status_left);
     set_fg(get_dim());
@@ -7103,8 +7167,10 @@ bool dawn_frame(void)
         if (app.last_save_time == 0)
             app.last_save_time = now;
         else if (now - app.last_save_time >= 5) {
-            if (!app.save_paused || note_conflict_text_changed())
-                save_session();
+            // The first save that wrote a note with text gives its tip (once, on the status line).
+            if ((!app.save_paused || note_conflict_text_changed()) && save_session() && !app.dirty
+                && !app.save_paused && gap_len(&app.text) > 0)
+                tip_show(TIP_FIRST_SAVE, "saved · dawn saves as you type");
             app.last_save_time = now;
         }
     }
@@ -7137,6 +7203,10 @@ bool dawn_frame(void)
         embed_tell_failure();
     }
     handle_input();
+    // The first selection on the writing screen, however it was made (shift and arrows, a drag,
+    // a double tap, select all), gives its tip once.
+    if (app.mode == MODE_WRITING && !tips_seen(TIP_FIRST_SELECT) && has_selection())
+        tip_show(TIP_FIRST_SELECT, "selected · Aa formats it, AI can rewrite it");
     render();
 
     return true;

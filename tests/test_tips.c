@@ -49,8 +49,6 @@ static void test_names(void)
     // The names are settings.json's: they never change once shipped.
     CHECK(strcmp(tips_name(TIP_FIRST_SELECT), "first_select") == 0);
     CHECK(strcmp(tips_name(TIP_FIRST_SAVE), "first_save") == 0);
-    CHECK(strcmp(tips_name(TIP_FIRST_BACK), "first_back") == 0);
-    CHECK(strcmp(tips_name(TIP_FIRST_MARKDOWN), "first_markdown") == 0);
     CHECK(tips_name(TIP_COUNT) == NULL);
     for (int32_t i = 0; i < TIP_COUNT; i++) {
         CHECK(tips_name((TipId)i) != NULL);
@@ -72,20 +70,33 @@ static void test_json_round_trip(void)
     cJSON_Delete(a);
 
     // Seen tips go out by name in TipId order, whatever order they were marked in.
-    tips_mark(TIP_FIRST_MARKDOWN);
+    tips_mark(TIP_FIRST_SAVE);
     tips_mark(TIP_FIRST_SELECT);
     a = tips_save_json(NULL);
     s = print(a);
-    CHECK(s && strcmp(s, "[\"first_select\",\"first_markdown\"]") == 0);
+    CHECK(s && strcmp(s, "[\"first_select\",\"first_save\"]") == 0);
 
     // And come back from the file's text.
     tips_reset();
     cJSON* back = cJSON_Parse(s);
     tips_load_json(back);
     CHECK(tips_seen(TIP_FIRST_SELECT));
-    CHECK(tips_seen(TIP_FIRST_MARKDOWN));
-    CHECK(!tips_seen(TIP_FIRST_SAVE));
-    CHECK(!tips_seen(TIP_FIRST_BACK));
+    CHECK(tips_seen(TIP_FIRST_SAVE));
+    cJSON_Delete(back);
+    free(s);
+    cJSON_Delete(a);
+
+    // One seen, one not: only that one comes back.
+    tips_reset();
+    tips_mark(TIP_FIRST_SAVE);
+    a = tips_save_json(NULL);
+    s = print(a);
+    CHECK(s && strcmp(s, "[\"first_save\"]") == 0);
+    tips_reset();
+    back = cJSON_Parse(s);
+    tips_load_json(back);
+    CHECK(tips_seen(TIP_FIRST_SAVE));
+    CHECK(!tips_seen(TIP_FIRST_SELECT));
     cJSON_Delete(back);
     free(s);
     cJSON_Delete(a);
@@ -101,10 +112,10 @@ static void test_json_odd_input(void)
     CHECK(!tips_seen(TIP_FIRST_SELECT));
 
     // A newer dawn's names survive this one's save, once each, after the known ones.
-    tips_mark(TIP_FIRST_BACK);
+    tips_mark(TIP_FIRST_SELECT);
     cJSON* out = tips_save_json(in);
     char* s = print(out);
-    CHECK(s && strcmp(s, "[\"first_save\",\"first_back\",\"first_later\"]") == 0);
+    CHECK(s && strcmp(s, "[\"first_select\",\"first_save\",\"first_later\"]") == 0);
     free(s);
     cJSON_Delete(out);
     cJSON_Delete(in);

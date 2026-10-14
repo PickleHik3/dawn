@@ -150,8 +150,10 @@ First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` ope
 in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` in `dawn.c`; enter and the
 arrows or a swipe turn cards, esc or enter on the last one sets `onboarded` and goes to the start screen).
 "welcome tour" in the help group of the command table (`DAWN_KEY_CMD_TOUR`) pushes it again, and then it
-pops back. `src/dawn_tips.c` is the pure set of one-shot tips already given (`TipId`, `tips_seen`,
-`tips_mark`), saved by name as `"tips_seen"` in settings.json; no tip is given yet (see `docs/HANDOFF.md`).
+pops back. Two one-shot tips, the first selection and the first save, go through `tip_show` in
+`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` draws alone across the whole status line; a tip
+counts as given only once drawn, never off the writing screen. `src/dawn_tips.c` is the pure set of
+tips given (`TipId`, `tips_seen`, `tips_mark`), saved by name as `"tips_seen"` in settings.json.
 
 ### AI: libai and TAI
 

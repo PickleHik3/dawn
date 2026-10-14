@@ -12,8 +12,6 @@
 typedef enum {
     TIP_FIRST_SELECT, //!< "first_select": a selection first exists on the writing screen
     TIP_FIRST_SAVE, //!< "first_save": the first save of a note with text
-    TIP_FIRST_BACK, //!< "first_back": esc first leaves a note for the start screen
-    TIP_FIRST_MARKDOWN, //!< "first_markdown": the writer first starts a line with "# ", "- " or "* "
     TIP_COUNT
 } TipId;
 

@@ -1,7 +1,9 @@
 // dawn_tips.c - the set of one-shot tips the writer has seen, and its JSON form in settings.json.
 //
-// dawn gives a few tips once each, as a quiet notice at the moment they apply (dawn.c's
-// tip_show()). This file only remembers which were given. settings.json holds them as
+// dawn gives a few tips once each, at the moment they apply: the first selection and the first
+// save, each as a NOTICE_TIP that takes the writing screen's whole status line (dawn.c's
+// tip_show(); a tip counts as given only once that line drew it). This file only remembers which
+// were given. settings.json holds them as
 // "tips_seen": ["first_save", ...], by name, so the order of TipId may change but a shipped name
 // never does. Names it does not know (written by a newer dawn) are carried through a save.
 // Pure: no app, no backend, no notices; dawn_settings.c reads and writes the array.
@@ -13,8 +15,6 @@
 static const char* const TIP_NAMES[TIP_COUNT] = {
     [TIP_FIRST_SELECT] = "first_select",
     [TIP_FIRST_SAVE] = "first_save",
-    [TIP_FIRST_BACK] = "first_back",
-    [TIP_FIRST_MARKDOWN] = "first_markdown",
 };
 
 static bool g_seen[TIP_COUNT];
