@@ -19,8 +19,14 @@
 // (re)transmitted while it is meant to be visible, where frame 1 - the root image - is correct
 // without any control at all. A pill whose length changed while it was invisible stays stale
 // until the next scroll, which nobody can see.
+//
+// The pill can also be dragged (dawn.c, handle_input): each frame that shows it registers the
+// pane's two rightmost columns over its track as a HIT_PILL region (one column is too narrow for a
+// finger), and scrollind_grab() / scrollind_offset_at() map a finger's row to a content offset from
+// where the pill was last placed, whether or not it has faded.
 
 #include "dawn_scrollind.h"
+#include "dawn_hit.h"
 #include "dawn_theme.h"
 #include "dawn_types.h"
 
@@ -48,6 +54,10 @@ typedef struct {
     int32_t len_px; //!< the transmitted pill's length
     int32_t cell_w, cell_h; //!< the cell size it was made for
     DawnColor color; //!< the colour it was made in
+    // Where it was last placed, for dragging it (scrollind_grab, scrollind_offset_at)
+    int32_t track_top_px, track_px; //!< the track, in pixels from the top of the screen
+    int32_t top_px, place_len_px; //!< the pill's top and length on it
+    int32_t max_offset; //!< content - viewport
 } Pill;
 
 static struct {
@@ -259,6 +269,14 @@ void scrollind_show(ScrollIndPane pane, int32_t col, int32_t track_row, int32_t 
         offset = max_offset;
     int32_t top_px = (track_row - 1) * cell_h + (int32_t)((int64_t)(track_px - len_px) * offset / max_offset);
 
+    // Draggable wherever it could be drawn, faded or not: the pane's two rightmost columns.
+    p->track_top_px = (track_row - 1) * cell_h;
+    p->track_px = track_px;
+    p->top_px = top_px;
+    p->place_len_px = len_px;
+    p->max_offset = max_offset;
+    hit_add(col > 1 ? col - 1 : col, track_row, col > 1 ? 2 : 1, track_rows, HIT_PILL, 0, (int32_t)pane);
+
     // A scroll brings the pill back (stopped on its opaque frame 1) and restarts the rest timer.
     bool scrolled = p->have_offset && offset != p->offset;
     p->offset = offset;
@@ -306,6 +324,48 @@ void scrollind_show(ScrollIndPane pane, int32_t col, int32_t track_row, int32_t 
     snprintf(cmd, sizeof(cmd), "\x1b[%d;%dH\x1b_Ga=p,i=%u,p=1,X=%d,Y=%d,C=1,z=1,q=2\x1b\\", row, col,
         PILL_IDS[pane], x_off, y_off);
     emit(cmd);
+}
+
+//! The pixel row a finger on screen row row stands for: the middle of that cell.
+static int32_t finger_px(int32_t row)
+{
+    return (row - 1) * ind.cell_h + ind.cell_h / 2;
+}
+
+int32_t scrollind_grab(ScrollIndPane pane, int32_t row, bool* on_pill)
+{
+    if (on_pill)
+        *on_pill = false;
+    if ((int32_t)pane < 0 || (int32_t)pane >= SCROLLIND_PANE_COUNT)
+        return 0;
+    const Pill* p = &ind.pills[pane];
+    int32_t y = finger_px(row);
+    // Half a cell of slack at each end: the finger's row is all dawn knows of where it is.
+    int32_t slack = ind.cell_h / 2;
+    if (y >= p->top_px - slack && y < p->top_px + p->place_len_px + slack) {
+        if (on_pill)
+            *on_pill = true;
+        int32_t grab = y - p->top_px;
+        return grab < 0 ? 0 : (grab > p->place_len_px ? p->place_len_px : grab);
+    }
+    return p->place_len_px / 2;
+}
+
+int32_t scrollind_offset_at(ScrollIndPane pane, int32_t row, int32_t grab)
+{
+    if ((int32_t)pane < 0 || (int32_t)pane >= SCROLLIND_PANE_COUNT)
+        return 0;
+    const Pill* p = &ind.pills[pane];
+    int32_t travel = p->track_px - p->place_len_px;
+    if (travel <= 0 || p->max_offset <= 0)
+        return p->offset; // a pill as long as its track has nowhere to go
+    int32_t top = finger_px(row) - grab - p->track_top_px;
+    if (top < 0)
+        top = 0;
+    if (top > travel)
+        top = travel;
+    // Rounded, so the pill's last position on the track reaches the very end of the content.
+    return (int32_t)(((int64_t)top * p->max_offset + travel / 2) / travel);
 }
 
 void scrollind_frame_end(void)
