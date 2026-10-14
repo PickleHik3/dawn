@@ -207,6 +207,31 @@ if(NOT EMSCRIPTEN)
         target_link_libraries(test-embed PRIVATE m)
     endif()
 
+    # Test target for the formatting commands (dawn_format), linked with the gap buffer alone
+    add_executable(test-format
+        tests/test_format.c
+        src/dawn_format.c
+        src/dawn_gap.c
+    )
+
+    target_include_directories(test-format PRIVATE src third-party)
+
+    if(MSVC)
+        target_compile_options(test-format PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-format PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-format PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-format PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
+
+    target_link_libraries(test-format PRIVATE utf8proc)
+
     # Test target for the storage layer: dawn_fsio (atomic writes, reads, mkdir -p, no-replace
     # moves, quarantine), the note naming rules (dawn_notepath) and the history CRDT, each linked
     # alone with stubs for app and its helpers
