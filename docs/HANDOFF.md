@@ -18,19 +18,23 @@ Done (on `tl`):
   `./build/test-tips`): `9b6b594`. "welcome tour" in the menu's help group opens the tour again.
 - Help footer items keep their columns on every screen (blank back slot on the first): `2488424`.
 
+- Two one-shot tips, each shown once as a `NOTICE_TIP` that has the writing screen's whole status
+  line to itself (`tip_show`, `tip_drawn` and `render_status_bar` in `src/dawn.c`): the first
+  selection ("selected · Aa formats it, AI can rewrite it") and the first autosave of a note with
+  text ("saved · dawn saves as you type"). A tip is marked seen only once the line drew it: `6ce9eb1`.
+  The other two tips planned (leaving a note, the first Markdown mark) were dropped: the tour's
+  cards say both, the start screen draws no notices, and ? types a question mark in a note.
+
 Open:
-1. No tip is given yet: `tip_show` and its four triggers were not wired. On a 53-column phone the
-   status line leaves a notice about 25 columns with the default 15-minute timer and a few words
-   (`render_status_bar` in `src/dawn.c`: margin 4, `left_end` reserves the timer's 10 and a selection's
-   12), so "saved · dawn saves as you type" (31) and "selected · Aa formats it, AI can rewrite it" (43)
-   are cut; the start screen and the finished screen draw no notices, so the "first_back" tip would be
-   marked seen unseen; "? shows the cheatsheet" is wrong in a note, where ? types a question mark.
-   Decide how a tip shows (a notice kind that takes the whole status line, or shorter texts) first.
+1. Tips: the save tip comes only from the 5-second autosave, not the frontmatter editor's save or
+   esc. "Aa" in the selection tip names the phone's action bar, which a wide desktop terminal does
+   not draw.
 2. Device checks owed on the phone (A065, 53x24 and with the keyboard up, about 53x12): tap every
    screen's items; drag the note and chat pills; the bar, the menu and Ctrl+] from the in-app keyboard;
    both ribbon rows and the pressed underline; help pages, the cheatsheet and the meaning page's m/r
-   taps; the tour's three cards, a tap on "[enter] next", esc, and "welcome tour" from the menu. The
-   tour and the help footer were compiled and unit-tested only, never run in tmux.
+   taps; the tour's three cards, a tap on "[enter] next", esc, and "welcome tour" from the menu; the
+   selection tip after a drag and after a double tap, the save tip, each once. The tour, the tips and
+   the help footer were compiled and unit-tested only, never run in tmux by the worker.
 3. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
 4. Launcher side, not done: a dawn-aware extra-keys row (esc, ctrl, tab, arrows). Long press was
    explicitly not done.
