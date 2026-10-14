@@ -125,7 +125,8 @@ DAWN_ENUM(uint8_t) {
     MODE_TOC, //!< Table of contents navigation (modal)
     MODE_SEARCH, //!< Document search (modal)
     MODE_CONFLICT, //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
-    MODE_MENU //!< Every writing command with its shortcut (dawn_commands), over the note (modal)
+    MODE_MENU, //!< Every writing command with its shortcut (dawn_commands), over the note (modal)
+    MODE_TOUR //!< The first-run tour's cards; on a first run in place of the start screen, else pushed
 } AppMode;
 
 //! MODE_HELP's pages in tab order. The shortcuts and the cheatsheet each take as many screens as
@@ -333,6 +334,9 @@ typedef struct {
         //!< a second press within HELP_REBUILD_CONFIRM_MS rebuilds the index
     bool meaning_index; //!< settings.json "meaning_index": the meaning index runs (embed_set_enabled)
     bool ribbon; //!< settings.json "ribbon": the formatting ribbon shows on the writing screen
+    bool onboarded; //!< settings.json "onboarded": the first-run tour was finished or skipped
+    int32_t tour_card; //!< MODE_TOUR's card, 0 first
+    bool tour_pushed; //!< MODE_TOUR was opened from a command: it pops back instead of going to the start screen
 
     // Display
     int32_t rows, cols; //!< Display dimensions

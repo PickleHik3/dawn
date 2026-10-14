@@ -257,6 +257,115 @@ void render_welcome(void)
     hit_add(theme_col, bottom_row, (int32_t)strlen(theme_str), 1, HIT_KEY, 'd', 0);
 }
 
+// #region First-run tour
+
+//! Lines of text on a tour card
+#define TOUR_LINES 3
+
+//! One card of the first-run tour: a word for its title and three short lines
+typedef struct {
+    const char* title;
+    const char* lines[TOUR_LINES];
+} TourCard;
+
+//! The tour's cards in order. Every line fits a phone held upright (53 columns) without wrapping.
+static const TourCard TOUR_CARDS[] = {
+    { "write",
+        { "press enter on the start screen to begin a note.",
+            "dawn saves as you type. esc brings you back.",
+            "history (h) lists your notes." } },
+    { "format",
+        { "tap Aa above the keyboard: bold, headings, lists,",
+            "or type Markdown: **bold**, # heading, - list.",
+            "? opens help, with a Markdown cheatsheet." } },
+#if HAS_LIBAI
+    { "ask",
+        { "tap AI to talk about your note, ask for a rewrite,",
+            "or have it read aloud.",
+            "it can edit the note; ctrl+z undoes." } },
+#endif
+};
+
+int32_t render_tour_cards(void)
+{
+    return (int32_t)(sizeof(TOUR_CARDS) / sizeof(TOUR_CARDS[0]));
+}
+
+void render_tour(void)
+{
+    render_clear();
+
+    int32_t cards = render_tour_cards();
+    int32_t card = app.tour_card < 0 ? 0 : (app.tour_card >= cards ? cards - 1 : app.tour_card);
+    const TourCard* c = &TOUR_CARDS[card];
+    bool last = card == cards - 1;
+
+    // The welcome screen's margins. The card sits centred above the footer: title, text, dots,
+    // with a blank row between them where there is room; below 16 rows (a phone with its keyboard
+    // up has about 12) the blank rows go, never the text.
+    int32_t margin_v = app.rows > 30 ? 3 : 2;
+    int32_t top_row = margin_v + 1;
+    int32_t footer_row = app.rows - margin_v;
+    int32_t gap = app.rows >= 16 ? 1 : 0;
+    int32_t height = 1 + gap + TOUR_LINES + gap + 1;
+    int32_t row = top_row + (footer_row - 1 - top_row - height) / 2;
+    if (row < 1)
+        row = 1;
+    if (footer_row < row + height)
+        footer_row = row + height;
+
+    // Title, in the welcome logo's colour
+    move_to(row, center_col(c->title));
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str(c->title);
+    platform_reset_attrs();
+    set_bg(get_bg());
+
+    // The text, dim, as one block centred on its widest line (cut at the screen's edge)
+    int32_t room = app.cols - 2 > 1 ? app.cols - 2 : 1;
+    int32_t widest = 0;
+    for (int32_t i = 0; i < TOUR_LINES; i++) {
+        int32_t w = (int32_t)strlen(c->lines[i]);
+        if (w > widest)
+            widest = w;
+    }
+    if (widest > room)
+        widest = room;
+    int32_t left = (app.cols - widest + 2) / 2;
+    if (left < 1)
+        left = 1;
+    row += 1 + gap;
+    set_fg(get_dim());
+    for (int32_t i = 0; i < TOUR_LINES; i++) {
+        size_t len = strlen(c->lines[i]);
+        move_to(row + i, left);
+        DAWN_BACKEND(app)->write_str(c->lines[i], len < (size_t)room ? len : (size_t)room);
+    }
+
+    // Dots, the card shown filled: "• ○ ○"
+    row += TOUR_LINES + gap;
+    int32_t dots_col = (app.cols - (cards * 2 - 1) + 2) / 2;
+    move_to(row, dots_col < 1 ? 1 : dots_col);
+    for (int32_t i = 0; i < cards; i++) {
+        if (i > 0)
+            platform_write_char(' ');
+        set_fg(i == card ? get_accent() : get_dim());
+        platform_write_str(i == card ? "•" : "○");
+    }
+
+    // The footer's hints are taps on their keys. Opened again from a command, esc closes it and
+    // the last card's enter goes back to the note.
+    const char* hint;
+    if (last)
+        hint = app.tour_pushed ? "[enter] done" : "[enter] start writing";
+    else
+        hint = app.tour_pushed ? "[enter] next   [esc] close" : "[enter] next   [esc] skip";
+    render_center_hints(footer_row, hint, get_dim());
+}
+
+// #endregion
+
 void render_timer_select(void)
 {
     render_clear();

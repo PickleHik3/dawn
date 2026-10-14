@@ -91,6 +91,7 @@ static const Command COMMANDS[] = {
     // help
     { "keyboard help", CMD_GROUP_HELP, 15, "^O", 0, 0, NULL },
     { "markdown cheatsheet", CMD_GROUP_HELP, DAWN_KEY_CMD_CHEATSHEET, "", 0, 0, NULL },
+    { "welcome tour", CMD_GROUP_HELP, DAWN_KEY_CMD_TOUR, "", 0, 0, NULL },
     { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, 0, "more" },
 };
 

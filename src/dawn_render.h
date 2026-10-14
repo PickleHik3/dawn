@@ -31,6 +31,13 @@ void render_popup_box(int32_t width, int32_t height, int32_t* out_top, int32_t* 
 //! Render the welcome/menu screen
 void render_welcome(void);
 
+//! How many cards the first-run tour has (the "ask" card only where the chat is compiled in)
+int32_t render_tour_cards(void);
+
+//! Render MODE_TOUR: app.tour_card, centred like the welcome screen, with the dots that mark it
+//! and the footer's tappable hints. app.tour_pushed says whether esc skips or closes.
+void render_tour(void);
+
 //! Render the timer selection screen
 void render_timer_select(void);
 

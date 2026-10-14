@@ -25,7 +25,7 @@ static int tests_failed = 0;
 static bool is_virtual(int32_t key)
 {
     return key == DAWN_KEY_CMD_MENU || key == DAWN_KEY_CMD_RIBBON || key == DAWN_KEY_CMD_CHEATSHEET
-        || (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK);
+        || key == DAWN_KEY_CMD_TOUR || (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK);
 }
 
 static void test_entries(void)
