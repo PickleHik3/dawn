@@ -49,8 +49,7 @@ Open:
    events, never as SGR drag motion (`?1002`), so the pill follows the swipe instead of the finger
    (the track tap works). If the launcher sent drag motion while `?1002` is on, dawn's pill drag
    would work as written (`pill_follow` in `src/dawn.c`).
-5. Known warts: a format op that changes nothing still pushes an undo state (`format_key` in
-   `src/dawn.c`); a kitty-scaled heading paints over the top rows of a popup (menu, search) and
+5. Known warts: a kitty-scaled heading paints over the top rows of a popup (menu, search) and
    leaves a grey block beside the menu box at its rows (pre-existing with search); help opened from
    the welcome screen shows the last note's status line underneath (pre-existing).
 

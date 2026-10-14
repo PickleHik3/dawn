@@ -3219,8 +3219,18 @@ static void format_key(int32_t key)
 {
     FormatCursor fc = format_cursor();
     bool was_dirty = app.dirty;
+    int32_t was_typing = app.undo_typing;
+    int32_t was_count = app.undo_count;
     save_undo_state(); // the note as it was: Ctrl+Z comes back here
     if (!format_apply(&app.text, (FormatOp)(key - DAWN_KEY_FMT_BOLD), &fc)) {
+        // Nothing changed: the state just pushed is a copy of the text as it still is, and a
+        // Ctrl+Z onto it would look like it did nothing. Take it back, typing step included.
+        if (app.undo_count > was_count) {
+            free(app.undo_stack[app.undo_count - 1].text);
+            app.undo_count--;
+            app.undo_pos = app.undo_count - 1;
+        }
+        app.undo_typing = was_typing;
         app.dirty = was_dirty;
         return;
     }
