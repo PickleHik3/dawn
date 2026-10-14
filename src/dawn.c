@@ -8,6 +8,7 @@
 #include "dawn_block.h"
 #include "dawn_chat.h"
 #include "dawn_clipboard.h"
+#include "dawn_commands.h"
 #include "dawn_date.h"
 #include "dawn_embed.h"
 #include "dawn_file.h"
@@ -1062,7 +1063,8 @@ static void update_title(void)
     case MODE_FM_EDIT:
     case MODE_BLOCK_EDIT:
     case MODE_TOC:
-    case MODE_SEARCH: {
+    case MODE_SEARCH:
+    case MODE_MENU: {
         // Use document title if available, otherwise "Dawn"
         const char* title = fm_get_string(app.frontmatter, "title");
         DAWN_BACKEND(app)->set_title(title ? title : "Dawn");
@@ -3090,6 +3092,101 @@ skip_chat:
 
 // #endregion
 
+// #region Commands: the phone action bar and the command menu
+
+//! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
+static MenuState menu;
+
+//! The key of a command picked in the menu, pressed at the top of the next handle_input() as if
+//! it had been typed, so running it from the menu is the same as pressing its shortcut.
+static int32_t pending_key = DAWN_KEY_NONE;
+
+//! Whether cmd can run on the writing screen now: its CommandFlag needs against the app's state.
+static bool command_enabled(const Command* cmd)
+{
+    if (!cmd)
+        return false;
+    if (cmd->key == DAWN_KEY_CMD_RIBBON)
+        return false; // reserved: the formatting ribbon is not built yet
+    if ((cmd->flags & CMD_NEEDS_EDIT) && !CAN_EDIT())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_MODIFY) && !CAN_MODIFY())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_SELECTION) && !has_selection())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_TIMER) && !(app.timer_on && app.timer_mins > 0))
+        return false;
+#if HAS_LIBAI
+    if ((cmd->flags & CMD_NEEDS_AI) && !app.ai_ready)
+        return false;
+#endif
+    return true;
+}
+
+//! Whether the action bar shows: on the writing screen (and under its command menu) at phone
+//! width or in the launcher's terminal, never over a chat (a sheet takes the status line away, and
+//! a focused chat would take the bar's keys), in preview or print, or when the row is the note's.
+static bool action_bar_shown(const Layout* L)
+{
+    if (IS_PRINT_MODE() || app.preview_mode || app.ai_open)
+        return false;
+    if (app.mode != MODE_WRITING && app.mode != MODE_MENU)
+        return false;
+    if (!app.launcher_term && app.cols >= AI_PANEL_MIN_COLS)
+        return false;
+    return app.rows - 1 >= L->top_margin + L->text_height;
+}
+
+//! The action bar, on the blank row above the status line: the commands dawn_commands places on
+//! the bar ("undo   find   Aa   AI"), then "more" for the command menu, in the status line's dim,
+//! a command that cannot run now dimmer. Each is a tap on its key (its text and a cell either
+//! side), registered only on the writing screen itself. Items are dropped from the right when the
+//! row is too narrow; "more" always stays.
+static void render_action_bar(const Layout* L)
+{
+    if (!action_bar_shown(L))
+        return;
+
+    enum { BAR_MAX = 8, BAR_GAP = 3 };
+    const Command* items[BAR_MAX];
+    int32_t widths[BAR_MAX];
+    int32_t n = commands_bar(items, BAR_MAX);
+    for (int32_t i = 0; i < n; i++)
+        widths[i] = (int32_t)strlen(commands_bar_label(items[i])); // plain ASCII labels
+    const Command* more = commands_find(DAWN_KEY_CMD_MENU);
+    int32_t more_w = (int32_t)strlen(commands_bar_label(more));
+    if (!more || more_w > L->text_width)
+        return;
+    int32_t kept = commands_bar_fit(widths, n, more_w, BAR_GAP, L->text_width);
+
+    int32_t row = app.rows - 1;
+    int32_t col = L->margin + 1;
+    bool taps = app.mode == MODE_WRITING;
+    set_bg(get_bg());
+    for (int32_t i = 0; i <= kept; i++) {
+        const Command* c = i < kept ? items[i] : more;
+        int32_t w = i < kept ? widths[i] : more_w;
+        move_to(row, col);
+        set_fg(command_enabled(c) ? get_dim() : get_border());
+        out_str(commands_bar_label(c));
+        if (taps) {
+            int32_t from = col > 1 ? col - 1 : col;
+            int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
+            hit_add(from, row, to - from + 1, 1, HIT_KEY, c->key, 0);
+        }
+        col += w + BAR_GAP;
+    }
+}
+
+//! Rows the command menu's list shows (render_menu's box less its border, title and hints)
+static int32_t menu_page(void)
+{
+    int32_t h = menu.count + 4 < app.rows ? menu.count + 4 : app.rows;
+    return h - 4 > 1 ? h - 4 : 1;
+}
+
+// #endregion
+
 // #region Status Bar Rendering
 
 //! Render status bar
@@ -3851,8 +3948,12 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
-    // The status panel's corner (dawn_status): the two blank rows under the text.
-    status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+    // Plain text has no status line, but the action bar still shows (on a phone it is the way back
+    // out). The status panel's corner (dawn_status): the two blank rows under the text, or the one
+    // above the bar.
+    render_action_bar(&L);
+    status_area(app.rows - 2, action_bar_shown(&L) ? app.rows - 2 : app.rows - 1, L.text_area_cols,
+        status_panel_cols(&L), false);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
     status_cursor(cursor_screen_row, cursor_screen_col);
@@ -4041,6 +4142,10 @@ static void render(void)
     case MODE_CONFLICT:
         render_writing();
         render_conflict();
+        break;
+    case MODE_MENU:
+        render_writing();
+        render_menu(&menu);
         break;
     }
 
@@ -4782,6 +4887,18 @@ static void handle_writing(int32_t key)
         app.help_page = 0;
         MODE_PUSH(MODE_HELP);
         break;
+    case DAWN_KEY_CMD_CHEATSHEET:
+        app.help_page = 0; // the Markdown cheatsheet page comes with the help page's rewrite
+        MODE_PUSH(MODE_HELP);
+        break;
+
+    case 29: // Ctrl+] - the command menu (dawn_commands), also "more" on the action bar
+    case DAWN_KEY_CMD_MENU:
+        menu_build(&menu, command_enabled);
+        MODE_PUSH(MODE_MENU);
+        break;
+    case DAWN_KEY_CMD_RIBBON:
+        break; // reserved for the formatting ribbon
 
     case 12: // Ctrl+L - Table of Contents
     {
@@ -5558,6 +5675,11 @@ static bool hit_pick_row(int32_t row)
             return false;
         app.block_edit.field = row;
         return true;
+    case MODE_MENU:
+        if (row >= menu.count || !menu.lines[row].cmd || !menu.lines[row].enabled)
+            return false;
+        menu.selected = row;
+        return true;
     default:
         return false;
     }
@@ -5602,7 +5724,7 @@ static int32_t touch_to_key(int32_t key)
         return DAWN_KEY_NONE;
     }
 
-    if ((app.mode == MODE_HISTORY || app.mode == MODE_TOC)
+    if ((app.mode == MODE_HISTORY || app.mode == MODE_TOC || app.mode == MODE_MENU)
         && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
         return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_UP : DAWN_KEY_DOWN;
 
@@ -5613,7 +5735,11 @@ static int32_t touch_to_key(int32_t key)
 
 static void handle_input(void)
 {
-    int32_t key = input_read_key();
+    // A command picked in the menu is pressed now, through the same path as a typed key.
+    int32_t key = pending_key;
+    pending_key = DAWN_KEY_NONE;
+    if (key == DAWN_KEY_NONE)
+        key = input_read_key();
     if (key == DAWN_KEY_NONE)
         return;
 
@@ -6356,6 +6482,50 @@ static void handle_input(void)
         break;
     }
 
+    case MODE_MENU:
+        // The release and drag that follow a tap are no keys: the one after the tap on "more"
+        // would otherwise act at once. A tap outside the box (no region there) closes the menu;
+        // enter closes it and then presses the command's key (pending_key).
+        if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
+            break;
+        switch (key) {
+        case DAWN_KEY_UP:
+        case 'k':
+            menu.selected = menu_step(&menu, menu.selected, -1, 1);
+            break;
+        case DAWN_KEY_DOWN:
+        case 'j':
+            menu.selected = menu_step(&menu, menu.selected, 1, 1);
+            break;
+        case DAWN_KEY_PGUP:
+            menu.selected = menu_step(&menu, menu.selected, -1, menu_page());
+            break;
+        case DAWN_KEY_PGDN:
+            menu.selected = menu_step(&menu, menu.selected, 1, menu_page());
+            break;
+        case DAWN_KEY_HOME:
+            menu.selected = menu_step(&menu, menu.selected, -1, menu.count);
+            break;
+        case DAWN_KEY_END:
+            menu.selected = menu_step(&menu, menu.selected, 1, menu.count);
+            break;
+        case '\r':
+        case '\n':
+            if (menu.selected >= 0 && menu.selected < menu.count && menu.lines[menu.selected].enabled)
+                pending_key = menu.lines[menu.selected].cmd->key;
+            MODE_POP();
+            break;
+        case '\x1b':
+        case 29:
+        case DAWN_KEY_CMD_MENU:
+        case DAWN_KEY_MOUSE_CLICK:
+            MODE_POP();
+            break;
+        default:
+            break;
+        }
+        break;
+
     case MODE_HELP: {
         // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
         // failed save or an AI edit can be found again without adding anything to the page itself.
@@ -6650,6 +6820,7 @@ static bool on_note_screen(void)
     case MODE_TOC:
     case MODE_SEARCH:
     case MODE_CONFLICT:
+    case MODE_MENU:
         return app.prev_mode == MODE_WRITING;
     default:
         return false;
@@ -7355,13 +7526,15 @@ static void render_writing(void)
     // Under a sheet the note has no status line: the chat's input line is the bottom edge.
     if (!L.ai_sheet)
         render_status_bar(&L);
+    render_action_bar(&L);
 
     // The status panel's corner (dawn_status): the two blank rows between the text and the status
-    // line, or the one between the text and a chat sheet.
+    // line (one when the action bar takes the lower), or the one between the text and a chat sheet.
     if (L.ai_sheet)
         status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
     else
-        status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+        status_area(app.rows - 2, action_bar_shown(&L) ? app.rows - 2 : app.rows - 1, L.text_area_cols,
+            status_panel_cols(&L), false);
 
     if (app.ai_open) {
         render_ai_panel(&L);

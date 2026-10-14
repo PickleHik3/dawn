@@ -1263,6 +1263,107 @@ void render_toc(void)
     platform_set_cursor_visible(true);
 }
 
+void render_menu(MenuState* m)
+{
+    // As wide as help (44 columns, or the screen less a column each side on a phone), and as tall
+    // as the list, never taller than the screen: with the keyboard up a phone pane is about 12
+    // rows, so the list scrolls inside the box. Rows: border, title, the list, hints, border.
+    int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    int32_t height = m->count + 4;
+    if (height > app.rows)
+        height = app.rows;
+    int32_t visible = height - 4;
+    if (visible < 1)
+        visible = 1;
+    menu_scroll_to(m, visible);
+
+    int32_t top, left;
+    render_popup_box(width, height, &top, &left);
+    // A tap inside the box on none of its rows does nothing; outside it closes the menu.
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
+
+    int32_t content_left = left + 2;
+    int32_t content_right = left + width - 3; // last column text may use
+    DawnColor modal = get_modal_bg();
+    set_bg(modal);
+
+    // Title, with the key that opens the menu without a finger
+    move_to(top + 1, content_left);
+    set_fg(get_fg());
+    platform_write_str("commands");
+    set_fg(get_dim());
+    platform_write_str("  ^]");
+
+    int32_t list_top = top + 2;
+    for (int32_t i = 0; i < visible; i++) {
+        int32_t idx = m->scroll + i;
+        if (idx >= m->count)
+            break;
+        const MenuLine* line = &m->lines[idx];
+        int32_t row = list_top + i;
+        if (!line->cmd) {
+            move_to(row, content_left);
+            set_fg(get_accent());
+            platform_write_str(commands_group_name(line->group));
+            continue;
+        }
+
+        bool sel = idx == m->selected;
+        if (line->enabled)
+            hit_add(left + 1, row, width - 2, 1, HIT_ROW, '\r', idx);
+        if (sel) {
+            // The selected row sits one rung above the modal (surface_container_highest)
+            move_to(row, left + 1);
+            set_bg(get_row_select_bg());
+            for (int32_t c = 0; c < width - 2; c++)
+                platform_write_char(' ');
+        }
+
+        const char* sc = line->cmd->shortcut;
+        int32_t sc_w = hist_cols(sc, strlen(sc));
+        DawnColor text = !line->enabled ? get_border() : sel ? get_fg() : get_dim();
+        move_to(row, content_left);
+        if (sel) {
+            set_fg(get_accent());
+            platform_write_str("> ");
+        } else {
+            platform_write_str("  ");
+        }
+        set_fg(text);
+        hist_write_fit(line->cmd->label, content_right - content_left - 2 - sc_w - 1);
+        if (sc_w > 0) {
+            move_to(row, content_right - sc_w + 1);
+            set_fg(line->enabled ? get_dim() : get_border());
+            platform_write_str(sc);
+        }
+        set_bg(modal);
+    }
+
+    // More above or below, each a tap that pages that way (the mark and a cell beside it)
+    if (m->scroll > 0) {
+        move_to(top + 1, content_right - 5);
+        set_fg(get_dim());
+        platform_write_str("↑ more");
+        hit_add(content_right - 6, top + 1, 8, 1, HIT_KEY, DAWN_KEY_PGUP, 0);
+    }
+    if (m->scroll + visible < m->count) {
+        move_to(top + height - 2, content_right - 5);
+        set_fg(get_dim());
+        platform_write_str("↓ more");
+        hit_add(content_right - 6, top + height - 2, 8, 1, HIT_KEY, DAWN_KEY_PGDN, 0);
+    }
+
+    // Footer hints, tappable; left of the "↓ more" mark
+    const char* footer = "enter:run  esc:close";
+    move_to(top + height - 2, content_left);
+    set_fg(get_dim());
+    platform_write_str(footer);
+    hit_add_hints(content_left, top + height - 2, footer, content_right - 7 - content_left, true);
+    platform_set_cursor_visible(false);
+}
+
 //! Where render_search() drew its result rows last, for render_search_hit().
 static struct {
     int32_t first_row, rows; //!< The list's first screen row and how many rows it filled

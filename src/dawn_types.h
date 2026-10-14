@@ -124,7 +124,8 @@ DAWN_ENUM(uint8_t) {
     MODE_BLOCK_EDIT, //!< Block editor (modal) - images, etc.
     MODE_TOC, //!< Table of contents navigation (modal)
     MODE_SEARCH, //!< Document search (modal)
-    MODE_CONFLICT //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
+    MODE_CONFLICT, //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
+    MODE_MENU //!< Every writing command with its shortcut (dawn_commands), over the note (modal)
 } AppMode;
 
 //! Push a modal mode (saves current mode for later restoration)
