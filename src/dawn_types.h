@@ -322,6 +322,7 @@ typedef struct {
     int64_t help_rebuild_armed; //!< When r was first pressed on the meaning page, DAWN_CLOCK_MS (0 = not armed):
         //!< a second press within HELP_REBUILD_CONFIRM_MS rebuilds the index
     bool meaning_index; //!< settings.json "meaning_index": the meaning index runs (embed_set_enabled)
+    bool ribbon; //!< settings.json "ribbon": the formatting ribbon shows on the writing screen
 
     // Display
     int32_t rows, cols; //!< Display dimensions
