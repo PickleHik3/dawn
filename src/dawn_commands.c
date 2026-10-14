@@ -1,0 +1,215 @@
+// dawn_commands.c - the writing screen's commands: one table of what can be done, and its keys
+//
+// A phone in Termux Launcher has no Ctrl key in reach, and nothing on dawn's screen says which
+// chords exist. This table lists every command the writing screen takes, each with the key its
+// handler already answers (handle_writing in dawn.c, Ctrl+Q in dawn_voice.c), the words for it
+// and the shortcut as printed. The phone-width action bar draws the entries that carry a bar
+// place, and the command menu ("more" on the bar, or Ctrl+]) lists all of them with the shortcut
+// beside each, so every button also teaches its key. The help page and the formatting ribbon are
+// meant to read the same table.
+//
+// Running a command means pressing its key: the bar registers a tap region for the key, the menu
+// feeds the key to the writing handler, so a command behaves exactly as its shortcut does. Keys
+// with no physical chord (the menu itself, the ribbon, the cheatsheet) are virtual DawnKeys that
+// handle_writing takes like any other.
+//
+// The menu's line list (headings between groups, the highlighted line, scrolling) lives here too,
+// as plain data. Pure: no app, no backend, so tests/test_commands.c links this file alone. Whether
+// a command can run right now (selection, focus mode, a model) is decided by command_enabled() in
+// dawn.c from the CommandFlag bits.
+
+#include "dawn_commands.h"
+#include "dawn_backend.h"
+
+#include <stddef.h>
+
+// #region Table
+
+//! Every command, grouped in display order. Within a group the most used come first.
+static const Command COMMANDS[] = {
+    // note
+    { "title and details", CMD_GROUP_NOTE, 7, "^G", CMD_NEEDS_MODIFY, 0, NULL },
+    { "edit image", CMD_GROUP_NOTE, 5, "^E", CMD_NEEDS_MODIFY, 0, NULL },
+    { "pause timer", CMD_GROUP_NOTE, 16, "^P", CMD_NEEDS_TIMER, 0, NULL },
+    { "add five minutes", CMD_GROUP_NOTE, 20, "^T", 0, 0, NULL },
+    { "close note", CMD_GROUP_NOTE, '\x1b', "esc", 0, 0, NULL },
+
+    // edit
+    { "undo", CMD_GROUP_EDIT, 26, "^Z", CMD_NEEDS_MODIFY, 1, NULL },
+    { "redo", CMD_GROUP_EDIT, 25, "^Y", CMD_NEEDS_MODIFY, 0, NULL },
+    { "cut", CMD_GROUP_EDIT, 24, "^X", CMD_NEEDS_EDIT | CMD_NEEDS_SELECTION, 0, NULL },
+    { "copy", CMD_GROUP_EDIT, 3, "^C", CMD_NEEDS_SELECTION, 0, NULL },
+    { "paste", CMD_GROUP_EDIT, 22, "^V", CMD_NEEDS_MODIFY, 0, NULL },
+    { "select all", CMD_GROUP_EDIT, 1, "^A", 0, 0, NULL },
+    { "delete word", CMD_GROUP_EDIT, 23, "^W", CMD_NEEDS_EDIT, 0, NULL },
+    { "delete element", CMD_GROUP_EDIT, 4, "^D", CMD_NEEDS_EDIT, 0, NULL },
+    { "delete to line start", CMD_GROUP_EDIT, 21, "^U", CMD_NEEDS_EDIT, 0, NULL },
+    { "delete to line end", CMD_GROUP_EDIT, 11, "^K", CMD_NEEDS_EDIT, 0, NULL },
+    { "indent", CMD_GROUP_EDIT, '\t', "tab", CMD_NEEDS_MODIFY, 0, NULL },
+    { "outdent", CMD_GROUP_EDIT, DAWN_KEY_BTAB, "shift+tab", CMD_NEEDS_MODIFY, 0, NULL },
+
+    // view
+    { "formatting", CMD_GROUP_VIEW, DAWN_KEY_CMD_RIBBON, "", CMD_NEEDS_MODIFY, 3, "Aa" },
+    { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, 0, NULL },
+    { "plain text", CMD_GROUP_VIEW, 18, "^R", 0, 0, NULL },
+    { "hide marks at cursor", CMD_GROUP_VIEW, 2, "^B", 0, 0, NULL },
+
+    // find
+    { "find", CMD_GROUP_FIND, 19, "^S", 0, 2, NULL },
+    { "table of contents", CMD_GROUP_FIND, 12, "^L", 0, 0, NULL },
+    { "jump to footnote", CMD_GROUP_FIND, 14, "^N", 0, 0, NULL },
+
+#ifdef USE_LIBAI
+    // ai
+    { "chat", CMD_GROUP_AI, 31, "^/", CMD_NEEDS_MODIFY | CMD_NEEDS_AI, 4, "AI" },
+#ifdef DAWN_HAS_SPEAK
+    { "read aloud", CMD_GROUP_AI, 17, "^Q", 0, 0, NULL },
+#endif
+#endif
+
+    // help
+    { "keyboard help", CMD_GROUP_HELP, 15, "^O", 0, 0, NULL },
+    { "markdown cheatsheet", CMD_GROUP_HELP, DAWN_KEY_CMD_CHEATSHEET, "", 0, 0, NULL },
+    { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, 0, "more" },
+};
+
+#define COMMAND_COUNT ((int32_t)(sizeof(COMMANDS) / sizeof(COMMANDS[0])))
+
+static const char* const GROUP_NAMES[CMD_GROUP_COUNT] = {
+    [CMD_GROUP_NOTE] = "note",
+    [CMD_GROUP_EDIT] = "edit",
+    [CMD_GROUP_VIEW] = "view",
+    [CMD_GROUP_FIND] = "find",
+    [CMD_GROUP_AI] = "ai",
+    [CMD_GROUP_HELP] = "help",
+};
+
+const Command* commands_all(int32_t* count)
+{
+    if (count)
+        *count = COMMAND_COUNT;
+    return COMMANDS;
+}
+
+const Command* commands_find(int32_t key)
+{
+    for (int32_t i = 0; i < COMMAND_COUNT; i++) {
+        if (COMMANDS[i].key == key)
+            return &COMMANDS[i];
+    }
+    return NULL;
+}
+
+const char* commands_group_name(CommandGroup group)
+{
+    return group < CMD_GROUP_COUNT ? GROUP_NAMES[group] : "";
+}
+
+// #endregion
+
+// #region Action bar
+
+int32_t commands_bar(const Command** out, int32_t max)
+{
+    // Places are small numbers; walk them in order so the table's grouping doesn't matter.
+    int32_t n = 0;
+    for (int32_t place = 1; place <= 127 && n < max; place++) {
+        bool any_later = false;
+        for (int32_t i = 0; i < COMMAND_COUNT && n < max; i++) {
+            if (COMMANDS[i].bar == place)
+                out[n++] = &COMMANDS[i];
+            else if (COMMANDS[i].bar > place)
+                any_later = true;
+        }
+        if (!any_later)
+            break;
+    }
+    return n;
+}
+
+const char* commands_bar_label(const Command* cmd)
+{
+    if (!cmd)
+        return "";
+    return cmd->bar_label ? cmd->bar_label : cmd->label;
+}
+
+int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32_t gap, int32_t room)
+{
+    int32_t used = more_w;
+    int32_t kept = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int32_t next = used + widths[i] + gap;
+        if (next > room)
+            break;
+        used = next;
+        kept++;
+    }
+    return kept;
+}
+
+// #endregion
+
+// #region Command menu
+
+void menu_build(MenuState* m, bool (*enabled)(const Command*))
+{
+    m->count = 0;
+    m->selected = -1;
+    m->scroll = 0;
+    int32_t last_group = -1;
+    for (int32_t i = 0; i < COMMAND_COUNT; i++) {
+        const Command* c = &COMMANDS[i];
+        if (c->key == DAWN_KEY_CMD_MENU)
+            continue; // the menu is open already; its key shows in its title
+        if ((int32_t)c->group != last_group) {
+            if (m->count >= MENU_LINES_MAX)
+                break;
+            m->lines[m->count++] = (MenuLine) { .cmd = NULL, .group = c->group, .enabled = false };
+            last_group = (int32_t)c->group;
+        }
+        if (m->count >= MENU_LINES_MAX)
+            break;
+        bool on = enabled ? enabled(c) : true;
+        m->lines[m->count] = (MenuLine) { .cmd = c, .group = c->group, .enabled = on };
+        if (on && m->selected < 0)
+            m->selected = m->count;
+        m->count++;
+    }
+}
+
+int32_t menu_step(const MenuState* m, int32_t from, int32_t dir, int32_t steps)
+{
+    int32_t at = from;
+    for (int32_t i = from + dir; i >= 0 && i < m->count && steps > 0; i += dir) {
+        if (m->lines[i].cmd && m->lines[i].enabled) {
+            at = i;
+            steps--;
+        }
+    }
+    return at;
+}
+
+void menu_scroll_to(MenuState* m, int32_t visible)
+{
+    if (visible < 1)
+        visible = 1;
+    int32_t sel = m->selected;
+    if (sel >= 0) {
+        // Show the group's heading with its first command.
+        int32_t want_top = (sel > 0 && !m->lines[sel - 1].cmd) ? sel - 1 : sel;
+        if (want_top < m->scroll)
+            m->scroll = want_top;
+        if (sel >= m->scroll + visible)
+            m->scroll = sel - visible + 1;
+    }
+    int32_t max_scroll = m->count - visible;
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (m->scroll > max_scroll)
+        m->scroll = max_scroll;
+    if (m->scroll < 0)
+        m->scroll = 0;
+}
+
+// #endregion

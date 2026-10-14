@@ -279,6 +279,30 @@ if(NOT EMSCRIPTEN)
             target_link_options(test-hit PRIVATE ${SANITIZER_FLAGS})
         endif()
     endif()
+
+    # Test target for the command table (dawn_commands) the action bar and the command menu read;
+    # pure, so it links alone. Built with the AI entries in, so the fullest table is checked.
+    add_executable(test-commands
+        tests/test_commands.c
+        src/dawn_commands.c
+    )
+
+    target_include_directories(test-commands PRIVATE src)
+    target_compile_definitions(test-commands PRIVATE USE_LIBAI DAWN_HAS_SPEAK)
+
+    if(MSVC)
+        target_compile_options(test-commands PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-commands PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-commands PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-commands PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
 else()
     file(GLOB WEB_SRCS src/dawn*.c)
     list(FILTER WEB_SRCS EXCLUDE REGEX "dawn_args.c")

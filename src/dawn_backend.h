@@ -74,6 +74,11 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_MOUSE_CLICK,
     DAWN_KEY_MOUSE_RELEASE, //!< Button 0 released (SGR 'm' terminator)
     DAWN_KEY_MOUSE_DRAG, //!< Motion while button 0 held (SGR btn 32, needs mode 1002)
+    // Commands with no physical key of their own (dawn_commands): a tap region or the command
+    // menu synthesises them, and the writing screen handles them like any other key.
+    DAWN_KEY_CMD_MENU, //!< Open the command menu (also Ctrl+])
+    DAWN_KEY_CMD_RIBBON, //!< Show or hide the formatting ribbon (reserved: ignored until it exists)
+    DAWN_KEY_CMD_CHEATSHEET, //!< Open help on its Markdown cheatsheet page
     DAWN_KEY_THEME_DARK, //!< Launcher reports dark mode (CSI ?997;1n)
     DAWN_KEY_THEME_LIGHT, //!< Launcher reports light mode (CSI ?997;2n)
     DAWN_KEY_BTAB,
