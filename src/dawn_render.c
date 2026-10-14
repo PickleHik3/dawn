@@ -542,7 +542,11 @@ void render_help(void)
         return;
     }
 
+    // A phone pane is 24 rows (the launcher's is 53x24): the box shrinks to the screen so its
+    // footer, and the taps on it, stay on the last row instead of past it.
     int32_t height = 26;
+    if (height > app.rows)
+        height = app.rows;
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
     // A tap inside the box that is on none of its hints does nothing; outside it closes help.
