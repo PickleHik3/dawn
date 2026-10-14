@@ -23,7 +23,8 @@ static int tests_failed = 0;
 //! A key with no physical chord, which may print no shortcut
 static bool is_virtual(int32_t key)
 {
-    return key == DAWN_KEY_CMD_MENU || key == DAWN_KEY_CMD_RIBBON || key == DAWN_KEY_CMD_CHEATSHEET;
+    return key == DAWN_KEY_CMD_MENU || key == DAWN_KEY_CMD_RIBBON || key == DAWN_KEY_CMD_CHEATSHEET
+        || (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK);
 }
 
 static void test_entries(void)
@@ -86,6 +87,65 @@ static void test_bar(void)
     CHECK(commands_bar_fit(w, 4, 4, 3, 2) == 0);
 }
 
+static void test_ribbon(void)
+{
+    static const char* const LABELS[] = { "bold", "italic", "strikethrough", "code", "heading 1",
+        "heading 2", "heading 3", "bullet list", "numbered list", "task list", "quote", "link",
+        "image", "table", "horizontal rule", "code block" };
+    static const char* const TEXTS[] = { "B", "I", "S", "`", "H1", "H2", "H3", "•", "1.", "[ ]",
+        ">", "link", "img", "table", "---", "code" };
+    const int32_t want = (int32_t)(sizeof(LABELS) / sizeof(LABELS[0]));
+
+    // One button per format key, in key order (the key minus DAWN_KEY_FMT_BOLD is the FormatOp).
+    const Command* items[RIBBON_MAX];
+    int32_t n = commands_ribbon(items, RIBBON_MAX);
+    CHECK(n == want);
+    CHECK(DAWN_KEY_FMT_CODE_BLOCK - DAWN_KEY_FMT_BOLD + 1 == want);
+    for (int32_t i = 0; i < n && i < want; i++) {
+        CHECK(items[i]->key == DAWN_KEY_FMT_BOLD + i);
+        CHECK(items[i]->group == CMD_GROUP_FORMAT);
+        CHECK(items[i]->flags == CMD_NEEDS_EDIT);
+        CHECK(items[i]->bar == 0);
+        CHECK(strcmp(items[i]->label, LABELS[i]) == 0);
+        CHECK(strcmp(commands_bar_label(items[i]), TEXTS[i]) == 0);
+        CHECK(commands_find(DAWN_KEY_FMT_BOLD + i) == items[i]);
+    }
+    CHECK(commands_ribbon(items, 3) == 3);
+    CHECK(strcmp(commands_group_name(CMD_GROUP_FORMAT), "format") == 0);
+
+    // "B  I  S  `  H1  H2  H3  •  1.  [ ]  >  link  img  table  ---  code" is 66 columns.
+    RibbonSlot s[RIBBON_MAX];
+    CHECK(commands_ribbon_layout(items, n, 66, s) == 1);
+    CHECK(s[0].col == 0 && s[n - 1].col == 62 && s[n - 1].width == 4);
+    CHECK(s[7].width == 1); // the bullet is one cell, three bytes
+    CHECK(commands_ribbon_rows(80) == 1);
+
+    // The phone pane's note is 45 columns: the inserts go down whole, the rest stays up.
+    CHECK(commands_ribbon_layout(items, n, 45, s) == 2);
+    for (int32_t i = 0; i < n; i++)
+        CHECK(s[i].row == (i >= 11 ? 1 : 0));
+    CHECK(s[10].col + s[10].width == 37);
+    CHECK(s[11].col == 0);
+    CHECK(commands_ribbon_rows(65) == 2);
+
+    // Narrower than a cluster: it breaks between buttons. Every button stays inside the row and
+    // RIBBON_GAP apart from the one before it on its row, so tap regions never overlap.
+    for (int32_t room = 5; room <= 70; room++) {
+        int32_t rows = commands_ribbon_layout(items, n, room, s);
+        CHECK(rows >= 1);
+        for (int32_t i = 0; i < n; i++) {
+            CHECK(s[i].col >= 0 && s[i].col + s[i].width <= room);
+            CHECK(s[i].row >= 0 && s[i].row < rows);
+            if (i > 0 && s[i].row == s[i - 1].row)
+                CHECK(s[i].col == s[i - 1].col + s[i - 1].width + RIBBON_GAP);
+            if (i > 0)
+                CHECK(s[i].row >= s[i - 1].row);
+        }
+    }
+    CHECK(commands_ribbon_layout(items, n, 4, s) == 0); // "table" does not fit
+    CHECK(commands_ribbon_layout(items, 0, 40, s) == 0);
+}
+
 static bool all_on(const Command* c)
 {
     (void)c;
@@ -109,12 +169,16 @@ static void test_menu(void)
     menu_build(&m, all_on);
     int32_t n = 0;
     commands_all(&n);
-    // Every command but the menu's own, plus a heading per group.
-    CHECK(m.count == n - 1 + CMD_GROUP_COUNT);
+    // Every command but the menu's own and the ribbon's, plus a heading per group but format.
+    const Command* ribbon[RIBBON_MAX];
+    int32_t nr = commands_ribbon(ribbon, RIBBON_MAX);
+    CHECK(m.count == n - 1 - nr + CMD_GROUP_COUNT - 1);
     CHECK(m.lines[0].cmd == NULL && m.lines[0].group == CMD_GROUP_NOTE);
     CHECK(m.selected == 1);
-    for (int32_t i = 0; i < m.count; i++)
+    for (int32_t i = 0; i < m.count; i++) {
         CHECK(!m.lines[i].cmd || m.lines[i].cmd->key != DAWN_KEY_CMD_MENU);
+        CHECK(m.lines[i].group != CMD_GROUP_FORMAT);
+    }
 
     // Stepping skips headings and stops at the ends.
     CHECK(menu_step(&m, 1, -1, 1) == 1);
@@ -155,6 +219,7 @@ int main(void)
 {
     test_entries();
     test_bar();
+    test_ribbon();
     test_menu();
     printf("%d/%d checks passed\n", tests_run - tests_failed, tests_run);
     return tests_failed ? 1 : 0;

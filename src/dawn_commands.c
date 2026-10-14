@@ -5,13 +5,15 @@
 // handler already answers (handle_writing in dawn.c, Ctrl+Q in dawn_voice.c), the words for it
 // and the shortcut as printed. The phone-width action bar draws the entries that carry a bar
 // place, and the command menu ("more" on the bar, or Ctrl+]) lists all of them with the shortcut
-// beside each, so every button also teaches its key. The help page and the formatting ribbon are
-// meant to read the same table.
+// beside each, so every button also teaches its key. The formatting ribbon draws the format group,
+// one button per FormatOp, laid out here in rows that wrap between clusters; the menu leaves that
+// group out, since sixteen rows of styles would bury the rest. The help page is meant to read the
+// same table.
 //
 // Running a command means pressing its key: the bar registers a tap region for the key, the menu
 // feeds the key to the writing handler, so a command behaves exactly as its shortcut does. Keys
-// with no physical chord (the menu itself, the ribbon, the cheatsheet) are virtual DawnKeys that
-// handle_writing takes like any other.
+// with no physical chord (the menu itself, the ribbon and its buttons, the cheatsheet) are virtual
+// DawnKeys that handle_writing takes like any other.
 //
 // The menu's line list (headings between groups, the highlighted line, scrolling) lives here too,
 // as plain data. Pure: no app, no backend, so tests/test_commands.c links this file alone. Whether
@@ -48,6 +50,24 @@ static const Command COMMANDS[] = {
     { "indent", CMD_GROUP_EDIT, '\t', "tab", CMD_NEEDS_MODIFY, 0, NULL },
     { "outdent", CMD_GROUP_EDIT, DAWN_KEY_BTAB, "shift+tab", CMD_NEEDS_MODIFY, 0, NULL },
 
+    // format: the ribbon's buttons, in FormatOp order; bar_label is the button's text
+    { "bold", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BOLD, "", CMD_NEEDS_EDIT, 0, "B" },
+    { "italic", CMD_GROUP_FORMAT, DAWN_KEY_FMT_ITALIC, "", CMD_NEEDS_EDIT, 0, "I" },
+    { "strikethrough", CMD_GROUP_FORMAT, DAWN_KEY_FMT_STRIKE, "", CMD_NEEDS_EDIT, 0, "S" },
+    { "code", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE, "", CMD_NEEDS_EDIT, 0, "`" },
+    { "heading 1", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H1, "", CMD_NEEDS_EDIT, 0, "H1" },
+    { "heading 2", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H2, "", CMD_NEEDS_EDIT, 0, "H2" },
+    { "heading 3", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H3, "", CMD_NEEDS_EDIT, 0, "H3" },
+    { "bullet list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BULLET, "", CMD_NEEDS_EDIT, 0, "•" },
+    { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, 0, "1." },
+    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, 0, "[ ]" },
+    { "quote", CMD_GROUP_FORMAT, DAWN_KEY_FMT_QUOTE, "", CMD_NEEDS_EDIT, 0, ">" },
+    { "link", CMD_GROUP_FORMAT, DAWN_KEY_FMT_LINK, "", CMD_NEEDS_EDIT, 0, "link" },
+    { "image", CMD_GROUP_FORMAT, DAWN_KEY_FMT_IMAGE, "", CMD_NEEDS_EDIT, 0, "img" },
+    { "table", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TABLE, "", CMD_NEEDS_EDIT, 0, "table" },
+    { "horizontal rule", CMD_GROUP_FORMAT, DAWN_KEY_FMT_RULE, "", CMD_NEEDS_EDIT, 0, "---" },
+    { "code block", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE_BLOCK, "", CMD_NEEDS_EDIT, 0, "code" },
+
     // view
     { "formatting", CMD_GROUP_VIEW, DAWN_KEY_CMD_RIBBON, "", CMD_NEEDS_MODIFY, 3, "Aa" },
     { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, 0, NULL },
@@ -78,6 +98,7 @@ static const Command COMMANDS[] = {
 static const char* const GROUP_NAMES[CMD_GROUP_COUNT] = {
     [CMD_GROUP_NOTE] = "note",
     [CMD_GROUP_EDIT] = "edit",
+    [CMD_GROUP_FORMAT] = "format",
     [CMD_GROUP_VIEW] = "view",
     [CMD_GROUP_FIND] = "find",
     [CMD_GROUP_AI] = "ai",
@@ -150,6 +171,73 @@ int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32
 
 // #endregion
 
+// #region Formatting ribbon
+
+int32_t commands_ribbon(const Command** out, int32_t max)
+{
+    int32_t n = 0;
+    for (int32_t i = 0; i < COMMAND_COUNT && n < max; i++) {
+        if (COMMANDS[i].group == CMD_GROUP_FORMAT)
+            out[n++] = &COMMANDS[i];
+    }
+    return n;
+}
+
+//! Columns a button's text takes: its code points (every ribbon label is one cell per character)
+static int32_t ribbon_width(const Command* cmd)
+{
+    int32_t w = 0;
+    for (const char* p = commands_bar_label(cmd); *p; p++) {
+        if (((unsigned char)*p & 0xC0) != 0x80)
+            w++;
+    }
+    return w;
+}
+
+//! Whether a button opens a cluster: the headings, the lists (with quote) and the inserts
+static bool ribbon_cluster_start(int32_t key)
+{
+    return key == DAWN_KEY_FMT_H1 || key == DAWN_KEY_FMT_BULLET || key == DAWN_KEY_FMT_LINK;
+}
+
+int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots)
+{
+    int32_t row = 0;
+    int32_t col = 0; // where the next button would start; 0 on an empty row
+    for (int32_t i = 0; i < n; i++) {
+        int32_t w = ribbon_width(items[i]);
+        if (w > room)
+            return 0;
+        if (col > 0 && ribbon_cluster_start(items[i]->key)) {
+            // The whole cluster moves down when it fits on a row of its own but not here.
+            int32_t cw = w;
+            for (int32_t j = i + 1; j < n && !ribbon_cluster_start(items[j]->key); j++)
+                cw += RIBBON_GAP + ribbon_width(items[j]);
+            if (col + cw > room && cw <= room) {
+                row++;
+                col = 0;
+            }
+        }
+        if (col > 0 && col + w > room) {
+            row++;
+            col = 0;
+        }
+        slots[i] = (RibbonSlot) { .row = row, .col = col, .width = w };
+        col += w + RIBBON_GAP;
+    }
+    return n > 0 ? row + 1 : 0;
+}
+
+int32_t commands_ribbon_rows(int32_t room)
+{
+    const Command* items[RIBBON_MAX];
+    RibbonSlot slots[RIBBON_MAX];
+    int32_t n = commands_ribbon(items, RIBBON_MAX);
+    return commands_ribbon_layout(items, n, room, slots);
+}
+
+// #endregion
+
 // #region Command menu
 
 void menu_build(MenuState* m, bool (*enabled)(const Command*))
@@ -162,6 +250,8 @@ void menu_build(MenuState* m, bool (*enabled)(const Command*))
         const Command* c = &COMMANDS[i];
         if (c->key == DAWN_KEY_CMD_MENU)
             continue; // the menu is open already; its key shows in its title
+        if (c->group == CMD_GROUP_FORMAT)
+            continue; // the ribbon is their place; "formatting" under view opens it
         if ((int32_t)c->group != last_group) {
             if (m->count >= MENU_LINES_MAX)
                 break;

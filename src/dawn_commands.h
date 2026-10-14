@@ -1,8 +1,8 @@
 // dawn_commands.h - The writing screen's commands, one table read by every place that lists them
 //
 // Each command is the key dawn's writing handler already takes for it, with the words and the
-// shortcut a person sees. The action bar, the command menu (and later the help page and the
-// formatting ribbon) draw from this table, so a button and the key it teaches cannot disagree.
+// shortcut a person sees. The action bar, the command menu, the formatting ribbon (and later the
+// help page) draw from this table, so a button and the key it teaches cannot disagree.
 // Pure: no app, no backend; whether a command can run right now is decided in dawn.c.
 
 #ifndef DAWN_COMMANDS_H
@@ -15,6 +15,7 @@
 typedef enum {
     CMD_GROUP_NOTE,
     CMD_GROUP_EDIT,
+    CMD_GROUP_FORMAT, //!< The formatting ribbon's buttons; left out of the command menu
     CMD_GROUP_VIEW,
     CMD_GROUP_FIND,
     CMD_GROUP_AI,
@@ -39,7 +40,7 @@ typedef struct {
     const char* shortcut; //!< The key as printed ("^Z", "esc", "tab"); "" when it has none
     uint32_t flags; //!< CommandFlag bits
     int8_t bar; //!< Place on the action bar, 1 leftmost; 0 when it is not on the bar
-    const char* bar_label; //!< The bar's shorter text ("Aa", "AI"); NULL to use label
+    const char* bar_label; //!< The bar's or the ribbon's shorter text ("Aa", "AI", "H1"); NULL to use label
 } Command;
 
 //! Every command, grouped in display order (the AI ones only where the chat is compiled in).
@@ -65,6 +66,37 @@ const char* commands_bar_label(const Command* cmd);
 //! @return the number of items (not counting "more") that fit
 int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32_t gap, int32_t room);
 
+// #region Formatting ribbon
+
+//! Most buttons the ribbon holds
+#define RIBBON_MAX 24
+
+//! Columns between two ribbon buttons; a button's tap region is its text and one cell either side
+#define RIBBON_GAP 2
+
+//! Where a ribbon button goes
+typedef struct {
+    int32_t row; //!< Row of the ribbon, 0 first
+    int32_t col; //!< Columns from the row's left edge
+    int32_t width; //!< Columns its text takes
+} RibbonSlot;
+
+//! The ribbon's buttons, left to right (the CMD_GROUP_FORMAT commands in table order).
+//! @return how many were written to out (at most max)
+int32_t commands_ribbon(const Command** out, int32_t max);
+
+//! Lay the ribbon's n buttons out in rows of room columns, RIBBON_GAP apart. A row breaks before
+//! a cluster (inline styles, headings, lists and quote, inserts) that no longer fits on it but
+//! fits on a row of its own; a cluster wider than a row breaks between its buttons.
+//! @param slots receives each button's place (n entries)
+//! @return the number of rows, or 0 when there are no buttons or one is wider than room
+int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots);
+
+//! Rows the ribbon takes in room columns (0 when it does not fit at all)
+int32_t commands_ribbon_rows(int32_t room);
+
+// #endregion
+
 // #region Command menu
 
 //! Most lines the command menu holds (headings and commands)
@@ -85,8 +117,8 @@ typedef struct {
     int32_t scroll; //!< First line shown
 } MenuState;
 
-//! Fill m with every command but the menu's own, a heading before each group, and highlight the
-//! first that enabled() allows.
+//! Fill m with every command but the menu's own and the ribbon's buttons, a heading before each
+//! group, and highlight the first that enabled() allows.
 void menu_build(MenuState* m, bool (*enabled)(const Command*));
 
 //! The enabled command line steps lines away from line from (dir -1 up, 1 down, steps > 0),
