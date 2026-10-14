@@ -3217,23 +3217,28 @@ static FormatCursor format_cursor(void)
 //! cursor and selection follow the text (an insert selects the part to type over).
 static void format_key(int32_t key)
 {
+    FormatOp op = (FormatOp)(key - DAWN_KEY_FMT_BOLD);
     FormatCursor fc = format_cursor();
-    bool was_dirty = app.dirty;
-    int32_t was_typing = app.undo_typing;
-    int32_t was_count = app.undo_count;
-    save_undo_state(); // the note as it was: Ctrl+Z comes back here
-    if (!format_apply(&app.text, (FormatOp)(key - DAWN_KEY_FMT_BOLD), &fc)) {
-        // Nothing changed: the state just pushed is a copy of the text as it still is, and a
-        // Ctrl+Z onto it would look like it did nothing. Take it back, typing step included.
-        if (app.undo_count > was_count) {
-            free(app.undo_stack[app.undo_count - 1].text);
-            app.undo_count--;
-            app.undo_pos = app.undo_count - 1;
-        }
-        app.undo_typing = was_typing;
-        app.dirty = was_dirty;
+    // The op runs on a copy first: a button that changes nothing (bold on nothing, H1 on an H1
+    // line) must leave no undo step behind, and save_undo_state() frees the redo tail and may
+    // evict the oldest state, which cannot be taken back once done.
+    size_t len = gap_len(&app.text);
+    char* copy = malloc(len > 0 ? len : 1);
+    if (!copy)
         return;
-    }
+    gap_copy_to(&app.text, 0, len, copy);
+    GapBuffer probe;
+    gap_init(&probe, len + GAP_BUFFER_GAP_SIZE);
+    gap_insert_str(&probe, 0, copy, len);
+    free(copy);
+    FormatCursor probe_fc = fc;
+    bool changes = format_apply(&probe, op, &probe_fc);
+    gap_free(&probe);
+    if (!changes)
+        return;
+    save_undo_state(); // the note as it was: Ctrl+Z comes back here
+    if (!format_apply(&app.text, op, &fc))
+        return; // the probe changed, so this does too
     app.cursor = fc.cursor;
     app.sel_anchor = fc.anchor;
     app.selecting = fc.selecting;
@@ -3261,6 +3266,28 @@ static void render_ribbon(const Layout* L)
     bool taps = app.mode == MODE_WRITING;
     bool can = CAN_EDIT();
     FormatCursor fc = format_cursor();
+    // format_state scans the selection's lines, and a frame comes every few milliseconds: the
+    // pressed states are worked out again only when the cursor, the selection or the text
+    // (its length, or an undo step) changed since the last frame.
+    static struct {
+        bool valid;
+        FormatCursor fc;
+        size_t len;
+        int32_t undo_count, undo_pos;
+        bool pressed[FORMAT_COUNT];
+    } cache;
+    size_t len = gap_len(&app.text);
+    if (!cache.valid || cache.fc.cursor != fc.cursor || cache.fc.anchor != fc.anchor
+        || cache.fc.selecting != fc.selecting || cache.len != len || cache.undo_count != app.undo_count
+        || cache.undo_pos != app.undo_pos) {
+        for (int32_t i = 0; i < n && i < FORMAT_COUNT; i++)
+            cache.pressed[i] = format_state(&app.text, &fc, (FormatOp)(items[i]->key - DAWN_KEY_FMT_BOLD));
+        cache.valid = true;
+        cache.fc = fc;
+        cache.len = len;
+        cache.undo_count = app.undo_count;
+        cache.undo_pos = app.undo_pos;
+    }
     if (taps)
         hit_add(1, L->ribbon_top, L->text_area_cols, L->ribbon_rows, HIT_INERT, 0, 0);
     set_bg(get_bg());
@@ -3268,7 +3295,7 @@ static void render_ribbon(const Layout* L)
         int32_t row = L->ribbon_top + slots[i].row;
         int32_t col = L->margin + 1 + slots[i].col;
         int32_t w = slots[i].width;
-        bool pressed = can && format_state(&app.text, &fc, (FormatOp)(items[i]->key - DAWN_KEY_FMT_BOLD));
+        bool pressed = can && i < FORMAT_COUNT && cache.pressed[i];
         move_to(row, col);
         set_fg(can ? get_dim() : get_border());
         if (pressed)
@@ -3314,8 +3341,9 @@ static TipId tip_pending = TIP_COUNT;
 //! notice (a sticky error among them). The moment comes again, and the tip waits for it.
 static void tip_show(TipId id, const char* text)
 {
-    if (tips_seen(id) || IS_PRINT_MODE() || app.mode != MODE_WRITING || app.preview_mode || app.focus_mode)
-        return;
+    if (tips_seen(id) || IS_PRINT_MODE() || app.mode != MODE_WRITING || app.preview_mode || app.focus_mode
+        || app.plain_mode)
+        return; // plain text draws no status line, so a tip would never be drawn or marked seen
     if (notice_current(NULL, NULL, NULL) || calc_layout().ai_sheet)
         return;
     notice_post(NOTICE_TIP, text);
@@ -3366,13 +3394,14 @@ static void render_status_bar(const Layout* L)
     if (!app.focus_mode && notice_current(&tip_text, &tip_kind, &tip_fresh) && tip_kind == NOTICE_TIP) {
         int32_t room = status_right - status_left + 1;
         size_t len = strlen(tip_text);
-        bool cut = room > 1 && tip_prefix(tip_text, room) < len;
+        size_t fit = room > 0 ? tip_prefix(tip_text, room) : 0;
+        bool cut = fit < len;
         if (cut)
-            len = tip_prefix(tip_text, room - 1);
+            len = room > 1 ? tip_prefix(tip_text, room - 1) : 0; // the ellipsis takes a cell
         move_to(app.rows, status_left);
         set_fg(color_lerp(get_bg(), get_dim(), tip_fresh));
         out_str_n(tip_text, len);
-        if (cut)
+        if (cut && room > 0)
             out_str("…");
         tip_drawn();
         return;
