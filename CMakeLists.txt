@@ -231,6 +231,29 @@ if(NOT EMSCRIPTEN)
         endif()
         target_link_libraries(test-store PRIVATE m)
     endif()
+
+    # Test target for the hit-region registry (dawn_hit), which turns taps into keys; pure, so
+    # it links alone
+    add_executable(test-hit
+        tests/test_hit.c
+        src/dawn_hit.c
+    )
+
+    target_include_directories(test-hit PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(test-hit PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-hit PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-hit PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-hit PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
 else()
     file(GLOB WEB_SRCS src/dawn*.c)
     list(FILTER WEB_SRCS EXCLUDE REGEX "dawn_args.c")
