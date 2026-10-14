@@ -29,16 +29,30 @@ Open:
 1. Tips: the save tip comes only from the 5-second autosave, not the frontmatter editor's save or
    esc. "Aa" in the selection tip names the phone's action bar, which a wide desktop terminal does
    not draw.
-2. Device checks owed on the phone (A065, 53x24 and with the keyboard up, about 53x12): tap every
-   screen's items; drag the note and chat pills; the bar, the menu and Ctrl+] from the in-app keyboard;
-   both ribbon rows and the pressed underline; help pages, the cheatsheet and the meaning page's m/r
-   taps; the tour's three cards, a tap on "[enter] next", esc, and "welcome tour" from the menu; the
-   selection tip after a drag and after a double tap, the save tip, each once. The tour, the tips and
-   the help footer were compiled and unit-tested only, never run in tmux by the worker.
+2. Checked on the emulator (x86_64 cross build of `ca712d0`, launcher terminal 53x30 with the keyboard
+   up; recipe in `tests/ux/phone/README.md`): welcome grid taps (history, write, timer, help), the
+   finished screen's "[esc] menu", the timer picker rows, the history row, the bar
+   (`undo find Aa AI more`), the ribbon (B on a word gives `**brave**`, H1 a scaled heading, both
+   pressed), the menu (cut/copy dim without a selection, pause timer dim without a timer, page down,
+   "find" opens search, "title and details" and "table of contents" open their dialogs), the AI sheet
+   from the bar, the pill's track tap (jumps to the end), the three tour cards by tapping
+   "[enter] next" and "[enter] start writing" (`onboarded` saved), both tips in full on the status
+   line once (`tips_seen` saved; selection made with the on-screen Ctrl then A), help page 1/4 with
+   the tap column, five "[tab]" taps at one spot walking 2/4, 3/4, 4/4, Markdown, Activity, and the
+   cheatsheet with real styles.
+   Still owed on the phone (A065, the user's; the user does these): Ctrl+] from the in-app keyboard,
+   the meaning page's m/r taps, the selection tip after a drag and a double tap, the chat pill with
+   the model picker open, and everything at 53x12 (the emulator gives 30 rows with the keyboard up).
 3. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
 4. Launcher side, not done: a dawn-aware extra-keys row (esc, ctrl, tab, arrows). Long press was
-   explicitly not done.
-5. Known wart: a format op that changes nothing still pushes an undo state (`format_key` in `src/dawn.c`).
+   explicitly not done. Found on the emulator: the launcher's terminal sends a finger drag as wheel
+   events, never as SGR drag motion (`?1002`), so the pill follows the swipe instead of the finger
+   (the track tap works). If the launcher sent drag motion while `?1002` is on, dawn's pill drag
+   would work as written (`pill_follow` in `src/dawn.c`).
+5. Known warts: a format op that changes nothing still pushes an undo state (`format_key` in
+   `src/dawn.c`); a kitty-scaled heading paints over the top rows of a popup (menu, search) and
+   leaves a grey block beside the menu box at its rows (pre-existing with search); help opened from
+   the welcome screen shows the last note's status line underneath (pre-existing).
 
 ## 2026-10-08 · chat requests name the dawn_chat feature
 

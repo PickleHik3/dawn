@@ -1,0 +1,5 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Run the test dawn with scratch XDG dirs so real notes stay untouched.
+B=$HOME/.cache/dawn-ux
+mkdir -p $B/data $B/config $B/cache
+exec env XDG_DATA_HOME=$B/data XDG_CONFIG_HOME=$B/config XDG_CACHE_HOME=$B/cache $HOME/.local/bin/dawn-tl "$@"
