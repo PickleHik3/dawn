@@ -41,13 +41,16 @@ Warnings are errors (`-Wall -Wextra -Wpedantic -Werror`). `USE_LIBAI` is OFF by 
 so build with it ON before claiming a change compiles. Source files are globbed (`src/dawn*.c`,
 `src/highlight/lang/*.c`), so re-run cmake after adding a file.
 
-Tests are three plain executables, no framework, no ctest:
+Tests are six plain executables, no framework, no ctest:
 
 ```sh
 ./build/test-block                                 # block + inline parsing; exits non-zero on failure
 ./build/test-block tests/commonmark_spec.json -v   # CommonMark spec pass rate (about 92%); a report, exit is always 0
 ./build/test-embed                                 # chunker, index file, cosine top-k (pure half only); exits non-zero on failure
 ./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
+./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
+./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
+./build/test-commands                              # the command table, action bar fit, menu lines (dawn_commands); exits non-zero on failure
 ```
 
 `test-block` links `dawn_block`, `dawn_gap`, `dawn_md`, `dawn_wrap` alone and stubs the theme/image/tex
@@ -55,6 +58,7 @@ getters at the top of `tests/test_block.c`. When `dawn_md.c` starts calling a ne
 there or the test stops linking. `test-embed` links only `dawn_embed_index.c`; keep that file free of
 globals, backend calls, threads and network so it stays that way. `test-store` (not on Windows) links
 `dawn_fsio.c`, `dawn_crdt.c`, `dawn_notepath.c` and cJSON with stubs; keep those three pure too.
+`test-hit`, `test-format` (with `dawn_gap.c`) and `test-commands` each link their module alone.
 
 Format with `.clang-format` (WebKit base, 4 spaces, `char* p`, no column limit, function brace on its own line).
 
@@ -117,7 +121,17 @@ guarded by `CAN_EDIT()`/`CAN_MODIFY()`, and into `render_help()` in `dawn_render
 case. Touch: anything tappable registers a hit region while it renders (`hit_add` in `src/dawn_hit.c`,
 cleared at the top of `render()`), and `handle_input` turns a tap on it into the key it stands for before
 the mode's switch, so a tap and its key share one path; a tap on no region reaches the mode as
-`DAWN_KEY_MOUSE_CLICK`. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+`DAWN_KEY_MOUSE_CLICK`.
+
+`src/dawn_commands.c` is the table of the writing screen's commands (label, group, the key
+`handle_writing` takes, the shortcut as printed, what each needs, its place on the action bar). The
+phone action bar (`render_action_bar` in `dawn.c`, on the blank row above the status line when
+`app.cols < AI_PANEL_MIN_COLS` or `app.launcher_term`) and the command menu (`MODE_MENU`, "more" on the
+bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and the help page and the formatting
+ribbon are meant to; a new command goes in that table. Running one from the bar or the menu presses its
+key (the menu through `pending_key`), so it behaves as the shortcut does. Commands with no chord are the
+virtual keys `DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` (reserved, ignored until the ribbon exists) and
+`DAWN_KEY_CMD_CHEATSHEET` (help, page 0 for now) in `dawn_backend.h`. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
 
 ### AI: libai and TAI
