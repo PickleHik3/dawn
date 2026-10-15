@@ -250,8 +250,8 @@ static void test_ribbon(void)
     CHECK(s[6].col == 40 && s[6].col + s[6].width == 44); // "H3"
     CHECK(s[7].col == 0 && s[11].col == 30 && s[11].width == 8); // "•" ... "link"
     CHECK(s[12].col == 0 && s[15].col == 34 && s[15].col + s[15].width == 42); // "img" ... "code"
-    // The whole 53-column pane (26 scaled cells) also takes three rows.
-    CHECK(commands_ribbon_rows(53, 2) == 6);
+    // The whole 53-column pane (26 scaled cells) packs into two rows.
+    CHECK(commands_ribbon_rows(53, 2) == 4);
 
     // At 36 cells (18 scaled) the two-cell gap would take five rows; one scaled cell takes three.
     CHECK(commands_ribbon_layout(items, n, 18, s) == 5);
@@ -267,6 +267,15 @@ static void test_ribbon(void)
     // Scale 3 in 80 columns less margins (76 cells, 25 scaled).
     CHECK(commands_ribbon_place(items, n, 76, 3, s) == commands_ribbon_rows(76, 3));
     CHECK(commands_ribbon_rows(76, 3) % 3 == 0);
+
+    // Packed anywhere between buttons: two rows at 30 scaled cells and wider at every scale, and
+    // at 26 scaled cells too; 22 is too narrow for two rows and takes three.
+    for (int32_t scale = 2; scale <= UI_SCALE_MAX; scale++) {
+        for (int32_t cells = 30; cells <= 45; cells += 15)
+            CHECK(commands_ribbon_place(items, n, cells * scale, scale, s) <= 2 * scale);
+        CHECK(commands_ribbon_place(items, n, 26 * scale, scale, s) == 2 * scale);
+        CHECK(commands_ribbon_place(items, n, 22 * scale, scale, s) == 3 * scale);
+    }
 
     // At every scale each button sits on a multiple of the scale inside the note, scale screen
     // rows to a row of buttons, with tap regions (the text and a cell either side) that never
