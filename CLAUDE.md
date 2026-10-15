@@ -50,7 +50,7 @@ Tests are seven plain executables, no framework, no ctest:
 ./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
 ./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
 ./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
-./build/test-commands                              # the command table, ui scale, menu bar and ribbon layout at every scale, menu and dropdown lines (dawn_commands); exits non-zero on failure
+./build/test-commands                              # the command table, ui scale, tab row and ribbon layout at every scale, menu lines (dawn_commands); exits non-zero on failure
 ./build/test-tips                                  # the one-shot tips' seen set and its "tips_seen" JSON (dawn_tips); exits non-zero on failure
 ```
 
@@ -126,39 +126,46 @@ the mode's switch, so a tap and its key share one path; a tap on no region reach
 `DAWN_KEY_MOUSE_CLICK`.
 
 `src/dawn_commands.c` is the table of the writing screen's commands (label, group, the key
-`handle_writing` takes, the shortcut as printed, what each needs, the ribbon button's text). Where
-`chrome_place()` in `dawn.c` says so (`app.launcher_term` or `app.cols < AI_PANEL_MIN_COLS`, not in
-preview or print; a wide desktop terminal gets none), a menu bar runs across the top
-(`render_menubar`: `File  Edit  View  AI  Help`, AI only with `HAS_LIBAI`; `menubar_layout`,
-`menubar_of_group`): a tap on a name is a `DAWN_KEY_MENU_*` key that opens that menu's dropdown,
-`MODE_MENU` with `MenuState.bar_menu` set (`menu_build(m, item, ...)`: File = note group, Edit = edit
-and find, View, AI, Help), drawn by `render_menu` in `dawn_render.c` under the name on the popup's
-surface; left/right walk the menus. Ctrl+] (and "all commands" under Help) opens the full grouped menu
-(`bar_menu` -1). Help (`MODE_HELP`, Ctrl+O) reads the same table: its shortcut pages list every command
-by group with its key and its tap ("Edit menu", or "ribbon B"), from `help_rows`/`help_paginate`, after
-a hand-written "move and select" group; a new command goes in that table and nowhere else. Help's pages
+`handle_writing` takes, the shortcut as printed, what each needs, the ribbon button's caption, its
+text glyph and its Nerd Font icon). Where `chrome_place()` in `dawn.c` says so (`app.launcher_term` or
+`app.cols < AI_PANEL_MIN_COLS`, not in preview or print; a wide desktop terminal gets none), a tab row
+runs across the top as a word processor has it (`render_tabs`: `File  Formatting  AI`, AI only with
+`HAS_LIBAI`, on a tinted band, the open tab on its ribbon's surface; the word count, the timer and
+"not saved" at its right end when there is room, `tabs_status`). A tap on a tab is a `DAWN_KEY_TAB_*`
+key: its ribbon drops open under the row (`ribbon_toggle`, row by row over `RIBBON_DROP_MS`, at once
+with `DAWN_REDUCED_MOTION`), a tap on the open tab or a typed esc folds it away, and a chat sheet and a
+ribbon never share the screen. A ribbon (`render_ribbon`) is sections split by dividers
+(`ribbon_buttons`): File = note group, edit and find, view (with "light or dark",
+`DAWN_KEY_CMD_THEME`); Formatting = `CMD_GROUP_FORMAT` (one `DAWN_KEY_FMT_*` per `FormatOp`, one
+`format_apply` and one undo step; a style `format_state` says is on draws pressed), then help; AI =
+chat and the model button (the model's name and whether it is loaded; a tap opens the chat's model
+picker, `DAWN_KEY_AI_MODEL`), then undo, title (`DAWN_KEY_AI_TITLE`), auto format
+(`DAWN_KEY_AI_FORMAT`; both are `ai_action` in `dawn_chat.c`, USER-lane chat turns whose edit is a
+tagged block) and read aloud. Every command is on some ribbon (`ribbon_tab_of`, tested). Each button
+is a box with its glyph over its caption, about three rows tall at scale 2; a ribbon wraps
+(`ribbon_layout`) and pages with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note
+fewer than `RIBBON_MIN_NOTE_ROWS`. Ctrl+] (and "all commands" in help) opens the full grouped command
+menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in `dawn_render.c`), every command but the
+format group's. Help (`MODE_HELP`, Ctrl+O) reads the same table: its shortcut pages list every command
+by group with its key and its ribbon ("File ribbon"), from `help_rows`/`help_paginate`, after a
+hand-written "move and select" group; a new command goes in that table and nowhere else. Help's pages
 are `HelpPage` (`dawn_types.h`: shortcuts, Markdown cheatsheet, activity, meaning index), each over as
 many screens as the screen's height needs (`app.help_screen`, `render_help_screens`); tab and <- turn
-through them via `render_help_neighbour`. Running a command from a menu presses its key (through
-`pending_key`), so it behaves as the shortcut does. Commands with no chord are the virtual keys
-`DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON`, `DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) and
-`DAWN_KEY_CMD_TOUR` in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the
-table's `CMD_GROUP_FORMAT`, left out of the menus: under the menu bar (on the top rows without one),
-toggled by View › formatting (`DAWN_KEY_CMD_RIBBON`), on by default in the launcher and off elsewhere
-until `"ribbon"` in settings.json says otherwise, hidden under a chat sheet and when it would leave the
-note fewer than `RIBBON_MIN_NOTE_ROWS`, wrapping between clusters (`commands_ribbon_place`). Each button
-is a `DAWN_KEY_FMT_*` key, one per `FormatOp` in order, which `handle_writing` turns into one
-`format_apply` (`dawn_format.c`) and one undo step; a style that `format_state` says is on draws
-underlined. Size: `Layout.ui_scale` scales the menu bar, the ribbon, the status line (`render_status_bar`
-works in scaled columns, `Layout.status_top`) and the dropdowns. Where the terminal has kitty text sizing
-(`DAWN_CAP_TEXT_SIZING`) it comes from the pane's pixels (`ui_scale_now`, `commands_ui_scale`: a chrome
-row is about a thirteenth of the pane's width, clamped to 1..4, 2 in the launcher without a pixel size),
-so the chrome keeps its size on screen when a pinch changes the font while the note follows the font;
-without text sizing (tmux, xterm) it is 1. A dropdown drops to the largest scale at which it fits below
-the bar; the status panel corner (`dawn_status.c`) stays at scale 1 on the blank row above the status
-line. Layout: menu bar, ribbon, a blank row, the text, a blank row, the status line; all scaled places, in
-screen cells, come from the pure functions in `dawn_commands.c` (tested in `test-commands`), and tap
-regions are as tall as the scale. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+through them via `render_help_neighbour`. Running a command from the menu presses its key (through
+`pending_key`), so it behaves as the shortcut does; a key from a ribbon button or the menu is
+`key_is_command` (so "close" closes the note while a typed esc only folds the ribbon). Commands with no
+chord are the virtual keys `DAWN_KEY_CMD_*` and `DAWN_KEY_AI_*` in `dawn_backend.h`. Size:
+`Layout.ui_scale` scales the tab row, the ribbons and the command menu. Where the terminal has kitty
+text sizing (`DAWN_CAP_TEXT_SIZING`) it comes from the pane's pixels (`ui_scale_now`,
+`commands_ui_scale`: a chrome row is about a thirteenth of the pane's width, clamped to 1..4, 2 in the
+launcher without a pixel size), lowered until the three tabs fit (`tabs_scale`), so the chrome keeps its
+size on screen when a pinch changes the font while the note follows the font; without text sizing
+(tmux, xterm) it is 1. A button's caption is at half the scale (`ribbon_caption_scale`). Under the tab
+row there is no status line: the bottom row is the notice line (`render_notice_line`: a notice or a
+one-shot tip while one is up, else the status panel's corner); a desktop terminal keeps
+`render_status_bar`. Layout: tab row, ribbon, a blank row, the text, the notice line; all scaled places,
+in screen cells, come from the pure functions in `dawn_commands.c` (tested in `test-commands`), and tap
+regions are as tall as what they cover. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
 
 First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards
@@ -166,7 +173,7 @@ in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` i
 arrows or a swipe turn cards, esc or enter on the last one sets `onboarded` and goes to the start screen).
 "welcome tour" in the help group of the command table (`DAWN_KEY_CMD_TOUR`) pushes it again, and then it
 pops back. Two one-shot tips, the first selection and the first save, go through `tip_show` in
-`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` draws alone across the whole status line (at the largest scale up to `ui_scale` that holds it whole); a tip
+`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` (or, under the tab row, `render_notice_line`) draws alone across the whole line; a tip
 counts as given only once drawn, never off the writing screen. `src/dawn_tips.c` is the pure set of
 tips given (`TipId`, `tips_seen`, `tips_mark`), saved by name as `"tips_seen"` in settings.json.
 
@@ -213,7 +220,7 @@ UI rule: show nothing unless `embed_ready()` returned true and the query returne
 - Clipboard is OSC 52 under `__ANDROID__`; the xclip/xsel path must stay compiled out there.
 - OSC 8 hyperlinks are gated on `DAWN_CAP_HYPERLINKS`.
 - Notes live in `$XDG_DATA_HOME/dawn` (fallback `~/.dawn`); settings in `<config>/dawn/settings.json`
-  (`theme`, `timer_mins`, `nerd_font`, `meaning_index`, `ribbon`, `onboarded`, `tips_seen`; a save keeps
+  (`theme`, `timer_mins`, `nerd_font`, `meaning_index`, `onboarded`, `tips_seen`; a save keeps
   keys it does not know, and tip names in `tips_seen` it does not know).
 - Storage: every write goes through `dawn_fsio` (temp file, fsync, rename, then a directory fsync).
   `save_session` in `dawn_file.c` compares the file with what dawn last saw and never overwrites
