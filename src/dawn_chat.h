@@ -34,6 +34,20 @@ void ai_init_session(void);
 //! @param prompt user's input message
 void ai_send(const char* prompt);
 
+//! The AI ribbon's actions on the note: each is a turn of the chat (its line shows there), asked
+//! in the USER lane like a typed question, and its edit is made like the chat's, one undo step.
+typedef enum {
+    AI_ACTION_NONE,
+    AI_ACTION_TITLE, //!< A title for the note now, as a <set_title> block (the writer's own choice from then on)
+    AI_ACTION_FORMAT, //!< The note restructured into well-formed Markdown, as one <replace_note> block
+    AI_ACTION_COUNT
+} AiAction;
+
+//! Ask for action. A notice says it went out and, when no edit came of it, why; a made edit says
+//! so itself. Nothing is sent while a reply is still coming, without a model, or for an empty note.
+//! @return whether the request went out
+bool ai_action(AiAction action);
+
 //! Stop the reply in flight. What already streamed stays, marked as stopped; no edit the
 //! model had not finished is made. The chat is ready for the next question once the reply ends.
 void ai_stop(void);
