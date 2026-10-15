@@ -79,6 +79,7 @@ typedef struct {
     int32_t ribbon_top; //!< First screen row of the open ribbon (when ribbon_rows > 0)
     int32_t ribbon_rows; //!< Screen rows the open ribbon takes from the note now (fewer while it drops); 0 when none shows
     int32_t ribbon_max; //!< Screen rows the ribbon may take at most (ribbon_layout's max_height)
+    bool ribbon_dropping; //!< The open ribbon is still dropping open (ribbon_rows short of its height): the text cursor stays hidden
     int32_t ui_scale; //!< Scale of the tab row, the ribbons and the command menu: from the pane's pixels where the terminal sizes text and the tab row shows (commands_ui_scale), else 1
     int32_t status_top; //!< The status line's row where there is no tab row (the bottom one)
 } Layout;
@@ -301,6 +302,7 @@ static inline Layout calc_layout(void)
         if (ribbon_layout(b, n, l.chrome_room, l.ui_scale, l.ribbon_max, slots, &f)) {
             int32_t rows = ribbon_shown(f.height);
             l.ribbon_rows = rows;
+            l.ribbon_dropping = rows < f.height;
             l.ribbon_top = l.ui_scale + 1;
             l.top_margin += rows;
             l.text_height -= rows;
@@ -3276,19 +3278,6 @@ static int32_t chrome_cols(const char* s)
     return w;
 }
 
-#if HAS_LIBAI
-//! Bytes of s's first cols code points
-static size_t chrome_prefix(const char* s, int32_t cols)
-{
-    size_t n = 0;
-    for (; s[n]; n++) {
-        if (((unsigned char)s[n] & 0xC0) != 0x80 && cols-- <= 0)
-            break;
-    }
-    return n;
-}
-#endif
-
 //! The tab row's band, the open tab and its ribbon: the tint the row sits on, and the one the open
 //! tab shares with its ribbon (so the tab reads as the ribbon's top)
 static DawnColor tab_band_bg(void) { return get_ai_bg(); }
@@ -3455,12 +3444,20 @@ static bool ribbon_button_on(const Command* cmd, const bool* fmt_on)
     }
 }
 
+//! How a text glyph is set: the bold, italic and strikethrough buttons show their own style
+typedef enum {
+    FACE_PLAIN = 0,
+    FACE_BOLD = 1 << 0,
+    FACE_ITALIC = 1 << 1,
+    FACE_STRIKE = 1 << 2,
+} FaceStyle;
+
 //! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
-//! surface scale rows tall with face centred in it (face_cols columns at face_scale), and caption
-//! centred under it on the ribbon's band at the caption's scale. Pressed: the box tinted with the
-//! accent and the face in it; disabled: face and caption in the border's colour.
+//! surface scale rows tall with face centred in it (face_cols columns at face_scale, set in style),
+//! and caption centred under it on the ribbon's band at the caption's scale. Pressed: the box
+//! tinted with the accent and the face in it; disabled: face and caption in the border's colour.
 static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, const char* face,
-    int32_t face_cols, int32_t face_scale, const char* caption, bool enabled, bool pressed)
+    int32_t face_cols, int32_t face_scale, uint32_t style, const char* caption, bool enabled, bool pressed)
 {
     int32_t cs = ribbon_caption_scale(scale);
     set_bg(pressed ? color_lerp(get_row_select_bg(), get_accent(), 0.35f) : get_row_select_bg());
@@ -3469,15 +3466,47 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
         out_spaces(w);
     }
     int32_t fw = face_cols * face_scale;
-    move_to(top + (scale - face_scale) / 2, col + (w - fw) / 2);
+    int32_t fx = (w - fw) / 2;
+    move_to(top + (scale - face_scale) / 2, col + (fx > 0 ? fx : 0));
     set_fg(!enabled ? get_border() : pressed ? get_accent() : get_fg());
+    if (style & FACE_BOLD)
+        set_bold(true);
+    if (style & FACE_ITALIC)
+        set_italic(true);
+    if (style & FACE_STRIKE)
+        set_strikethrough(true);
     print_scaled_str(face, strlen(face), face_scale);
+    if (style & FACE_BOLD)
+        set_bold(false);
+    if (style & FACE_ITALIC)
+        set_italic(false);
+    if (style & FACE_STRIKE)
+        set_strikethrough(false);
     set_bg(ribbon_band_bg());
     int32_t cw = chrome_cols(caption) * cs;
-    move_to(top + scale, col + (w - cw) / 2);
+    int32_t cx = (w - cw) / 2;
+    move_to(top + scale, col + (cx > 0 ? cx : 0));
     set_fg(enabled ? get_dim() : get_border());
     print_scaled_str(caption, strlen(caption), cs);
 }
+
+#if HAS_LIBAI
+//! The model's short name for its ribbon button: the part after any "org/", up to the first space,
+//! dash, underscore, colon or dot ("google/gemma-3n-E4B" is "gemma"); "" when no model is named
+static void ribbon_model_short(const char* name, char* out, size_t cap)
+{
+    out[0] = '\0';
+    if (!name || !name[0] || strcmp(name, "AI") == 0) // session_header's word for no model known
+        return;
+    const char* slash = strrchr(name, '/');
+    const char* p = slash ? slash + 1 : name;
+    size_t n = strcspn(p, " -_:.");
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+}
+#endif
 
 //! Where the command menu goes (render_menu): centred, at the chrome's scale
 static MenuPlace menu_place(void)
@@ -3541,10 +3570,12 @@ static void format_key(int32_t key)
 
 //! The open tab's ribbon on the rows calc_layout keeps for it under the tab row, a band of the open
 //! tab's surface across the width: its buttons (ribbon_buttons) where ribbon_layout puts them on the
-//! page showing, a divider between two sections, and on a ribbon that pages a "more" button at the
-//! right end of its first row. Each button is a box with its glyph (the Nerd Font icon when the font
-//! is there) over its caption, drawn at L->ui_scale; the model button names the model and whether
-//! it is loaded. While the ribbon drops open only its rows already down are drawn. A command that
+//! page showing, a divider between two sections side by side, a thin rule above a section stacked
+//! under another, and on a ribbon that pages a "more" button at the right end of its first row.
+//! Each button is a box with its glyph centred in it (the Nerd Font icon when the font is there;
+//! bold, italic and strike set in their own style) over its caption, drawn at L->ui_scale; the
+//! model button's glyph is the model's short name when it fits, its caption whether the model is
+//! loaded. While the ribbon drops open only its rows already down are drawn. A command that
 //! can run is a tap on its key (its box and caption); the rest of the band swallows taps, all
 //! registered on the writing screen only.
 static void render_ribbon(const Layout* L)
@@ -3600,13 +3631,24 @@ static void render_ribbon(const Layout* L)
     }
 
     for (int32_t i = 0; i < n; i++) {
-        if (s[i].page != ribbon_ui.page || s[i].row + h > shown)
+        if (s[i].page != ribbon_ui.page)
+            continue;
+        // A section stacked under another: a thin rule across the ribbon on the row above it.
+        if (s[i].rule_above && s[i].row - RIBBON_RULE < shown) {
+            set_bg(ribbon_band_bg());
+            set_fg(get_border());
+            move_to(L->ribbon_top + s[i].row - RIBBON_RULE, L->chrome_left);
+            for (int32_t c = 0; c < L->chrome_room; c++)
+                out_str("─");
+        }
+        if (s[i].row + h > shown)
             continue;
         const Command* cmd = b[i].cmd;
         int32_t top = L->ribbon_top + s[i].row;
         int32_t col = L->chrome_left + s[i].col;
         bool enabled = command_enabled(cmd);
         bool pressed = enabled && ribbon_button_on(cmd, cache.on);
+        // A section beside the one before it: a divider between them, as tall as the row.
         if (i > 0 && b[i].section != b[i - 1].section && s[i - 1].page == s[i].page && s[i - 1].row == s[i].row) {
             set_bg(ribbon_band_bg());
             set_fg(get_border());
@@ -3616,35 +3658,41 @@ static void render_ribbon(const Layout* L)
             }
         }
         char face[160];
-        int32_t face_cols, face_scale = scale;
+        int32_t face_cols = 0;
+        uint32_t style = FACE_PLAIN;
         const char* caption = cmd->caption;
         char state[24];
+        bool named = false;
 #if HAS_LIBAI
         if (cmd->key == DAWN_KEY_AI_MODEL) {
-            // The model button names the model at the caption's scale, cut to the button's width.
+            // The model button: the model's short name in the glyph's place when the whole of it
+            // fits the box, else the chip; whether it is loaded is the caption.
             char name[96];
-            int32_t cs = ribbon_caption_scale(scale);
             ribbon_model_text(name, sizeof(name), state, sizeof(state));
-            int32_t fit = s[i].width / cs;
-            size_t bytes = chrome_prefix(name, fit);
-            snprintf(face, sizeof(face), "%.*s", (int)bytes, name);
-            face_cols = chrome_cols(face);
-            face_scale = cs;
             caption = state;
-        } else
+            ribbon_model_short(name, face, sizeof(face));
+            face_cols = chrome_cols(face);
+            named = face_cols > 0 && face_cols * scale <= s[i].width - 2;
+        }
 #endif
-            if (app.nerd_font && cmd->icon) {
-            // The icon spreads over the space after it.
+        (void)state;
+        if (named) {
+            // face holds the model's name
+        } else if (app.nerd_font && cmd->icon) {
+            // The icon alone, centred on its own cell (the button's width keeps a second cell for
+            // a font whose icons spread wider).
             int32_t k = (int32_t)utf8proc_encode_char((utf8proc_int32_t)cmd->icon, (utf8proc_uint8_t*)face);
-            face[k] = ' ';
-            face[k + 1] = '\0';
-            face_cols = 2;
+            face[k] = '\0';
+            face_cols = 1;
         } else {
             snprintf(face, sizeof(face), "%s", cmd->glyph);
             face_cols = chrome_cols(face);
+            style = cmd->key == DAWN_KEY_FMT_BOLD ? FACE_BOLD
+                : cmd->key == DAWN_KEY_FMT_ITALIC ? FACE_ITALIC
+                : cmd->key == DAWN_KEY_FMT_STRIKE ? FACE_STRIKE
+                                                  : FACE_PLAIN;
         }
-        (void)state;
-        ribbon_draw_button(top, col, s[i].width, scale, face, face_cols, face_scale, caption, enabled, pressed);
+        ribbon_draw_button(top, col, s[i].width, scale, face, face_cols, scale, style, caption, enabled, pressed);
         if (taps && enabled)
             hit_add(col, top, s[i].width, h, HIT_KEY, cmd->key, HIT_ARG_COMMAND);
     }
@@ -3654,7 +3702,7 @@ static void render_ribbon(const Layout* L)
         int32_t col = L->chrome_left + f.more_col;
         char caption[32];
         snprintf(caption, sizeof(caption), "%d/%d", ribbon_ui.page + 1, f.pages);
-        ribbon_draw_button(L->ribbon_top, col, f.more_width, scale, "▸", 1, scale, caption, true, false);
+        ribbon_draw_button(L->ribbon_top, col, f.more_width, scale, "▸", 1, scale, FACE_PLAIN, caption, true, false);
         if (taps)
             hit_add(col, L->ribbon_top, f.more_width, h, HIT_KEY, DAWN_KEY_RIBBON_MORE, 0);
     }
@@ -4583,7 +4631,7 @@ static void render_writing_plain(void)
     render_ribbon(&L);
     status_area_writing(&L, false);
     move_to(cursor_screen_row, cursor_screen_col);
-    cursor_visible(true);
+    cursor_visible(!L.ribbon_dropping); // no cursor over the band while a ribbon drops open
     status_cursor(cursor_screen_row, cursor_screen_col);
 }
 
@@ -7441,6 +7489,53 @@ static void handle_input(void)
 
 // #region Engine API
 
+//! Whether any of a directory listing's names says "nerd", in any case
+static bool names_say_nerd(char** names, int32_t count)
+{
+    for (int32_t i = 0; i < count; i++) {
+        for (const char* p = names[i]; *p; p++) {
+            int32_t k = 0;
+            while (k < 4 && p[k] && (p[k] | 0x20) == "nerd"[k])
+                k++;
+            if (k == 4)
+                return true;
+        }
+    }
+    return false;
+}
+
+//! Whether the launcher's terminal has a Nerd Font to draw the ribbons' icons with: a file under
+//! ~/.termux/fonts/ (or one directory down, where the launcher puts the symbols when a font is
+//! picked: fonts/symbols/SymbolsNerdFontMono.ttf) with "nerd" in its name. Without one every icon
+//! is a missing-glyph box. Read once at start.
+static bool nerd_font_installed(void)
+{
+    const char* home = DAWN_BACKEND(app)->home_dir();
+    char dir[PATH_MAX];
+    if (!home || !home[0] || snprintf(dir, sizeof(dir), "%s/.termux/fonts", home) >= (int)sizeof(dir))
+        return false;
+    char** names = NULL;
+    int32_t count = 0;
+    if (!DAWN_BACKEND(app)->list_dir(dir, &names, &count))
+        return false;
+    bool found = names_say_nerd(names, count);
+    for (int32_t i = 0; i < count && !found; i++) {
+        char sub[PATH_MAX];
+        char** inner = NULL;
+        int32_t n = 0;
+        if (!path_join(sub, sizeof(sub), dir, names[i]) || !DAWN_BACKEND(app)->list_dir(sub, &inner, &n))
+            continue; // a file, not a directory
+        found = names_say_nerd(inner, n);
+        for (int32_t j = 0; j < n; j++)
+            free(inner[j]);
+        free(inner);
+    }
+    for (int32_t i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
+    return found;
+}
+
 bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 {
     // Header rows in the block cache follow the terminal: scaled only with OSC 66 text sizing.
@@ -7462,12 +7557,13 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     {
         // The launcher sets TERM_PROGRAM=termux-launcher; inside tmux TERM_PROGRAM is "tmux", but
         // TERMUX_LAUNCHER_PANE (set by the launcher alone) survives. Nerd Font icons default on
-        // only there, where the font is known to be installed; settings.json's "nerd_font"
-        // overrides that either way, and never launcher_term.
+        // only there, and only once the user picked a font that brought the Nerd symbols
+        // (nerd_font_installed); settings.json's "nerd_font" overrides that either way, and never
+        // launcher_term.
         const char* prog = getenv("TERM_PROGRAM");
         const char* pane = getenv("TERMUX_LAUNCHER_PANE");
         app.launcher_term = (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
-        app.nerd_font = app.launcher_term;
+        app.nerd_font = app.launcher_term && nerd_font_installed();
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
     app.onboarded = false; // the tour shows until settings.json says "onboarded": true
@@ -8319,7 +8415,9 @@ static void render_writing(void)
     if (!app.view_detached)
         voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
-    cursor_visible(true);
+    // While a ribbon drops open the note moves down a few rows a frame; the cursor waits hidden
+    // until it settles, so no frame shows it over the band.
+    cursor_visible(!L.ribbon_dropping);
     status_cursor(cursor_screen_row, rs.cursor_col);
 }
 

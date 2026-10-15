@@ -134,20 +134,28 @@ runs across the top as a word processor has it (`render_tabs`: `File  Formatting
 "not saved" at its right end when there is room, `tabs_status`). A tap on a tab is a `DAWN_KEY_TAB_*`
 key: its ribbon drops open under the row (`ribbon_toggle`, row by row over `RIBBON_DROP_MS`, at once
 with `DAWN_REDUCED_MOTION`), a tap on the open tab or a typed esc folds it away, and a chat sheet and a
-ribbon never share the screen. A ribbon (`render_ribbon`) is sections split by dividers
-(`ribbon_buttons`): File = note group, edit and find, view (with "light or dark",
-`DAWN_KEY_CMD_THEME`); Formatting = `CMD_GROUP_FORMAT` (one `DAWN_KEY_FMT_*` per `FormatOp`, one
-`format_apply` and one undo step; a style `format_state` says is on draws pressed), then help; AI =
-chat and the model button (the model's name and whether it is loaded; a tap opens the chat's model
-picker, `DAWN_KEY_AI_MODEL`), then undo, title (`DAWN_KEY_AI_TITLE`), auto format
-(`DAWN_KEY_AI_FORMAT`; both are `ai_action` in `dawn_chat.c`, USER-lane chat turns whose edit is a
-tagged block) and read aloud. Every command is on some ribbon (`ribbon_tab_of`, tested). Each button
-is a box with its glyph over its caption, about three rows tall at scale 2; a ribbon wraps
-(`ribbon_layout`) and pages with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note
-fewer than `RIBBON_MIN_NOTE_ROWS`. Ctrl+] (and "all commands" in help) opens the full grouped command
-menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in `dawn_render.c`), every command but the
-format group's. Help (`MODE_HELP`, Ctrl+O) reads the same table: its shortcut pages list every command
-by group with its key and its ribbon ("File ribbon"), from `help_rows`/`help_paginate`, after a
+ribbon never share the screen. A ribbon (`render_ribbon`) is sections (`ribbon_buttons`, the
+`SECTIONS` table): File = details, pause, close | undo, redo, cut, copy, paste | find, outline, focus,
+light or dark (`DAWN_KEY_CMD_THEME`); Formatting = `CMD_GROUP_FORMAT` (one `DAWN_KEY_FMT_*` per
+`FormatOp`, one `format_apply` and one undo step; a style `format_state` says is on draws pressed),
+then help; AI = chat and the model button (glyph: the model's short name when it fits, else a chip;
+caption: loaded, loading or not loaded; a tap opens the chat's model picker, `DAWN_KEY_AI_MODEL`),
+then undo, title (`DAWN_KEY_AI_TITLE`), auto format (`DAWN_KEY_AI_FORMAT`; both are `ai_action` in
+`dawn_chat.c`, USER-lane chat turns whose edit is a tagged block) and read aloud. Every command is on
+a ribbon or in the full menu (`ribbon_tab_of`, `commands_in_menu`, tested). Each button is a box with
+its glyph centred over its caption, about three rows tall at scale 2, all of a ribbon's buttons one
+width (its widest; captions at most 7 columns, text glyphs 2) so they form a grid. `ribbon_layout`
+wraps sections as blocks: two sit side by side with a divider only when both fit one row, else each
+starts at the left edge under a thin rule, its buttons spread evenly over its rows; a ribbon pages
+with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer than
+`RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
+Icons are Nerd Font code points, used only when `app.nerd_font` (on in the launcher when a file under
+`~/.termux/fonts/` names "nerd", `nerd_font_installed`; settings.json's `"nerd_font"` wins); otherwise
+each button has a text glyph. Ctrl+] (and "all commands", the "menu" button in Formatting's help
+section) opens the full grouped command menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in
+`dawn_render.c`), every command but the format group's. Help (`MODE_HELP`, Ctrl+O) reads the same
+table: its shortcut pages list every command by group with its key and its ribbon ("File ribbon", or
+"menu" for one on none), from `help_rows`/`help_paginate`, after a
 hand-written "move and select" group; a new command goes in that table and nowhere else. Help's pages
 are `HelpPage` (`dawn_types.h`: shortcuts, Markdown cheatsheet, activity, meaning index), each over as
 many screens as the screen's height needs (`app.help_screen`, `render_help_screens`); tab and <- turn

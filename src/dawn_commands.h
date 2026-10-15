@@ -130,14 +130,17 @@ int32_t tabs_status(int32_t words, const char* timer, const char* alert, int32_t
 //! Screen cells between two sections: a gap, the divider's column, a gap
 #define RIBBON_DIVIDER 3
 
-//! Columns of the model button's name (and its state), at the caption's scale
-#define RIBBON_MODEL_COLS 12
+//! Screen rows of the thin rule between a section and the one stacked under it
+#define RIBBON_RULE 1
+
+//! Columns of the model button's caption at the caption's scale: its widest state, "not loaded"
+#define RIBBON_MODEL_STATE_COLS 10
 
 //! One button of a tab's ribbon
 typedef struct {
     const Command* cmd;
-    int32_t section; //!< Which of the tab's sections it is in, 0 first; a divider separates two
-    int32_t width; //!< Screen cells it takes (ribbon_button_cols)
+    int32_t section; //!< Which of the tab's sections it is in, 0 first; a divider or a rule separates two
+    int32_t width; //!< Screen cells it takes: the same for every button of a ribbon, its widest's (ribbon_button_cols)
 } RibbonButton;
 
 //! The scale a ribbon button's caption is drawn at under a glyph drawn at scale: half, at least 1
@@ -150,18 +153,21 @@ int32_t ribbon_button_rows(int32_t scale);
 //! after it), else its glyph's code points
 int32_t ribbon_glyph_cols(const Command* cmd, bool icons);
 
-//! Screen cells a button takes at scale: its glyph at scale with a cell either side, or its
-//! caption at the caption's scale when that is wider; the model button holds RIBBON_MODEL_COLS
-//! caption columns for the model's name.
+//! Screen cells a button needs at scale: its glyph at scale with a cell either side, or its
+//! caption at the caption's scale when that is wider; the model button's caption is its state, up
+//! to RIBBON_MODEL_STATE_COLS columns.
 int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons);
 
-//! A tab's buttons in order, with their sections and widths at scale: File is the note group, then
-//! edit and find, then view; Formatting is the format group, then help; AI is the chat and the
-//! model, then undo, title, auto format and read aloud. Commands this build lacks are left out.
+//! A tab's buttons in order, with their sections, all as wide as the widest of them at scale (so
+//! they line up as a grid): File is details, pause and close, then undo, redo, cut, copy and paste,
+//! then find, contents, focus and light or dark; Formatting is the format group, then help; AI is
+//! the chat and the model, then undo, title, auto format and read aloud. Commands this build lacks
+//! are left out.
 //! @return how many were written to out (at most max)
 int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* out, int32_t max);
 
-//! The first tab whose ribbon holds cmd (left to right), or -1 when none does
+//! The first tab whose ribbon holds cmd (left to right), or -1 when none does (it is then in the
+//! full command menu, commands_in_menu)
 int32_t ribbon_tab_of(const Command* cmd);
 
 //! Screen cells the paging button ("more") takes at scale
@@ -173,23 +179,27 @@ typedef struct {
     int32_t row; //!< Screen rows from the ribbon's top
     int32_t col; //!< Screen cells from the ribbon's left edge
     int32_t width; //!< Screen cells it takes
+    bool rule_above; //!< A thin rule runs across the ribbon on the screen row above: the button opens
+                     //!< a row whose section is stacked under another (set on the row's first button)
 } RibbonSlot;
 
 //! What a laid-out ribbon takes
 typedef struct {
-    int32_t rows; //!< Rows of buttons a page shows
+    int32_t rows; //!< Most rows of buttons a page shows
     int32_t pages; //!< 1 when every button shows at once
-    int32_t height; //!< Screen rows the ribbon takes: rows x ribbon_button_rows(scale)
+    int32_t height; //!< Screen rows the ribbon takes: its tallest page's rows of buttons and rules
     int32_t more_col; //!< Where the paging button goes on the first row (pages > 1)
     int32_t more_width; //!< Its width in screen cells (0 when there is none)
 } RibbonFrame;
 
-//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart within a
-//! section and RIBBON_DIVIDER between two. A row breaks before a section or a cluster (the
-//! format group's inline styles, headings, lists and inserts) that no longer fits on it but fits
-//! on a row of its own, unless packing the buttons wherever they fit takes fewer rows. When the
-//! rows are taller than max_height screen rows, the ribbon pages: as many rows as fit, the room of
-//! each narrowed by a paging button at the right end of the first row.
+//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart. Sections
+//! wrap as blocks: a section sits beside the one before it (after RIBBON_DIVIDER cells, where a
+//! divider goes) only when that one took a single row and the whole of this one fits there;
+//! otherwise it starts at the left edge of a new row, under a RIBBON_RULE-row rule, its buttons
+//! spread evenly over the rows it needs (the buttons are one width, so they form a grid). When the rows
+//! and rules are taller than max_height screen rows, the ribbon pages: as many rows as fit on each
+//! page (no rule opens a page), the room of each narrowed by a paging button at the right end of
+//! the first row.
 //! @param slots receives each button's place (n entries)
 //! @return false (frame zeroed) when there are no buttons, one is wider than room, or not even one
 //!         row fits max_height
@@ -218,6 +228,10 @@ typedef struct {
     int32_t scroll; //!< First line shown
     int32_t page; //!< Lines the list showed when last drawn (page up and down step this many)
 } MenuState;
+
+//! Whether the full command menu lists cmd: every command but the format group's (the Formatting
+//! ribbon is their place) and the menu's own
+bool commands_in_menu(const Command* cmd);
 
 //! Fill m with the full menu and highlight the first command that enabled() allows: every command
 //! but the menu's own and the format group's (the Formatting ribbon is their place), a heading
@@ -253,7 +267,7 @@ typedef struct {
     HelpRowKind kind;
     const char* text; //!< The heading's words or what the item does ("undo"); "" on a blank
     const char* key; //!< The item's key as printed ("^Z"), "" when it has none
-    const char* tap; //!< How to do it by touch: its ribbon ("File ribbon") or a gesture ("swipe"); "" when none
+    const char* tap; //!< How to do it by touch: its ribbon ("File ribbon"), "menu" (the full command menu) or a gesture ("swipe"); "" when none
 } HelpRow;
 
 //! Most lines help_rows() writes
@@ -261,7 +275,7 @@ typedef struct {
 
 //! The shortcut pages' lines: a hand-written "move and select" group (the arrow and selection keys
 //! are not commands), then every command under its group's heading in table order with the ribbon
-//! it is on (ribbon_tab_of), a blank between groups.
+//! it is on (ribbon_tab_of), or "menu" when it is on none, a blank between groups.
 //! @return how many were written to out (at most max)
 int32_t help_rows(HelpRow* out, int32_t max);
 

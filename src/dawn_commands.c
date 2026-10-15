@@ -8,18 +8,21 @@
 //
 // On a phone (or any terminal under 80 columns) a tab row runs across the top, as a word
 // processor has it: "File  Formatting  AI" (AI only where the chat is compiled in). A tap on a tab
-// drops its ribbon under the row: File holds the note group, then edit and find, then view;
-// Formatting the format group (one button per FormatOp), then help; AI the chat and the model,
-// then undo, a title, auto format and read aloud. Sections are split by a divider, and a ribbon
-// wraps into rows, paging (a "more" button) when its rows would leave the note too little room.
+// drops its ribbon under the row: File holds the dozen most used (details, pause, close; undo,
+// redo and the clipboard; find, contents, focus, light or dark); Formatting the format group (one
+// button per FormatOp), then help; AI the chat and the model, then undo, a title, auto format and
+// read aloud. A ribbon's buttons are all as wide as its widest, so they line up as a grid. Two
+// sections sit side by side, split by a divider, only when both fit one row; otherwise each starts
+// a row of its own under a thin rule. A ribbon pages (a "more" button) when its rows would leave
+// the note too little room. Commands on no ribbon are in the full command menu.
 // Where the terminal sizes text (kitty's OSC 66) the tab row and the ribbons are drawn at a scale
 // chosen from the pane's pixels (commands_ui_scale), so they keep their size on screen when a
 // pinch changes the terminal's font; their places (tabs_layout, ribbon_layout) are worked out
 // here, in screen cells, so the drawing and the tap regions take the same numbers. The full
 // command menu (Ctrl+], or "all commands" in help) lists every command but the format group's
 // under its group's heading, the shortcut beside each, so every entry also teaches its key. The
-// help pages read the same table: every command by task, with its key and the ribbon it is on, so
-// a new command is listed in help by adding it here.
+// help pages read the same table: every command by task, with its key and the ribbon it is on (or
+// "menu"), so a new command is listed in help by adding it here.
 //
 // Running a command means pressing its key: the menu feeds the key to the writing handler, and a
 // ribbon button registers a tap region for it, so a command behaves exactly as its shortcut does.
@@ -67,19 +70,19 @@ static const Command COMMANDS[] = {
     { "bold", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BOLD, "", CMD_NEEDS_EDIT, "bold", "B", 0xF0264 },
     { "italic", CMD_GROUP_FORMAT, DAWN_KEY_FMT_ITALIC, "", CMD_NEEDS_EDIT, "italic", "I", 0xF0277 },
     { "strikethrough", CMD_GROUP_FORMAT, DAWN_KEY_FMT_STRIKE, "", CMD_NEEDS_EDIT, "strike", "S", 0xF0280 },
-    { "code", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE, "", CMD_NEEDS_EDIT, "code", "</>", 0xF0174 },
-    { "heading 1", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H1, "", CMD_NEEDS_EDIT, "heading 1", "H1", 0xF026B },
-    { "heading 2", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H2, "", CMD_NEEDS_EDIT, "heading 2", "H2", 0xF026C },
-    { "heading 3", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H3, "", CMD_NEEDS_EDIT, "heading 3", "H3", 0xF026D },
+    { "code", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE, "", CMD_NEEDS_EDIT, "code", "<>", 0xF0174 },
+    { "heading 1", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H1, "", CMD_NEEDS_EDIT, "head 1", "H1", 0xF026B },
+    { "heading 2", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H2, "", CMD_NEEDS_EDIT, "head 2", "H2", 0xF026C },
+    { "heading 3", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H3, "", CMD_NEEDS_EDIT, "head 3", "H3", 0xF026D },
     { "bullet list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BULLET, "", CMD_NEEDS_EDIT, "bullets", "•", 0xF0279 },
-    { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, "numbered", "123", 0xF027B },
-    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "☑", 0xF0135 },
+    { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, "numbers", "1.", 0xF027B },
+    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "☐", 0xF0135 },
     { "quote", CMD_GROUP_FORMAT, DAWN_KEY_FMT_QUOTE, "", CMD_NEEDS_EDIT, "quote", "❝", 0xF027E },
     { "link", CMD_GROUP_FORMAT, DAWN_KEY_FMT_LINK, "", CMD_NEEDS_EDIT, "link", "↗", 0xF0337 },
     { "image", CMD_GROUP_FORMAT, DAWN_KEY_FMT_IMAGE, "", CMD_NEEDS_EDIT, "image", "▣", 0xF02E9 },
     { "table", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TABLE, "", CMD_NEEDS_EDIT, "table", "▦", 0xF04EB },
     { "horizontal rule", CMD_GROUP_FORMAT, DAWN_KEY_FMT_RULE, "", CMD_NEEDS_EDIT, "rule", "—", 0xF0374 },
-    { "code block", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE_BLOCK, "", CMD_NEEDS_EDIT, "code block", "{}", 0xF0169 },
+    { "code block", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE_BLOCK, "", CMD_NEEDS_EDIT, "block", "{}", 0xF0169 },
 
     // view
     { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, "focus", "◎", 0xF0208 },
@@ -89,13 +92,13 @@ static const Command COMMANDS[] = {
 
     // find
     { "find", CMD_GROUP_FIND, 19, "^S", 0, "find", "⌕", 0xF0349 },
-    { "table of contents", CMD_GROUP_FIND, 12, "^L", 0, "contents", "☰", 0xF0836 },
+    { "table of contents", CMD_GROUP_FIND, 12, "^L", 0, "outline", "☰", 0xF0836 },
     { "jump to footnote", CMD_GROUP_FIND, 14, "^N", 0, "footnote", "¹", 0xF0283 },
 
 #ifdef USE_LIBAI
     // ai
     { "chat", CMD_GROUP_AI, 31, "^/", CMD_NEEDS_MODIFY | CMD_NEEDS_AI, "chat", "✦", 0xF0369 },
-    { "choose the model", CMD_GROUP_AI, DAWN_KEY_AI_MODEL, "", CMD_NEEDS_AI, "model", "AI", 0xF061A },
+    { "choose the model", CMD_GROUP_AI, DAWN_KEY_AI_MODEL, "", CMD_NEEDS_AI, "model", "◇", 0xF061A },
     { "give the note a title", CMD_GROUP_AI, DAWN_KEY_AI_TITLE, "", CMD_NEEDS_MODIFY | CMD_NEEDS_AI, "title", "T", 0xF05F4 },
     { "auto format", CMD_GROUP_AI, DAWN_KEY_AI_FORMAT, "", CMD_NEEDS_EDIT | CMD_NEEDS_AI, "format", "≣", 0xF0068 },
 #ifdef DAWN_HAS_SPEAK
@@ -105,9 +108,9 @@ static const Command COMMANDS[] = {
 
     // help
     { "keyboard help", CMD_GROUP_HELP, 15, "^O", 0, "keys", "?", 0xF030C },
-    { "markdown cheatsheet", CMD_GROUP_HELP, DAWN_KEY_CMD_CHEATSHEET, "", 0, "markdown", "M↓", 0xF0354 },
+    { "markdown cheatsheet", CMD_GROUP_HELP, DAWN_KEY_CMD_CHEATSHEET, "", 0, "syntax", "M↓", 0xF0354 },
     { "welcome tour", CMD_GROUP_HELP, DAWN_KEY_CMD_TOUR, "", 0, "tour", "★", 0xF02FD },
-    { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, "commands", "⋯", 0xF035C },
+    { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, "menu", "⋯", 0xF035C },
 };
 
 #define COMMAND_COUNT ((int32_t)(sizeof(COMMANDS) / sizeof(COMMANDS[0])))
@@ -292,24 +295,26 @@ int32_t tabs_status(int32_t words, const char* timer, const char* alert, int32_t
 
 // #region Ribbons
 
-//! One section of a ribbon: the commands of up to two groups in table order, or a list of keys
+//! One section of a ribbon: the commands of a group in table order, or a list of keys
 typedef struct {
     RibbonTab tab;
-    int32_t groups[2]; //!< CommandGroup values, -1 for none
-    int32_t keys[6]; //!< When groups are both -1: these commands in this order, 0 ending the list
+    int32_t group; //!< A CommandGroup, or -1 for the keys below
+    int32_t keys[6]; //!< When group is -1: these commands in this order, 0 ending the list
 } RibbonSection;
 
-//! Every ribbon's sections, tab by tab, left to right
+//! Every ribbon's sections, tab by tab, left to right. File keeps the dozen most used: the note
+//! (details, the timer's pause, close), the clipboard and undo, then finding and seeing; the rest of
+//! its groups (select all, the deletes, indent, plain text, ...) are in the full command menu.
 static const RibbonSection SECTIONS[] = {
-    { RIBBON_TAB_FILE, { CMD_GROUP_NOTE, -1 }, { 0 } },
-    { RIBBON_TAB_FILE, { CMD_GROUP_EDIT, CMD_GROUP_FIND }, { 0 } },
-    { RIBBON_TAB_FILE, { CMD_GROUP_VIEW, -1 }, { 0 } },
-    { RIBBON_TAB_FORMAT, { CMD_GROUP_FORMAT, -1 }, { 0 } },
-    { RIBBON_TAB_FORMAT, { CMD_GROUP_HELP, -1 }, { 0 } },
+    { RIBBON_TAB_FILE, -1, { 7, 16, '\x1b', 0 } },
+    { RIBBON_TAB_FILE, -1, { 26, 25, 24, 3, 22, 0 } },
+    { RIBBON_TAB_FILE, -1, { 19, 12, 6, DAWN_KEY_CMD_THEME, 0 } },
+    { RIBBON_TAB_FORMAT, CMD_GROUP_FORMAT, { 0 } },
+    { RIBBON_TAB_FORMAT, CMD_GROUP_HELP, { 0 } },
     // The AI's: talking to it and which model answers, then what it does to the note (undo is the
     // edit group's own, here too since an AI edit is one undo step).
-    { RIBBON_TAB_AI, { -1, -1 }, { 31, DAWN_KEY_AI_MODEL, 0 } },
-    { RIBBON_TAB_AI, { -1, -1 }, { 26, DAWN_KEY_AI_TITLE, DAWN_KEY_AI_FORMAT, 17, 0 } },
+    { RIBBON_TAB_AI, -1, { 31, DAWN_KEY_AI_MODEL, 0 } },
+    { RIBBON_TAB_AI, -1, { 26, DAWN_KEY_AI_TITLE, DAWN_KEY_AI_FORMAT, 17, 0 } },
 };
 
 #define SECTION_COUNT ((int32_t)(sizeof(SECTIONS) / sizeof(SECTIONS[0])))
@@ -344,8 +349,8 @@ int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons)
     int32_t cs = ribbon_caption_scale(scale);
     int32_t glyph = ribbon_glyph_cols(cmd, icons) * scale + 2;
     int32_t caption = text_cols(cmd->caption ? cmd->caption : cmd->label) * cs;
-    if (cmd->key == DAWN_KEY_AI_MODEL && caption < RIBBON_MODEL_COLS * cs)
-        caption = RIBBON_MODEL_COLS * cs;
+    if (cmd->key == DAWN_KEY_AI_MODEL && caption < RIBBON_MODEL_STATE_COLS * cs)
+        caption = RIBBON_MODEL_STATE_COLS * cs;
     return glyph > caption ? glyph : caption;
 }
 
@@ -358,9 +363,9 @@ int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* o
         if (sec->tab != tab)
             continue;
         int32_t before = n;
-        if (sec->groups[0] >= 0) {
+        if (sec->group >= 0) {
             for (int32_t i = 0; i < COMMAND_COUNT && n < max; i++) {
-                if ((int32_t)COMMANDS[i].group == sec->groups[0] || (int32_t)COMMANDS[i].group == sec->groups[1])
+                if ((int32_t)COMMANDS[i].group == sec->group)
                     out[n++] = (RibbonButton) { .cmd = &COMMANDS[i], .section = section + 1, .width = 0 };
             }
         } else {
@@ -373,8 +378,14 @@ int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* o
         if (n > before)
             section++;
     }
+    // One width for the whole ribbon, its widest button's, so the buttons line up as a grid.
+    int32_t widest = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int32_t w = ribbon_button_cols(out[i].cmd, scale, icons);
+        widest = w > widest ? w : widest;
+    }
     for (int32_t i = 0; i < n; i++)
-        out[i].width = ribbon_button_cols(out[i].cmd, scale, icons);
+        out[i].width = widest;
     return n;
 }
 
@@ -404,68 +415,60 @@ int32_t ribbon_more_cols(int32_t scale)
     return glyph > caption ? glyph : caption;
 }
 
-//! Whether button i opens a unit a row would rather not split: a section, or one of the format
-//! group's clusters (headings, lists with quote, inserts)
-static bool ribbon_unit_start(const RibbonButton* b, int32_t i)
-{
-    if (i == 0 || b[i].section != b[i - 1].section)
-        return true;
-    int32_t key = b[i].cmd ? b[i].cmd->key : 0;
-    return key == DAWN_KEY_FMT_H1 || key == DAWN_KEY_FMT_BULLET || key == DAWN_KEY_FMT_LINK;
-}
-
-//! The space before button i on a row that already holds i - 1: a divider between two sections
-static int32_t ribbon_space_before(const RibbonButton* b, int32_t i)
-{
-    return i > 0 && b[i].section != b[i - 1].section ? RIBBON_DIVIDER : RIBBON_GAP;
-}
-
-//! Lay the buttons out in rows of room cells, row r's slots getting row r. With units, a unit that
-//! no longer fits on a row but fits on one of its own starts the next row.
+//! Lay the buttons out in rows of room cells. A section goes on the row the section before it
+//! began on when that one took a single row and the whole of this one fits after a divider;
+//! otherwise it starts a row of its own (stacked[row] true from the second row on), so a section
+//! always wraps as a block, from the left edge. A section that wraps spreads its buttons evenly
+//! over the rows it needs (sixteen at five a row go four by four, not five, five, five and one).
+//! @param stacked receives, for each row, whether it opens a section under another (RIBBON_MAX)
 //! @return the rows used, 0 when a button is wider than room
-static int32_t ribbon_pack(const RibbonButton* b, int32_t n, int32_t room, bool units, RibbonSlot* slots)
+static int32_t ribbon_pack(const RibbonButton* b, int32_t n, int32_t room, RibbonSlot* slots, bool* stacked)
 {
-    int32_t row = 0;
-    int32_t end = 0; // where the row's last button ends; 0 on an empty row
+    int32_t row = -1;
+    int32_t end = 0; // where the row's last button ends
+    int32_t section_row = -1; // the row the section being laid out began on
+    int32_t per_row = 0; // buttons a row of this section holds
+    int32_t in_row = 0; // buttons on the row so far
     for (int32_t i = 0; i < n; i++) {
         int32_t w = b[i].width;
         if (w > room || w <= 0)
             return 0;
-        int32_t sp = ribbon_space_before(b, i);
-        if (end > 0 && units && ribbon_unit_start(b, i)) {
-            int32_t uw = w;
-            for (int32_t j = i + 1; j < n && !ribbon_unit_start(b, j); j++)
-                uw += RIBBON_GAP + b[j].width;
-            if (end + sp + uw > room && uw <= room) {
-                row++;
-                end = 0;
+        bool opens = i == 0 || b[i].section != b[i - 1].section;
+        int32_t at;
+        if (opens) {
+            int32_t count = 1;
+            int32_t sw = w;
+            for (int32_t j = i + 1; j < n && b[j].section == b[i].section; j++) {
+                sw += RIBBON_GAP + b[j].width;
+                count++;
             }
-        }
-        if (end > 0 && end + sp + w > room) {
+            if (i > 0 && section_row == row && end + RIBBON_DIVIDER + sw <= room) {
+                at = end + RIBBON_DIVIDER;
+                per_row = count;
+            } else {
+                row++;
+                stacked[row] = i > 0;
+                at = 0;
+                // The buttons of a ribbon are one width, so a row holds fit of them.
+                int32_t fit = (room + RIBBON_GAP) / (w + RIBBON_GAP);
+                int32_t rows = (count + fit - 1) / fit;
+                per_row = (count + rows - 1) / rows;
+            }
+            section_row = row;
+            in_row = 0; // the section's buttons on its row
+        } else if (in_row >= per_row || end + RIBBON_GAP + w > room) {
             row++;
-            end = 0;
+            stacked[row] = false;
+            at = 0;
+            in_row = 0;
+        } else {
+            at = end + RIBBON_GAP;
         }
-        int32_t at = end > 0 ? end + sp : 0;
-        slots[i] = (RibbonSlot) { .page = 0, .row = row, .col = at, .width = w };
+        slots[i] = (RibbonSlot) { .page = 0, .row = row, .col = at, .width = w, .rule_above = false };
         end = at + w;
+        in_row++;
     }
-    return n > 0 ? row + 1 : 0;
-}
-
-//! ribbon_pack keeping units together, or packed wherever they fit when that takes fewer rows
-static int32_t ribbon_pack_best(const RibbonButton* b, int32_t n, int32_t room, RibbonSlot* slots)
-{
-    RibbonSlot packed[RIBBON_MAX];
-    int32_t rows = ribbon_pack(b, n, room, true, slots);
-    if (rows <= 0)
-        return 0;
-    int32_t tight = ribbon_pack(b, n, room, false, packed);
-    if (tight > 0 && tight < rows) {
-        rows = tight;
-        for (int32_t i = 0; i < n; i++)
-            slots[i] = packed[i];
-    }
-    return rows;
+    return row + 1;
 }
 
 bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,
@@ -479,34 +482,56 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
     int32_t h = ribbon_button_rows(scale);
     if (n <= 0 || max_height < h)
         return false;
-    int32_t rows = ribbon_pack_best(buttons, n, room, slots);
+    bool stacked[RIBBON_MAX];
+    int32_t rows = ribbon_pack(buttons, n, room, slots, stacked);
     if (rows <= 0)
         return false;
-    int32_t pages = 1;
-    int32_t per_page = rows;
-    if (rows * h > max_height) {
-        // Too tall: as many rows as fit, paged, each row narrowed by the paging button.
-        per_page = max_height / h;
+    int32_t total = rows * h;
+    for (int32_t r = 1; r < rows; r++)
+        total += stacked[r] ? RIBBON_RULE : 0;
+    if (total > max_height) {
+        // Too tall: pages of as many rows as fit, each row narrowed by the paging button.
         int32_t more = ribbon_more_cols(scale);
         int32_t narrow = room - more - RIBBON_GAP;
         if (narrow <= 0)
             return false;
-        rows = ribbon_pack_best(buttons, n, narrow, slots);
+        rows = ribbon_pack(buttons, n, narrow, slots, stacked);
         if (rows <= 0)
             return false;
-        pages = (rows + per_page - 1) / per_page;
         frame->more_col = room - more;
         frame->more_width = more;
     }
+    // Each row's page and its top on that page; a rule goes above a stacked row unless the row
+    // opens its page.
+    int32_t row_page[RIBBON_MAX], row_top[RIBBON_MAX];
+    bool row_rule[RIBBON_MAX];
+    int32_t page = 0, used = 0, on_page = 0;
+    for (int32_t r = 0; r < rows; r++) {
+        int32_t rule = on_page > 0 && stacked[r] ? RIBBON_RULE : 0;
+        if (on_page > 0 && used + rule + h > max_height) {
+            page++;
+            used = 0;
+            on_page = 0;
+            rule = 0;
+        }
+        row_page[r] = page;
+        row_top[r] = used + rule;
+        row_rule[r] = rule > 0;
+        used += rule + h;
+        on_page++;
+        if (used > frame->height)
+            frame->height = used;
+        if (on_page > frame->rows)
+            frame->rows = on_page;
+    }
     for (int32_t i = 0; i < n; i++) {
         int32_t r = slots[i].row;
-        slots[i].page = r / per_page;
-        slots[i].row = (r % per_page) * h;
+        slots[i].page = row_page[r];
+        slots[i].row = row_top[r];
+        slots[i].rule_above = row_rule[r] && slots[i].col == 0;
     }
-    frame->rows = per_page;
-    frame->pages = pages;
-    frame->height = per_page * h;
-    if (pages == 1) {
+    frame->pages = page + 1;
+    if (frame->pages == 1) {
         frame->more_col = 0;
         frame->more_width = 0;
     }
@@ -517,6 +542,13 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
 
 // #region Command menu
 
+bool commands_in_menu(const Command* cmd)
+{
+    // The format group's place is the Formatting ribbon; the menu's own key is open already (it
+    // shows in the menu's title).
+    return cmd && cmd->group != CMD_GROUP_FORMAT && cmd->key != DAWN_KEY_CMD_MENU;
+}
+
 void menu_build(MenuState* m, bool (*enabled)(const Command*))
 {
     m->count = 0;
@@ -526,10 +558,8 @@ void menu_build(MenuState* m, bool (*enabled)(const Command*))
     int32_t last_group = -1;
     for (int32_t i = 0; i < COMMAND_COUNT; i++) {
         const Command* c = &COMMANDS[i];
-        if (c->group == CMD_GROUP_FORMAT)
-            continue; // the Formatting ribbon is their place
-        if (c->key == DAWN_KEY_CMD_MENU)
-            continue; // the menu is open already; its key shows in its title
+        if (!commands_in_menu(c))
+            continue;
         if ((int32_t)c->group != last_group) {
             if (m->count >= MENU_LINES_MAX)
                 break;
@@ -636,7 +666,8 @@ int32_t help_rows(HelpRow* out, int32_t max)
         if (n >= max)
             break;
         int32_t tab = ribbon_tab_of(c);
-        out[n++] = (HelpRow) { .kind = HELP_ROW_ITEM, .text = c->label, .key = c->shortcut, .tap = tab >= 0 ? tabs_tap((RibbonTab)tab) : "" };
+        const char* tap = tab >= 0 ? tabs_tap((RibbonTab)tab) : commands_in_menu(c) ? "menu" : "";
+        out[n++] = (HelpRow) { .kind = HELP_ROW_ITEM, .text = c->label, .key = c->shortcut, .tap = tap };
     }
     return n;
 }

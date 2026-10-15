@@ -1,5 +1,5 @@
 // test_commands.c - host tests for the command table (dawn_commands.c): every entry complete,
-// keys unique, groups in display order, every command on a ribbon, the UI scale from the pane's
+// keys unique, groups in display order, every command on a ribbon or in the menu, the UI scale from the pane's
 // pixels, the tab row's layout and status text, the ribbons' buttons and layout (at every scale
 // kitty text sizing draws them at and every width from a narrow phone to a wide pane, paging when
 // short), the full menu's lines, stepping and scrolling, and the help pages' lines and page
@@ -61,11 +61,13 @@ static void test_entries(void)
         // Labels and captions are lower case, as dawn writes its hints.
         for (const char* p = c->label; *p; p++)
             CHECK(!(*p >= 'A' && *p <= 'Z'));
-        CHECK(c->caption && c->caption[0] && cols(c->caption) <= 10);
+        // A ribbon's buttons are all as wide as its widest caption: seven columns at most on a
+        // ribbon, so six fit a row on the phone; a command on none has a little more.
+        CHECK(c->caption && c->caption[0] && cols(c->caption) <= (ribbon_tab_of(c) >= 0 ? 7 : 9));
         for (const char* p = c->caption; *p; p++)
             CHECK(!(*p >= 'A' && *p <= 'Z'));
         // Every button has a face of its own, short, and never bare Markdown syntax.
-        CHECK(c->glyph && c->glyph[0] && cols(c->glyph) <= 3);
+        CHECK(c->glyph && c->glyph[0] && cols(c->glyph) <= 2);
         CHECK(!strchr(c->glyph, '`') && !strchr(c->glyph, '[') && !strchr(c->glyph, '#'));
         CHECK(strcmp(c->glyph, ">") != 0 && strcmp(c->glyph, "-") != 0 && strcmp(c->glyph, "*") != 0);
         CHECK(!strstr(c->glyph, "--") && !strstr(c->glyph, "**"));
@@ -73,8 +75,9 @@ static void test_entries(void)
         CHECK(commands_find(c->key) == c);
         CHECK(tabs_from_key(c->key) < 0); // the tabs are not commands
         CHECK(c->key != DAWN_KEY_RIBBON_MORE);
-        // Every command is on some ribbon: nothing is reachable from the keyboard alone.
-        CHECK(ribbon_tab_of(c) >= 0);
+        // Every command is on some ribbon or in the full menu: nothing is reachable from the
+        // keyboard alone.
+        CHECK(ribbon_tab_of(c) >= 0 || commands_in_menu(c));
     }
     CHECK(commands_find('q') == NULL);
     CHECK(commands_find(26) && strcmp(commands_find(26)->label, "undo") == 0);
@@ -194,7 +197,8 @@ static void test_tabs_status(void)
 }
 
 //! Whether every button of ribbon tab is placed inside room at scale, in order, apart, inside the
-//! frame; or, when the layout said no, that it truly could not.
+//! frame, all one width, each section wrapping as a block; or, when the layout said no, that it
+//! truly could not.
 static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons, int32_t max_height)
 {
     RibbonButton b[RIBBON_MAX];
@@ -205,15 +209,18 @@ static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons,
     int32_t h = ribbon_button_rows(scale);
     bool ok = ribbon_layout(b, n, room, scale, max_height, s, &f);
     int32_t widest = 0;
-    for (int32_t i = 0; i < n; i++)
+    for (int32_t i = 0; i < n; i++) {
+        CHECK(b[i].width == b[0].width); // one width: the buttons form a grid
+        CHECK(b[i].width >= ribbon_button_cols(b[i].cmd, scale, icons));
         widest = b[i].width > widest ? b[i].width : widest;
+    }
     if (!ok) {
         CHECK(f.height == 0 && f.pages == 0);
         CHECK(max_height < h || widest > room - ribbon_more_cols(scale) - RIBBON_GAP);
         return;
     }
     CHECK(f.pages >= 1 && f.rows >= 1);
-    CHECK(f.height == f.rows * h && f.height <= max_height);
+    CHECK(f.height >= f.rows * h && f.height <= max_height);
     int32_t right = room;
     if (f.pages > 1) {
         CHECK(f.more_width == ribbon_more_cols(scale) && f.more_col == room - f.more_width);
@@ -221,26 +228,49 @@ static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons,
     } else {
         CHECK(f.more_width == 0);
     }
+    int32_t section_start = 0; // the first button of the section i is in
     for (int32_t i = 0; i < n; i++) {
         CHECK(s[i].width == b[i].width);
         CHECK(s[i].col >= 0 && s[i].col + s[i].width <= right);
         CHECK(s[i].page >= 0 && s[i].page < f.pages);
-        CHECK(s[i].row >= 0 && s[i].row % h == 0 && s[i].row + h <= f.height);
-        if (i == 0)
+        CHECK(s[i].row >= 0 && s[i].row + h <= f.height);
+        CHECK(!s[i].rule_above || (s[i].col == 0 && s[i].row > 0));
+        if (i == 0) {
+            CHECK(s[i].row == 0 && s[i].col == 0 && !s[i].rule_above);
             continue;
-        bool same = s[i].page == s[i - 1].page && s[i].row == s[i - 1].row;
-        int32_t space = b[i].section != b[i - 1].section ? RIBBON_DIVIDER : RIBBON_GAP;
-        if (same)
-            CHECK(s[i].col == s[i - 1].col + s[i - 1].width + space);
-        else
-            CHECK(s[i].col == 0 && (s[i].page > s[i - 1].page || (s[i].page == s[i - 1].page && s[i].row > s[i - 1].row)));
-        CHECK(b[i].section == b[i - 1].section || b[i].section == b[i - 1].section + 1);
+        }
+        bool opens = b[i].section != b[i - 1].section;
+        CHECK(opens ? b[i].section == b[i - 1].section + 1 : b[i].section == b[i - 1].section);
+        bool same_page = s[i].page == s[i - 1].page;
+        bool same = same_page && s[i].row == s[i - 1].row;
+        if (same) {
+            CHECK(s[i].col == s[i - 1].col + s[i - 1].width + (opens ? RIBBON_DIVIDER : RIBBON_GAP));
+            CHECK(!s[i].rule_above);
+            // A section beside another: the one before it took a single row.
+            if (opens)
+                CHECK(s[section_start].page == s[i - 1].page && s[section_start].row == s[i - 1].row);
+        } else {
+            CHECK(s[i].col == 0);
+            CHECK(s[i].page > s[i - 1].page || (same_page && s[i].row > s[i - 1].row));
+            if (!same_page) {
+                CHECK(s[i].page == s[i - 1].page + 1 && s[i].row == 0 && !s[i].rule_above);
+            } else if (opens) {
+                // A section on a row of its own, under a rule.
+                CHECK(s[i].rule_above && s[i].row == s[i - 1].row + h + RIBBON_RULE);
+            } else {
+                // A section wrapping: its next row right under, all of it at the left edge.
+                CHECK(!s[i].rule_above && s[i].row == s[i - 1].row + h);
+                CHECK(s[section_start].col == 0);
+            }
+        }
+        if (opens)
+            section_start = i;
     }
-    // When one page holds everything, its rows follow one another.
-    if (f.pages == 1) {
-        for (int32_t i = 1; i < n; i++) {
-            if (s[i].row != s[i - 1].row)
-                CHECK(s[i].row == s[i - 1].row + h); // rows follow one another, none left empty
+    // A page that pages on was full: its next row would not have fit under it.
+    for (int32_t i = 1; i < n; i++) {
+        if (s[i].page != s[i - 1].page) {
+            int32_t need = s[i - 1].row + h + h + (b[i].section != b[i - 1].section ? RIBBON_RULE : 0);
+            CHECK(need > max_height);
         }
     }
 }
@@ -265,56 +295,82 @@ static void test_ribbons(void)
             CHECK(b[i].cmd->key == DAWN_KEY_FMT_BOLD + i && b[i].cmd->group == CMD_GROUP_FORMAT);
         else
             CHECK(b[i].cmd->group == CMD_GROUP_HELP);
+        // Every button as wide as the widest: "bullets" and "numbers" under their icons.
+        CHECK(b[i].width == 7);
     }
     CHECK(b[styles].cmd->key == 15 && b[n - 1].cmd->key == DAWN_KEY_CMD_MENU);
-    // Widths: an icon at scale 2 is 4 cells and a cell either side; a longer caption widens it.
-    CHECK(b[0].width == 6); // bold: icon 6, caption 4
-    CHECK(b[4].width == 9); // heading 1: its caption
+    // What each button needs: an icon at scale 2 is 4 cells and a cell either side; a longer
+    // caption widens it.
+    CHECK(ribbon_button_cols(b[0].cmd, 2, true) == 6); // bold: icon 6, caption 4
+    CHECK(ribbon_button_cols(b[8].cmd, 2, true) == 7); // numbered list: its caption
     CHECK(ribbon_glyph_cols(b[0].cmd, true) == 2 && ribbon_glyph_cols(b[0].cmd, false) == 1);
     CHECK(ribbon_button_cols(b[0].cmd, 1, false) == 4); // "bold" under "B" and its two cells
-    CHECK(ribbon_button_cols(b[3].cmd, 2, false) == 8); // "</>" at 2, and a cell either side
-    CHECK(ribbon_button_cols(b[0].cmd, 4, true) == 10 && ribbon_button_cols(b[4].cmd, 4, true) == 18);
+    CHECK(ribbon_button_cols(b[3].cmd, 2, false) == 6); // "<>" at 2, and a cell either side
+    CHECK(ribbon_button_cols(b[0].cmd, 4, true) == 10 && ribbon_button_cols(b[8].cmd, 4, true) == 14);
 
-    // File: the note group, edit and find, then view; AI: the chat and the model, then the actions.
+    // File: the dozen most used. Details, pause, close; undo, redo, cut, copy, paste; find,
+    // contents, focus, light or dark.
     n = ribbon_buttons(RIBBON_TAB_FILE, 1, false, b, RIBBON_MAX);
-    CHECK(n == 5 + 15 + 4);
-    CHECK(b[0].cmd->key == 7 && b[0].section == 0 && b[4].cmd->key == '\x1b');
-    CHECK(b[5].cmd->key == 26 && b[5].section == 1 && b[19].cmd->key == 14 && b[19].section == 1);
-    CHECK(b[20].cmd->key == 6 && b[20].section == 2 && b[23].cmd->key == DAWN_KEY_CMD_THEME);
+    CHECK(n == 3 + 5 + 4);
+    CHECK(b[0].cmd->key == 7 && b[0].section == 0 && b[1].cmd->key == 16 && b[2].cmd->key == '\x1b');
+    CHECK(b[3].cmd->key == 26 && b[3].section == 1 && b[7].cmd->key == 22 && b[7].section == 1);
+    CHECK(b[8].cmd->key == 19 && b[8].section == 2 && b[11].cmd->key == DAWN_KEY_CMD_THEME);
+    // AI: the chat and the model, then the actions; the model's caption is its state.
     n = ribbon_buttons(RIBBON_TAB_AI, 2, true, b, RIBBON_MAX);
     CHECK(n == 6);
     CHECK(b[0].cmd->key == 31 && b[1].cmd->key == DAWN_KEY_AI_MODEL && b[1].section == 0);
     CHECK(b[2].cmd->key == 26 && b[2].section == 1 && b[3].cmd->key == DAWN_KEY_AI_TITLE);
     CHECK(b[4].cmd->key == DAWN_KEY_AI_FORMAT && b[5].cmd->key == 17);
-    CHECK(b[1].width == RIBBON_MODEL_COLS); // the model's name at the caption's scale
+    CHECK(b[0].width == RIBBON_MODEL_STATE_COLS && b[1].width == RIBBON_MODEL_STATE_COLS); // "not loaded"
     CHECK(ribbon_tab_of(commands_find(26)) == RIBBON_TAB_FILE); // undo's first ribbon is File's
     CHECK(ribbon_tab_of(commands_find(DAWN_KEY_FMT_BOLD)) == RIBBON_TAB_FORMAT);
     CHECK(ribbon_tab_of(commands_find(15)) == RIBBON_TAB_FORMAT);
     CHECK(ribbon_tab_of(commands_find(17)) == RIBBON_TAB_AI);
     CHECK(ribbon_tab_of(NULL) == -1);
+    // Off the File ribbon, in the full menu: select all, the deletes, indent, plain text.
+    CHECK(ribbon_tab_of(commands_find(1)) == -1 && commands_in_menu(commands_find(1)));
+    CHECK(ribbon_tab_of(commands_find(21)) == -1 && ribbon_tab_of(commands_find(18)) == -1);
+    CHECK(!commands_in_menu(commands_find(DAWN_KEY_FMT_BOLD)) && !commands_in_menu(commands_find(DAWN_KEY_CMD_MENU)));
 
-    // The phone at scale 2 (51 cells): packed, the Formatting ribbon takes four rows of three
-    // screen rows each, all on one page when there is room.
+    // The phone at scale 2 (51 cells): six 7-cell buttons a row, so the format group's sixteen
+    // take three rows, and help (which cannot sit beside a section of three rows) starts a fourth
+    // under a rule.
     RibbonSlot s[RIBBON_MAX];
     RibbonFrame f;
     n = ribbon_buttons(RIBBON_TAB_FORMAT, 2, true, b, RIBBON_MAX);
     CHECK(ribbon_layout(b, n, 51, 2, 40, s, &f));
-    CHECK(f.rows == 4 && f.height == 12 && f.pages == 1 && f.more_width == 0);
-    CHECK(s[0].col == 0 && s[1].col == 7 && s[3].col == 21 && s[4].col == 28 && s[4].row == 0);
-    CHECK(s[styles].col == s[styles - 1].col + s[styles - 1].width + RIBBON_DIVIDER);
+    CHECK(f.rows == 4 && f.height == 4 * 3 + RIBBON_RULE && f.pages == 1 && f.more_width == 0);
+    CHECK(s[0].col == 0 && s[1].col == 8 && s[5].col == 40 && s[5].row == 0);
+    CHECK(s[6].col == 0 && s[6].row == 3 && !s[6].rule_above && s[styles - 1].row == 6);
+    CHECK(s[styles].col == 0 && s[styles].row == 9 + RIBBON_RULE && s[styles].rule_above);
+    CHECK(s[n - 1].row == s[styles].row && s[n - 1].col == 24);
     // With the keyboard up, room for two rows: the ribbon pages, a "more" button at the right.
     CHECK(ribbon_layout(b, n, 51, 2, 7, s, &f));
-    CHECK(f.rows == 2 && f.height == 6 && f.pages >= 2 && f.more_width == 4 && f.more_col == 47);
+    CHECK(f.rows == 2 && f.height == 6 && f.pages == 3 && f.more_width == 4 && f.more_col == 47);
+    CHECK(s[styles].page == 2 && s[styles].row == 0 && !s[styles].rule_above);
     // Not even one row: no ribbon.
     CHECK(!ribbon_layout(b, n, 51, 2, 2, s, &f) && f.height == 0);
-    // A wide pane holds the whole ribbon on one row.
+    // A wide pane holds the whole ribbon on one row, help beside the styles after a divider.
     n = ribbon_buttons(RIBBON_TAB_FORMAT, 1, false, b, RIBBON_MAX);
     CHECK(ribbon_layout(b, n, 200, 1, 40, s, &f) && f.rows == 1 && f.height == 2);
+    CHECK(s[styles].row == 0 && s[styles].col == s[styles - 1].col + s[styles - 1].width + RIBBON_DIVIDER);
+    // A wrapping section spreads evenly: in 45 cells five 7-cell buttons fit a row, so the sixteen
+    // styles go four rows of four rather than leave one alone on a fourth.
+    CHECK(ribbon_layout(b, n, 45, 1, 40, s, &f) && f.rows == 5 && f.pages == 1);
+    CHECK(s[3].row == 0 && s[3].col == 24 && s[4].row == 2 && s[4].col == 0);
+    CHECK(s[styles - 1].row == 6 && s[styles - 1].col == 24 && s[styles].row == 8 + RIBBON_RULE);
+
+    // File on the phone: three sections, none fitting beside the one before, so three rows and two
+    // rules.
+    n = ribbon_buttons(RIBBON_TAB_FILE, 2, true, b, RIBBON_MAX);
+    CHECK(ribbon_layout(b, n, 51, 2, 40, s, &f));
+    CHECK(f.rows == 3 && f.height == 3 * 3 + 2 * RIBBON_RULE && f.pages == 1);
+    CHECK(s[3].rule_above && s[3].row == 4 && s[8].rule_above && s[8].row == 8);
 
     // Every tab at every scale, width and height, with and without the Nerd Font.
     RibbonTab tabs[RIBBON_TAB_COUNT];
     int32_t nt = tabs_items(tabs, RIBBON_TAB_COUNT);
-    static const int32_t HEIGHTS[] = { 1, 3, 6, 9, 14, 40 };
+    static const int32_t HEIGHTS[] = { 1, 3, 6, 7, 9, 14, 40 };
     for (int32_t t = 0; t < nt; t++)
         for (int32_t scale = 1; scale <= UI_SCALE_MAX; scale++)
             for (int32_t room = 30; room <= 120; room++)
@@ -410,7 +466,8 @@ static void test_help_rows(void)
     CHECK(rows[0].kind == HELP_ROW_HEADING && strcmp(rows[0].text, "move and select") == 0);
     CHECK(rows[n - 1].kind == HELP_ROW_ITEM);
 
-    // Every command is listed once, under its group's heading, with the ribbon it is on.
+    // Every command is listed once, under its group's heading, with the ribbon it is on, or the
+    // menu when it is on none.
     int32_t count = 0;
     const Command* all = commands_all(&count);
     for (int32_t c = 0; c < count; c++) {
@@ -420,7 +477,8 @@ static void test_help_rows(void)
                 continue;
             found++;
             CHECK(strcmp(rows[i].key, all[c].shortcut) == 0);
-            CHECK(strcmp(rows[i].tap, tabs_tap((RibbonTab)ribbon_tab_of(&all[c]))) == 0);
+            int32_t tab = ribbon_tab_of(&all[c]);
+            CHECK(strcmp(rows[i].tap, tab >= 0 ? tabs_tap((RibbonTab)tab) : "menu") == 0);
             int32_t h = i;
             while (h >= 0 && rows[h].kind != HELP_ROW_HEADING)
                 h--;
@@ -435,6 +493,8 @@ static void test_help_rows(void)
             CHECK(strcmp(rows[i].tap, "File ribbon") == 0);
         if (strcmp(rows[i].text, "bold") == 0 || strcmp(rows[i].text, "keyboard help") == 0)
             CHECK(strcmp(rows[i].tap, "Formatting ribbon") == 0);
+        if (strcmp(rows[i].text, "select all") == 0 || strcmp(rows[i].text, "plain text") == 0)
+            CHECK(strcmp(rows[i].tap, "menu") == 0);
         if (strcmp(rows[i].text, "auto format") == 0)
             CHECK(strcmp(rows[i].tap, "AI ribbon") == 0);
     }
