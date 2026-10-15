@@ -148,14 +148,18 @@ width (its widest; captions at most 7 columns, every glyph budgeted 2) so they f
 `ribbon_layout` (`ribbon_pack`) lets a section go on after the one before it on the same row, behind
 a divider, wrapping what does not fit to the left edge, or start a row of its own under a thin rule,
 its buttons spread evenly; it takes the way with the fewest rows, then the fewest split sections
-(File at six a row: 3 | 3, then 2 | 4); a ribbon pages
+(File at six a row: 3 | 3, then 2 | 4); above scale 1 two rows of buttons are a blank row apart
+(`ribbon_row_gap`, counted in the layout; a stacked section's rule is drawn in it); a ribbon pages
 with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer than
 `RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
 Icons are Nerd Font code points, used only when `app.nerd_font` (on in the launcher when a file under
 `~/.termux/fonts/` names "nerd", `nerd_font_installed`; settings.json's `"nerd_font"` wins); otherwise
 each button has a text glyph. Above scale 1 an icon goes out as one OSC 66 block of the icon and a
 space, `s=<scale>:w=2` (`print_scaled_block`, `FACE_BLOCK`), 2×scale columns: the launcher draws a
-Nerd icon full size only so, and sized alone it comes out half height. Ctrl+] (and "all commands", the "menu" button in Formatting's help
+Nerd icon full size only so, and sized alone it comes out half height. It is drawn at 3/4 of the
+block (`:n=3:d=4:v=2`, `RIBBON_ICON_NUM`/`DEN`) so it keeps a margin in its box, with `h=2`
+(centred in the block), or `h=0` with the block shifted a cell where the box is an odd count of
+cells wider than the block, so the 3-cell icon still centres. Ctrl+] (and "all commands", the "menu" button in Formatting's help
 section) opens the full grouped command menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in
 `dawn_render.c`), every command but the format group's. Help (`MODE_HELP`, Ctrl+O) reads the same
 table: its shortcut pages list every command by group with its key and its ribbon ("File ribbon", or

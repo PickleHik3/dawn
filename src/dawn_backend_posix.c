@@ -992,7 +992,8 @@ static void posix_repeat_char(char c, int32_t n)
     }
 }
 
-static void posix_write_scaled(const char* str, size_t len, int32_t scale, int32_t width)
+static void posix_write_scaled(const char* str, size_t len, int32_t scale, int32_t width, int32_t num, int32_t denom,
+    int32_t halign)
 {
     if (scale <= 1 || !(posix_state.capabilities & DAWN_CAP_TEXT_SIZING)) {
         buf_append(str, len);
@@ -1005,10 +1006,15 @@ static void posix_write_scaled(const char* str, size_t len, int32_t scale, int32
         scale = 7;
     if (width > 7)
         width = 7;
+    // The metadata: s, then w for a block, then n, d, v and h for a fraction of it.
+    char meta[48];
+    int32_t m = snprintf(meta, sizeof(meta), "s=%d", scale);
     if (width > 0)
-        buf_printf(TEXT_SIZE_OSC "s=%d:w=%d;%.*s" TEXT_SIZE_ST, scale, width, (int32_t)len, str);
-    else
-        buf_printf(TEXT_SIZE_OSC "s=%d;%.*s" TEXT_SIZE_ST, scale, (int32_t)len, str);
+        m += snprintf(meta + m, sizeof(meta) - (size_t)m, ":w=%d", width);
+    if (num > 0 && denom > num && denom <= 15)
+        snprintf(meta + m, sizeof(meta) - (size_t)m, ":n=%d:d=%d:v=2:h=%d", num, denom,
+            halign < 0 ? 0 : halign > 2 ? 2 : halign);
+    buf_printf(TEXT_SIZE_OSC "%s;%.*s" TEXT_SIZE_ST, meta, (int32_t)len, str);
     // Track column position (scaled text takes more columns)
     if (posix_state.mode == DAWN_MODE_PRINT) {
         posix_state.print_col += (width > 0 ? width : utf8_display_width(str, len)) * scale;

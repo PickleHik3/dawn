@@ -88,7 +88,7 @@ static const Command COMMANDS[] = {
     { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, "focus", "◎", 0xF0208 },
     { "plain text", CMD_GROUP_VIEW, 18, "^R", 0, "plain", "¶", 0xF027D },
     { "hide marks at cursor", CMD_GROUP_VIEW, 2, "^B", 0, "marks", "◌", 0xF0209 },
-    { "light or dark", CMD_GROUP_VIEW, DAWN_KEY_CMD_THEME, "", 0, "theme", "◐", 0xF07F5 },
+    { "light or dark", CMD_GROUP_VIEW, DAWN_KEY_CMD_THEME, "", 0, "theme", "◐", 0xF050E },
 
     // find
     { "find", CMD_GROUP_FIND, 19, "^S", 0, "find", "⌕", 0xF0349 },
@@ -331,6 +331,19 @@ int32_t ribbon_button_rows(int32_t scale)
     return scale + ribbon_caption_scale(scale);
 }
 
+int32_t ribbon_row_gap(int32_t scale)
+{
+    return scale > 1 ? 1 : 0;
+}
+
+//! Screen rows between a page's row of buttons and the one before it: the gap, or the rule's rows
+//! when the row opens a stacked section and they are more
+static int32_t ribbon_row_sep(int32_t scale, bool stacked)
+{
+    int32_t gap = ribbon_row_gap(scale);
+    return stacked && RIBBON_RULE > gap ? RIBBON_RULE : gap;
+}
+
 int32_t ribbon_glyph_cols(const Command* cmd, bool icons)
 {
     if (!cmd)
@@ -544,7 +557,7 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
         return false;
     int32_t total = rows * h;
     for (int32_t r = 1; r < rows; r++)
-        total += stacked[r] ? RIBBON_RULE : 0;
+        total += ribbon_row_sep(scale, stacked[r]);
     if (total > max_height) {
         // Too tall: pages of as many rows as fit, each row narrowed by the paging button.
         int32_t more = ribbon_more_cols(scale);
@@ -557,23 +570,23 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
         frame->more_col = room - more;
         frame->more_width = more;
     }
-    // Each row's page and its top on that page; a rule goes above a stacked row unless the row
-    // opens its page.
+    // Each row's page and its top on that page, under the gap from the row before it (a rule in it
+    // above a stacked row), with neither when the row opens its page.
     int32_t row_page[RIBBON_MAX], row_top[RIBBON_MAX];
     bool row_rule[RIBBON_MAX];
     int32_t page = 0, used = 0, on_page = 0;
     for (int32_t r = 0; r < rows; r++) {
-        int32_t rule = on_page > 0 && stacked[r] ? RIBBON_RULE : 0;
-        if (on_page > 0 && used + rule + h > max_height) {
+        int32_t sep = on_page > 0 ? ribbon_row_sep(scale, stacked[r]) : 0;
+        if (on_page > 0 && used + sep + h > max_height) {
             page++;
             used = 0;
             on_page = 0;
-            rule = 0;
+            sep = 0;
         }
         row_page[r] = page;
-        row_top[r] = used + rule;
-        row_rule[r] = rule > 0;
-        used += rule + h;
+        row_top[r] = used + sep;
+        row_rule[r] = on_page > 0 && stacked[r];
+        used += sep + h;
         on_page++;
         if (used > frame->height)
             frame->height = used;
