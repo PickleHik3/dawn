@@ -1706,6 +1706,9 @@ void render_toc(void)
 #define MENU_TITLE "commands"
 #define MENU_TITLE_KEY "  ^]"
 
+//! The fewest lines a menu shows before it scrolls, however little room is left
+#define MENU_MIN_LINES 3
+
 //! Draw the open menu on the popup's surface at scale s, with no border: lines of s screen rows
 //! from top, cols scaled columns of text with a cell of padding either side from left, at most
 //! rows screen rows tall. The title first when title is set; headings in the accent; the selected
@@ -1718,6 +1721,8 @@ static void render_menu_surface(MenuState* m, int32_t s, int32_t top, int32_t le
     bool scrolls = list < m->count;
     if (scrolls)
         list -= 2;
+    if (list < MENU_MIN_LINES)
+        list = m->count < MENU_MIN_LINES ? m->count : MENU_MIN_LINES;
     if (list < 1)
         list = 1;
     menu_scroll_to(m, list);
@@ -1809,13 +1814,16 @@ void render_menu(MenuState* m, const MenuPlace* p)
     int32_t need = menu_list_cols(m);
 
     // A dropdown hangs from its menu's name: its left edge a cell before the name (the open
-    // menu's tab), moved left when it would run off the screen. It takes the largest scale up to
-    // the chrome's at which all its lines fit below the bar and its width fits the screen.
+    // menu's tab), moved left when it would run off the screen. It always keeps the chrome's
+    // scale (so it stays the size of the bar on screen at any font), shrunk only when its width
+    // cannot fit the screen; its lines scroll in the rows between the bar and the status line.
+    // The box starts on the row right under the bar and is inert from there, so no note text
+    // shows between them.
     if (m->bar_menu >= 0 && p) {
         int32_t top = p->top > 0 ? p->top : 1;
-        int32_t rows = app.rows - top + 1;
+        int32_t rows = app.rows - top + 1 - scale; // less the status line's rows
         int32_t s = scale;
-        while (s > 1 && (m->count * s > rows || need * s + 2 > app.cols))
+        while (s > 1 && need * s + 2 > app.cols)
             s--;
         int32_t cols = need * s + 2 <= app.cols ? need : (app.cols - 2) / s;
         int32_t width = cols * s + 2;
