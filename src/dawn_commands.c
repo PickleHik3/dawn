@@ -314,6 +314,26 @@ static bool ribbon_cluster_start(int32_t key)
     return key == DAWN_KEY_FMT_H1 || key == DAWN_KEY_FMT_BULLET || key == DAWN_KEY_FMT_LINK;
 }
 
+//! Packs the buttons into rows of room cells with no regard for clusters: a row breaks wherever the
+//! next button does not fit. Returns the rows used, 0 when a button is wider than room.
+static int32_t ribbon_pack_gap(const Command* const* items, int32_t n, int32_t room, int32_t gap, RibbonSlot* slots)
+{
+    int32_t row = 0;
+    int32_t col = 0;
+    for (int32_t i = 0; i < n; i++) {
+        int32_t w = ribbon_width(items[i]);
+        if (w > room)
+            return 0;
+        if (col > 0 && col + w > room) {
+            row++;
+            col = 0;
+        }
+        slots[i] = (RibbonSlot) { .row = row, .col = col, .width = w };
+        col += w + gap;
+    }
+    return n > 0 ? row + 1 : 0;
+}
+
 //! commands_ribbon_layout with the gap between buttons as a parameter
 static int32_t ribbon_layout_gap(const Command* const* items, int32_t n, int32_t room, int32_t gap, RibbonSlot* slots)
 {
@@ -367,6 +387,16 @@ int32_t commands_ribbon_place(const Command* const* items, int32_t n, int32_t ro
         rows = tight_rows;
         for (int32_t i = 0; i < n; i++)
             slots[i] = tight[i];
+    }
+    // Still more than two rows: break anywhere between buttons, so they pack into two when the
+    // width allows (a third row only when even that does not fit).
+    if (rows > 2) {
+        int32_t packed_rows = ribbon_pack_gap(items, n, cells, 1, tight);
+        if (packed_rows > 0 && packed_rows < rows) {
+            rows = packed_rows;
+            for (int32_t i = 0; i < n; i++)
+                slots[i] = tight[i];
+        }
     }
     for (int32_t i = 0; i < n; i++) {
         slots[i].row *= scale;

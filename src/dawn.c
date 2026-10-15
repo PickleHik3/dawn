@@ -74,7 +74,8 @@ typedef struct {
     int32_t ribbon_top; //!< First screen row of the formatting ribbon (when ribbon_rows > 0)
     int32_t ribbon_rows; //!< Screen rows the ribbon takes from the note; 0 when it does not show
     int32_t ui_scale; //!< Scale of the menu bar, the ribbon, the status line and the dropdowns: from the pane's pixels where the terminal sizes text and the menu bar shows (commands_ui_scale), else 1
-    int32_t status_top; //!< First screen row of the status line, which takes the bottom ui_scale rows
+    int32_t status_scale; //!< Scale of the status line: half of ui_scale, at least 1
+    int32_t status_top; //!< First screen row of the status line, which takes the bottom status_scale rows
 } Layout;
 
 //! Render context passed to rendering functions
@@ -216,15 +217,16 @@ static inline Layout calc_layout(void)
         l.margin = 0;
         l.text_width = l.text_area_cols;
     }
-    // Where the chrome has a place (chrome_place) the menu bar takes the top ui_scale rows and the
-    // status line the bottom ui_scale rows, both drawn at ui_scale; where the terminal sizes text
+    // Where the chrome has a place (chrome_place) the menu bar takes the top ui_scale rows drawn at
+    // ui_scale and the status line the bottom status_scale rows drawn at half that; where the terminal sizes text
     // that scale comes from the pane's pixels, so they stay one size on screen at any font. They
     // drop to scale 1 before they leave the note fewer than RIBBON_MIN_NOTE_ROWS.
     l.menubar = chrome_place();
     l.ui_scale = l.menubar ? ui_scale_now() : 1;
-    if (l.ui_scale > 1 && l.note_rows - 2 * l.ui_scale - 2 < RIBBON_MIN_NOTE_ROWS)
+    if (l.ui_scale > 1 && l.note_rows - l.ui_scale - (l.ui_scale / 2 > 1 ? l.ui_scale / 2 : 1) - 2 < RIBBON_MIN_NOTE_ROWS)
         l.ui_scale = 1;
-    l.status_top = app.rows - l.ui_scale + 1;
+    l.status_scale = l.ui_scale / 2 > 1 ? l.ui_scale / 2 : 1;
+    l.status_top = app.rows - l.status_scale + 1;
     // Text starts on row top_margin: under one blank row, or under the menu bar and a blank row.
     // Without a sheet it ends above the status line: two blank rows above it on a desktop
     // terminal, one under the chrome. Under a sheet there is no status line (the chat has its own
@@ -3474,13 +3476,13 @@ static void status_put(const char* s, int32_t scale)
     print_scaled_str(s, strlen(s), scale);
 }
 
-//! Render status bar: the bottom L->ui_scale rows from L->status_top, drawn at L->ui_scale (1 on
-//! a desktop terminal), so under the chrome it keeps its size on screen at any font. Positions are
+//! Render status bar: the bottom L->status_scale rows from L->status_top, drawn at L->status_scale
+//! (half of ui_scale, 1 on a desktop terminal), so under the chrome it keeps its size on screen at any font. Positions are
 //! worked out in scaled columns, the note's width divided by the scale, then placed in screen cells.
 static void render_status_bar(const Layout* L)
 {
     int32_t words = count_words(&app.text);
-    int32_t scale = L->ui_scale;
+    int32_t scale = L->status_scale;
     int32_t row = L->status_top;
     int32_t status_left = L->margin + 1;
     int32_t cols = L->text_width / scale; // scaled columns the line may use
