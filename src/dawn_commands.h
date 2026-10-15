@@ -1,7 +1,7 @@
 // dawn_commands.h - The writing screen's commands, one table read by every place that lists them
 //
 // Each command is the key dawn's writing handler already takes for it, with the words and the
-// shortcut a person sees. The action bar, the command menu, the formatting ribbon and the help
+// shortcut a person sees. The menu bar's dropdowns, the command menu, the formatting ribbon and the help
 // pages draw from this table, so a button and the key it teaches cannot disagree.
 // Pure: no app, no backend; whether a command can run right now is decided in dawn.c.
 
@@ -11,7 +11,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-//! The menu's sections, in display order
+//! The command groups, in display order
 typedef enum {
     CMD_GROUP_NOTE,
     CMD_GROUP_EDIT,
@@ -39,8 +39,7 @@ typedef struct {
     int32_t key; //!< The key handle_writing takes for it: a Ctrl code, a character or a DawnKey
     const char* shortcut; //!< The key as printed ("^Z", "esc", "tab"); "" when it has none
     uint32_t flags; //!< CommandFlag bits
-    int8_t bar; //!< Place on the action bar, 1 leftmost; 0 when it is not on the bar
-    const char* bar_label; //!< The bar's or the ribbon's shorter text ("Aa", "AI", "H1"); NULL to use label
+    const char* button; //!< The ribbon button's text ("B", "H1"); NULL to use label
 } Command;
 
 //! Every command, grouped in display order (the AI ones only where the chat is compiled in).
@@ -53,40 +52,73 @@ const Command* commands_find(int32_t key);
 //! A group's heading in the menu ("note", "edit", ...)
 const char* commands_group_name(CommandGroup group);
 
-//! The action bar's commands, left to right, without the menu's own "more".
+//! The text a ribbon button shows for cmd (its label when it has no button text)
+const char* commands_button_label(const Command* cmd);
+
+//! Biggest scale the menu bar, the ribbon and the status line are drawn at
+#define UI_SCALE_MAX 4
+
+//! The scale the menu bar, the ribbon, the status line and the dropdowns are drawn at where the
+//! terminal sizes text (kitty's OSC 66), chosen from the pane's pixels so a row of them is about a
+//! thirteenth of the pane's width on screen whatever the font: round(cols x cell_w / 13 / cell_h),
+//! between 1 and UI_SCALE_MAX. A pinch to a small font (more columns, smaller cells) raises it and
+//! a large font lowers it, so the chrome stays the same size. Without the cell size (cell_w or
+//! cell_h not above 0): 2 in Termux Launcher's terminal, 1 elsewhere.
+int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h, bool launcher);
+
+// #region Menu bar
+
+//! The menu bar's menus, left to right
+typedef enum {
+    MENUBAR_FILE, //!< The note group
+    MENUBAR_EDIT, //!< The edit and find groups
+    MENUBAR_VIEW, //!< The view group
+    MENUBAR_AI, //!< The ai group; only where the chat is compiled in
+    MENUBAR_HELP, //!< The help group
+    MENUBAR_COUNT
+} MenuBarItem;
+
+//! Scaled cells between two menus on the bar (one, above scale 1, when two would drop a menu)
+#define MENUBAR_GAP 2
+
+//! The menus this build's bar shows, left to right (AI only where the chat is compiled in).
 //! @return how many were written to out (at most max)
-int32_t commands_bar(const Command** out, int32_t max);
+int32_t menubar_items(MenuBarItem* out, int32_t max);
 
-//! The text the action bar shows for cmd
-const char* commands_bar_label(const Command* cmd);
+//! A menu's name as the bar writes it, capitalised as a word processor has them ("File")
+const char* menubar_name(MenuBarItem item);
 
-//! How many of the bar's n leading items fit in room columns, with "more" (more_w columns) always
-//! kept at the end and gap columns between neighbours. Items are dropped from the right.
-//! @param widths each item's width in columns
-//! @return the number of items (not counting "more") that fit
-int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32_t gap, int32_t room);
+//! The key that opens item's dropdown (DAWN_KEY_MENU_FILE ... DAWN_KEY_MENU_HELP)
+int32_t menubar_key(MenuBarItem item);
 
-//! Screen cells between two action bar items at scale: three at scale 1, two (one scaled space)
-//! at scale 2 and above
-int32_t commands_bar_gap(int32_t scale);
+//! The menu whose dropdown key opens, or -1 when key opens none
+int32_t menubar_from_key(int32_t key);
 
-//! Where an action bar item goes, in screen cells
+//! The menu a group's commands are listed under, or -1 for the format group (the ribbon's)
+int32_t menubar_of_group(CommandGroup group);
+
+//! How help says to reach a group's commands by touch: "Edit menu"; "ribbon" for the format group
+const char* menubar_tap(CommandGroup group);
+
+//! The menu dir (-1 left, 1 right) from at among the n menus of items, wrapping round; at itself
+//! when it is not among them
+MenuBarItem menubar_neighbour(const MenuBarItem* items, int32_t n, MenuBarItem at, int32_t dir);
+
+//! Where a menu's name goes on the bar, in screen cells
 typedef struct {
     int32_t col; //!< Cells from the bar's left edge
-    int32_t width; //!< Cells its text takes: its label's columns times the scale
-} BarSlot;
+    int32_t width; //!< Cells its name takes: its letters times the scale
+} MenuBarSlot;
 
-//! Lay the action bar out at scale (1, or 2 where kitty text sizing draws it twice the size, two
-//! rows tall): each label takes widths[i] x scale screen cells, commands_bar_gap(scale) apart,
-//! and items are dropped from the right (commands_bar_fit on the scaled widths) so that "more"
-//! always fits at the end.
-//! @param widths each item's label width in columns at scale 1
-//! @param more_w "more"'s label width at scale 1
-//! @param room the bar's width in screen cells
-//! @param slots receives the kept items' places, then "more"'s (the return value + 1 entries;
-//!              room for n + 1)
-//! @return the number of items (not counting "more") that fit, or -1 when "more" alone does not
-int32_t commands_bar_layout(const int32_t* widths, int32_t n, int32_t more_w, int32_t scale, int32_t room, BarSlot* slots);
+//! Lay the bar's n menus out at scale in room screen cells: each name takes its letters x scale
+//! cells, MENUBAR_GAP scaled cells apart, or (above scale 1) one scaled cell apart when the wider
+//! gap would drop a menu that the narrower keeps; menus are dropped from the right only when even
+//! that does not fit. Tap regions (a name and a cell either side) never overlap.
+//! @param slots receives the kept menus' places (n entries)
+//! @return the number of menus kept, from the left
+int32_t menubar_layout(const MenuBarItem* items, int32_t n, int32_t scale, int32_t room, MenuBarSlot* slots);
+
+// #endregion
 
 // #region Formatting ribbon
 
@@ -115,10 +147,10 @@ int32_t commands_ribbon(const Command** out, int32_t max);
 int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots);
 
 //! Lay the ribbon's n buttons out at scale in room screen cells. At scale 1 this is
-//! commands_ribbon_layout. At scale 2 (kitty text sizing) the layout is worked out in scaled cells,
-//! room / 2 of them, with the buttons RIBBON_GAP scaled cells apart, or one when that saves a row;
-//! every slot's row, col and width is then multiplied by the scale, so a row of buttons is two
-//! screen rows and slots are in screen cells.
+//! commands_ribbon_layout. Above it (kitty text sizing) the layout is worked out in scaled cells,
+//! room / scale of them, with the buttons RIBBON_GAP scaled cells apart, or one when that saves a
+//! row; every slot's row, col and width is then multiplied by the scale, so a row of buttons is
+//! scale screen rows and slots are in screen cells.
 //! @param slots receives each button's place in screen rows and cells (n entries)
 //! @return the screen rows the ribbon takes (button rows x scale), 0 when it does not fit
 int32_t commands_ribbon_place(const Command* const* items, int32_t n, int32_t room, int32_t scale, RibbonSlot* slots);
@@ -146,11 +178,19 @@ typedef struct {
     int32_t count;
     int32_t selected; //!< Line of the highlighted command, -1 when none can run
     int32_t scroll; //!< First line shown
+    int32_t bar_menu; //!< The MenuBarItem this is the dropdown of; -1 for the full menu (Ctrl+])
+    int32_t page; //!< Lines the list showed when last drawn (page up and down step this many)
 } MenuState;
 
-//! Fill m with every command but the menu's own and the ribbon's buttons, a heading before each
-//! group, and highlight the first that enabled() allows.
-void menu_build(MenuState* m, bool (*enabled)(const Command*));
+//! Fill m and highlight the first command that enabled() allows. With bar_menu -1, the full menu:
+//! every command but the menu's own and the ribbon's buttons, a heading before each group. With a
+//! MenuBarItem, that menu's dropdown: the commands of its groups (menubar_of_group) in table
+//! order, no headings, "all commands" included.
+void menu_build(MenuState* m, int32_t bar_menu, bool (*enabled)(const Command*));
+
+//! Scaled cells the widest line of m needs: its label, then two cells and its shortcut when it has
+//! one (a heading: its name). Padding around the list is the drawing's.
+int32_t menu_list_cols(const MenuState* m);
 
 //! The enabled command line steps lines away from line from (dir -1 up, 1 down, steps > 0),
 //! stopping at the last enabled one that way.
@@ -177,16 +217,16 @@ typedef struct {
     HelpRowKind kind;
     const char* text; //!< The heading's words or what the item does ("undo"); "" on a blank
     const char* key; //!< The item's key as printed ("^Z"), "" when it has none
-    const char* tap; //!< How to do it by touch: "bar", "ribbon", "menu" or a gesture ("swipe"); "" when none
-    const char* tap_label; //!< The bar's or the ribbon's button text ("Aa", "B"), NULL when none
+    const char* tap; //!< How to do it by touch: its menu ("Edit menu"), "ribbon" or a gesture ("swipe"); "" when none
+    const char* tap_label; //!< The ribbon's button text ("B"), NULL when none
 } HelpRow;
 
 //! Most lines help_rows() writes
 #define HELP_ROWS_MAX 96
 
 //! The shortcut pages' lines: a hand-written "move and select" group (the arrow and selection keys
-//! are not commands), then every command under its group's heading in table order, the format
-//! group as the ribbon's buttons, a blank between groups.
+//! are not commands), then every command under its group's heading in table order with the menu
+//! bar's menu it is in, the format group as the ribbon's buttons, a blank between groups.
 //! @return how many were written to out (at most max)
 int32_t help_rows(HelpRow* out, int32_t max);
 
