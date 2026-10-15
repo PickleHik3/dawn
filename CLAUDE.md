@@ -144,14 +144,18 @@ then undo, title (`DAWN_KEY_AI_TITLE`), auto format (`DAWN_KEY_AI_FORMAT`; both 
 `dawn_chat.c`, USER-lane chat turns whose edit is a tagged block) and read aloud. Every command is on
 a ribbon or in the full menu (`ribbon_tab_of`, `commands_in_menu`, tested). Each button is a box with
 its glyph centred over its caption, about three rows tall at scale 2, all of a ribbon's buttons one
-width (its widest; captions at most 7 columns, text glyphs 2) so they form a grid. `ribbon_layout`
-wraps sections as blocks: two sit side by side with a divider only when both fit one row, else each
-starts at the left edge under a thin rule, its buttons spread evenly over its rows; a ribbon pages
+width (its widest; captions at most 7 columns, every glyph budgeted 2) so they form a grid.
+`ribbon_layout` (`ribbon_pack`) lets a section go on after the one before it on the same row, behind
+a divider, wrapping what does not fit to the left edge, or start a row of its own under a thin rule,
+its buttons spread evenly; it takes the way with the fewest rows, then the fewest split sections
+(File at six a row: 3 | 3, then 2 | 4); a ribbon pages
 with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer than
 `RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
 Icons are Nerd Font code points, used only when `app.nerd_font` (on in the launcher when a file under
 `~/.termux/fonts/` names "nerd", `nerd_font_installed`; settings.json's `"nerd_font"` wins); otherwise
-each button has a text glyph. Ctrl+] (and "all commands", the "menu" button in Formatting's help
+each button has a text glyph. Above scale 1 an icon goes out as one OSC 66 block of the icon and a
+space, `s=<scale>:w=2` (`print_scaled_block`, `FACE_BLOCK`), 2×scale columns: the launcher draws a
+Nerd icon full size only so, and sized alone it comes out half height. Ctrl+] (and "all commands", the "menu" button in Formatting's help
 section) opens the full grouped command menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in
 `dawn_render.c`), every command but the format group's. Help (`MODE_HELP`, Ctrl+O) reads the same
 table: its shortcut pages list every command by group with its key and its ribbon ("File ribbon", or

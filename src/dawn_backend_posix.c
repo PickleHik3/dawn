@@ -992,7 +992,7 @@ static void posix_repeat_char(char c, int32_t n)
     }
 }
 
-static void posix_write_scaled(const char* str, size_t len, int32_t scale)
+static void posix_write_scaled(const char* str, size_t len, int32_t scale, int32_t width)
 {
     if (scale <= 1 || !(posix_state.capabilities & DAWN_CAP_TEXT_SIZING)) {
         buf_append(str, len);
@@ -1003,10 +1003,15 @@ static void posix_write_scaled(const char* str, size_t len, int32_t scale)
     }
     if (scale > 7)
         scale = 7;
-    buf_printf(TEXT_SIZE_OSC "s=%d;%.*s" TEXT_SIZE_ST, scale, (int32_t)len, str);
+    if (width > 7)
+        width = 7;
+    if (width > 0)
+        buf_printf(TEXT_SIZE_OSC "s=%d:w=%d;%.*s" TEXT_SIZE_ST, scale, width, (int32_t)len, str);
+    else
+        buf_printf(TEXT_SIZE_OSC "s=%d;%.*s" TEXT_SIZE_ST, scale, (int32_t)len, str);
     // Track column position (scaled text takes more columns)
     if (posix_state.mode == DAWN_MODE_PRINT) {
-        posix_state.print_col += utf8_display_width(str, len) * scale;
+        posix_state.print_col += (width > 0 ? width : utf8_display_width(str, len)) * scale;
     }
 }
 

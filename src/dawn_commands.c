@@ -76,7 +76,7 @@ static const Command COMMANDS[] = {
     { "heading 3", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H3, "", CMD_NEEDS_EDIT, "head 3", "H3", 0xF026D },
     { "bullet list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BULLET, "", CMD_NEEDS_EDIT, "bullets", "•", 0xF0279 },
     { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, "numbers", "1.", 0xF027B },
-    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "☐", 0xF0135 },
+    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "✓", 0xF0135 },
     { "quote", CMD_GROUP_FORMAT, DAWN_KEY_FMT_QUOTE, "", CMD_NEEDS_EDIT, "quote", "❝", 0xF027E },
     { "link", CMD_GROUP_FORMAT, DAWN_KEY_FMT_LINK, "", CMD_NEEDS_EDIT, "link", "↗", 0xF0337 },
     { "image", CMD_GROUP_FORMAT, DAWN_KEY_FMT_IMAGE, "", CMD_NEEDS_EDIT, "image", "▣", 0xF02E9 },
@@ -110,7 +110,7 @@ static const Command COMMANDS[] = {
     { "keyboard help", CMD_GROUP_HELP, 15, "^O", 0, "keys", "?", 0xF030C },
     { "markdown cheatsheet", CMD_GROUP_HELP, DAWN_KEY_CMD_CHEATSHEET, "", 0, "syntax", "M↓", 0xF0354 },
     { "welcome tour", CMD_GROUP_HELP, DAWN_KEY_CMD_TOUR, "", 0, "tour", "★", 0xF02FD },
-    { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, "menu", "⋯", 0xF035C },
+    { "all commands", CMD_GROUP_HELP, DAWN_KEY_CMD_MENU, "^]", 0, "menu", "☰", 0xF035C },
 };
 
 #define COMMAND_COUNT ((int32_t)(sizeof(COMMANDS) / sizeof(COMMANDS[0])))
@@ -337,7 +337,8 @@ int32_t ribbon_glyph_cols(const Command* cmd, bool icons)
         return 0;
     if (icons && cmd->icon)
         return 2;
-    return text_cols(cmd->glyph ? cmd->glyph : cmd->label);
+    int32_t w = text_cols(cmd->glyph ? cmd->glyph : cmd->label);
+    return w > 2 ? w : 2;
 }
 
 int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons)
@@ -415,60 +416,115 @@ int32_t ribbon_more_cols(int32_t scale)
     return glyph > caption ? glyph : caption;
 }
 
-//! Lay the buttons out in rows of room cells. A section goes on the row the section before it
-//! began on when that one took a single row and the whole of this one fits after a divider;
-//! otherwise it starts a row of its own (stacked[row] true from the second row on), so a section
-//! always wraps as a block, from the left edge. A section that wraps spreads its buttons evenly
-//! over the rows it needs (sixteen at five a row go four by four, not five, five, five and one).
+//! Sections a ribbon_pack tries both ways at most (the rest start rows of their own)
+#define RIBBON_PACK_CHOICES 8
+
+//! Lay the buttons out in rows of room cells, each section after the first going on after the one
+//! before it (on the same row, after a divider) when bit section of goes_on says so and its first
+//! button fits there, else starting a row of its own (stacked[row] true from the second row on).
+//! A section on rows of its own spreads its buttons evenly over them (sixteen at five a row go
+//! four by four, not five, five, five and one); one that goes on fills the row it joins and spreads
+//! the rest evenly over the rows under it, from the left edge.
 //! @param stacked receives, for each row, whether it opens a section under another (RIBBON_MAX)
+//! @param split receives how many sections went on and did not fit the row they joined
+//! @param joins receives how many sections went on
 //! @return the rows used, 0 when a button is wider than room
-static int32_t ribbon_pack(const RibbonButton* b, int32_t n, int32_t room, RibbonSlot* slots, bool* stacked)
+static int32_t ribbon_pack_as(const RibbonButton* b, int32_t n, int32_t room, uint32_t goes_on, RibbonSlot* slots,
+    bool* stacked, int32_t* split, int32_t* joins)
 {
     int32_t row = -1;
     int32_t end = 0; // where the row's last button ends
-    int32_t section_row = -1; // the row the section being laid out began on
     int32_t per_row = 0; // buttons a row of this section holds
     int32_t in_row = 0; // buttons on the row so far
+    int32_t left = 0; // the section's buttons not placed yet
+    bool joined = false; // the section went on after the one before it
+    *split = 0;
+    *joins = 0;
     for (int32_t i = 0; i < n; i++) {
         int32_t w = b[i].width;
         if (w > room || w <= 0)
             return 0;
+        // The buttons of a ribbon are one width, so a row holds fit of them.
+        int32_t fit = (room + RIBBON_GAP) / (w + RIBBON_GAP);
         bool opens = i == 0 || b[i].section != b[i - 1].section;
         int32_t at;
         if (opens) {
             int32_t count = 1;
-            int32_t sw = w;
-            for (int32_t j = i + 1; j < n && b[j].section == b[i].section; j++) {
-                sw += RIBBON_GAP + b[j].width;
+            for (int32_t j = i + 1; j < n && b[j].section == b[i].section; j++)
                 count++;
-            }
-            if (i > 0 && section_row == row && end + RIBBON_DIVIDER + sw <= room) {
+            int32_t section = b[i].section;
+            joined = i > 0 && section < 32 && (goes_on >> section & 1u) && end + RIBBON_DIVIDER + w <= room;
+            if (joined) {
+                (*joins)++;
                 at = end + RIBBON_DIVIDER;
-                per_row = count;
+                per_row = 1 + (room - at - w) / (w + RIBBON_GAP);
+                if (per_row >= count)
+                    per_row = count;
+                else
+                    (*split)++;
             } else {
                 row++;
                 stacked[row] = i > 0;
                 at = 0;
-                // The buttons of a ribbon are one width, so a row holds fit of them.
-                int32_t fit = (room + RIBBON_GAP) / (w + RIBBON_GAP);
                 int32_t rows = (count + fit - 1) / fit;
                 per_row = (count + rows - 1) / rows;
             }
-            section_row = row;
             in_row = 0; // the section's buttons on its row
+            left = count;
         } else if (in_row >= per_row || end + RIBBON_GAP + w > room) {
             row++;
             stacked[row] = false;
             at = 0;
             in_row = 0;
+            if (joined) {
+                // What did not fit the row it joined, spread evenly over the rows under it.
+                int32_t rows = (left + fit - 1) / fit;
+                per_row = (left + rows - 1) / rows;
+            }
         } else {
             at = end + RIBBON_GAP;
         }
         slots[i] = (RibbonSlot) { .page = 0, .row = row, .col = at, .width = w, .rule_above = false };
         end = at + w;
         in_row++;
+        left--;
     }
     return row + 1;
+}
+
+//! Lay the buttons out in rows of room cells (ribbon_pack_as), each section after the first going
+//! on after the one before it or starting a row of its own, whichever way takes the fewest rows,
+//! then splits the fewest sections over rows, then has the fewest sections going on: a section
+//! stays a block unless going on saves a row. On a phone at six buttons a row File's 3 | 5 | 4 go
+//! on two rows (3 | 3, then 2 | 4) where blocks would take three.
+//! @param stacked receives, for each row, whether it opens a section under another (RIBBON_MAX)
+//! @return the rows used, 0 when a button is wider than room
+static int32_t ribbon_pack(const RibbonButton* b, int32_t n, int32_t room, RibbonSlot* slots, bool* stacked)
+{
+    int32_t sections = n > 0 ? b[n - 1].section + 1 : 0;
+    int32_t choices = sections - 1 < RIBBON_PACK_CHOICES ? sections - 1 : RIBBON_PACK_CHOICES;
+    if (choices < 0)
+        choices = 0;
+    RibbonSlot try_slots[RIBBON_MAX];
+    bool try_stacked[RIBBON_MAX];
+    int32_t best_rows = 0, best_split = 0, best_joins = 0;
+    for (uint32_t m = 0; m < (1u << choices); m++) {
+        int32_t split = 0, joins = 0;
+        // Bit k of m is section k + 1 (the first section has nothing to go on after).
+        int32_t rows = ribbon_pack_as(b, n, room, m << 1, try_slots, try_stacked, &split, &joins);
+        if (rows <= 0)
+            return 0;
+        bool better = m == 0 || rows < best_rows
+            || (rows == best_rows && (split < best_split || (split == best_split && joins < best_joins)));
+        if (better) {
+            best_rows = rows;
+            best_split = split;
+            best_joins = joins;
+            memcpy(slots, try_slots, (size_t)n * sizeof(RibbonSlot));
+            memcpy(stacked, try_stacked, (size_t)rows * sizeof(bool));
+        }
+    }
+    return best_rows;
 }
 
 bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,

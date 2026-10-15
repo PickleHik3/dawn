@@ -197,8 +197,9 @@ static void test_tabs_status(void)
 }
 
 //! Whether every button of ribbon tab is placed inside room at scale, in order, apart, inside the
-//! frame, all one width, each section wrapping as a block; or, when the layout said no, that it
-//! truly could not.
+//! frame, all one width, a section either going on after the one before it behind a divider or
+//! starting a row of its own under a rule, and in no more rows than every section on rows of its
+//! own would take; or, when the layout said no, that it truly could not.
 static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons, int32_t max_height)
 {
     RibbonButton b[RIBBON_MAX];
@@ -246,9 +247,6 @@ static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons,
         if (same) {
             CHECK(s[i].col == s[i - 1].col + s[i - 1].width + (opens ? RIBBON_DIVIDER : RIBBON_GAP));
             CHECK(!s[i].rule_above);
-            // A section beside another: the one before it took a single row.
-            if (opens)
-                CHECK(s[section_start].page == s[i - 1].page && s[section_start].row == s[i - 1].row);
         } else {
             CHECK(s[i].col == 0);
             CHECK(s[i].page > s[i - 1].page || (same_page && s[i].row > s[i - 1].row));
@@ -258,13 +256,28 @@ static void check_ribbon(RibbonTab tab, int32_t room, int32_t scale, bool icons,
                 // A section on a row of its own, under a rule.
                 CHECK(s[i].rule_above && s[i].row == s[i - 1].row + h + RIBBON_RULE);
             } else {
-                // A section wrapping: its next row right under, all of it at the left edge.
+                // A section wrapping: its next row right under, from the left edge, with no rule
+                // (a rule only where a section starts a row).
                 CHECK(!s[i].rule_above && s[i].row == s[i - 1].row + h);
-                CHECK(s[section_start].col == 0);
             }
         }
         if (opens)
             section_start = i;
+    }
+    (void)section_start;
+    // Going on after a section never costs a row: no more rows than each section on rows of its
+    // own, spread evenly, would take.
+    if (f.pages == 1) {
+        int32_t fit = (room + RIBBON_GAP) / (widest + RIBBON_GAP);
+        int32_t blocks = 0, count = 0;
+        for (int32_t i = 0; i < n; i++) {
+            count++;
+            if (i == n - 1 || b[i + 1].section != b[i].section) {
+                blocks += (count + fit - 1) / fit;
+                count = 0;
+            }
+        }
+        CHECK(f.rows <= blocks);
     }
     // A page that pages on was full: its next row would not have fit under it.
     for (int32_t i = 1; i < n; i++) {
@@ -303,7 +316,11 @@ static void test_ribbons(void)
     // caption widens it.
     CHECK(ribbon_button_cols(b[0].cmd, 2, true) == 6); // bold: icon 6, caption 4
     CHECK(ribbon_button_cols(b[8].cmd, 2, true) == 7); // numbered list: its caption
-    CHECK(ribbon_glyph_cols(b[0].cmd, true) == 2 && ribbon_glyph_cols(b[0].cmd, false) == 1);
+    // A glyph is given two columns with the Nerd Font (the icon and a space, one OSC 66 block) and
+    // without it, so the buttons are as wide either way.
+    CHECK(ribbon_glyph_cols(b[0].cmd, true) == 2 && ribbon_glyph_cols(b[0].cmd, false) == 2);
+    for (int32_t i = 0; i < n; i++)
+        CHECK(ribbon_button_cols(b[i].cmd, 3, true) == ribbon_button_cols(b[i].cmd, 3, false));
     CHECK(ribbon_button_cols(b[0].cmd, 1, false) == 4); // "bold" under "B" and its two cells
     CHECK(ribbon_button_cols(b[3].cmd, 2, false) == 6); // "<>" at 2, and a cell either side
     CHECK(ribbon_button_cols(b[0].cmd, 4, true) == 10 && ribbon_button_cols(b[8].cmd, 4, true) == 14);
@@ -360,12 +377,33 @@ static void test_ribbons(void)
     CHECK(s[3].row == 0 && s[3].col == 24 && s[4].row == 2 && s[4].col == 0);
     CHECK(s[styles - 1].row == 6 && s[styles - 1].col == 24 && s[styles].row == 8 + RIBBON_RULE);
 
-    // File on the phone: three sections, none fitting beside the one before, so three rows and two
-    // rules.
+    // File on the phone (51 or 53 cells, six buttons a row): 3 | 5 | 4 go on two rows with no rule,
+    // the clipboard going on after the note's three and wrapping, the finding four after it; as
+    // blocks they would take three.
     n = ribbon_buttons(RIBBON_TAB_FILE, 2, true, b, RIBBON_MAX);
-    CHECK(ribbon_layout(b, n, 51, 2, 40, s, &f));
-    CHECK(f.rows == 3 && f.height == 3 * 3 + 2 * RIBBON_RULE && f.pages == 1);
-    CHECK(s[3].rule_above && s[3].row == 4 && s[8].rule_above && s[8].row == 8);
+    for (int32_t room = 51; room <= 53; room += 2) {
+        CHECK(ribbon_layout(b, n, room, 2, 40, s, &f));
+        CHECK(f.rows == 2 && f.height == 2 * 3 && f.pages == 1);
+        CHECK(s[2].row == 0 && s[2].col == 16 && s[3].row == 0 && s[3].col == 26 && s[5].col == 42);
+        CHECK(s[6].row == 3 && s[6].col == 0 && !s[6].rule_above && s[7].col == 8);
+        CHECK(s[8].row == 3 && s[8].col == 18 && s[11].row == 3 && s[11].col == 42);
+    }
+    // Without the font the same.
+    n = ribbon_buttons(RIBBON_TAB_FILE, 2, false, b, RIBBON_MAX);
+    CHECK(ribbon_layout(b, n, 53, 2, 40, s, &f) && f.rows == 2);
+    // The help four would split two and two going on after the styles' last row, taking no fewer
+    // rows, so they keep a row of their own (the Formatting case above, at 53 too).
+    n = ribbon_buttons(RIBBON_TAB_FORMAT, 2, true, b, RIBBON_MAX);
+    CHECK(ribbon_layout(b, n, 53, 2, 40, s, &f) && f.rows == 4 && s[styles].rule_above && s[styles].col == 0);
+    // AI: its buttons are ten wide ("not loaded"), four a row at 53, so the chat and the model, then
+    // the four actions under a rule; one row from 67 cells (six and a divider), where at 65 and 66
+    // (six a row, but not with the divider) the actions keep a row of their own.
+    n = ribbon_buttons(RIBBON_TAB_AI, 2, true, b, RIBBON_MAX);
+    CHECK(ribbon_layout(b, n, 53, 2, 40, s, &f) && f.rows == 2 && f.height == 2 * 3 + RIBBON_RULE);
+    CHECK(s[2].rule_above && s[2].row == 3 + RIBBON_RULE && s[2].col == 0 && s[5].row == s[2].row && s[5].col == 33);
+    CHECK(ribbon_layout(b, n, 67, 2, 40, s, &f) && f.rows == 1 && f.height == 3);
+    CHECK(s[2].row == 0 && s[2].col == 24 && s[5].col == 57);
+    CHECK(ribbon_layout(b, n, 66, 2, 40, s, &f) && f.rows == 2 && s[2].rule_above && s[5].col == 33);
 
     // Every tab at every scale, width and height, with and without the Nerd Font.
     RibbonTab tabs[RIBBON_TAB_COUNT];

@@ -3450,10 +3450,12 @@ typedef enum {
     FACE_BOLD = 1 << 0,
     FACE_ITALIC = 1 << 1,
     FACE_STRIKE = 1 << 2,
+    FACE_BLOCK = 1 << 3, //!< One OSC 66 block face_cols wide (w=): a Nerd Font icon and its space
 } FaceStyle;
 
 //! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
-//! surface scale rows tall with face centred in it (face_cols columns at face_scale, set in style),
+//! surface scale rows tall with face centred in it (face_cols columns at face_scale, set in style;
+//! FACE_BLOCK sends it as one block of face_cols cells, print_scaled_block),
 //! and caption centred under it on the ribbon's band at the caption's scale. Pressed: the box
 //! tinted with the accent and the face in it; disabled: face and caption in the border's colour.
 static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, const char* face,
@@ -3475,7 +3477,10 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
         set_italic(true);
     if (style & FACE_STRIKE)
         set_strikethrough(true);
-    print_scaled_str(face, strlen(face), face_scale);
+    if (style & FACE_BLOCK)
+        print_scaled_block(face, strlen(face), face_scale, face_cols);
+    else
+        print_scaled_str(face, strlen(face), face_scale);
     if (style & FACE_BOLD)
         set_bold(false);
     if (style & FACE_ITALIC)
@@ -3572,7 +3577,8 @@ static void format_key(int32_t key)
 //! tab's surface across the width: its buttons (ribbon_buttons) where ribbon_layout puts them on the
 //! page showing, a divider between two sections side by side, a thin rule above a section stacked
 //! under another, and on a ribbon that pages a "more" button at the right end of its first row.
-//! Each button is a box with its glyph centred in it (the Nerd Font icon when the font is there;
+//! Each button is a box with its glyph centred in it (the Nerd Font icon when the font is there, at
+//! a scale one two-cell OSC 66 block of the icon and a space;
 //! bold, italic and strike set in their own style) over its caption, drawn at L->ui_scale; the
 //! model button's glyph is the model's short name when it fits, its caption whether the model is
 //! loaded. While the ribbon drops open only its rows already down are drawn. A command that
@@ -3679,11 +3685,17 @@ static void render_ribbon(const Layout* L)
         if (named) {
             // face holds the model's name
         } else if (app.nerd_font && cmd->icon) {
-            // The icon alone, centred on its own cell (the button's width keeps a second cell for
-            // a font whose icons spread wider).
+            // Scaled, the icon and a space as one block two cells wide (OSC 66 w=2): the launcher
+            // draws a Nerd Font icon full size only so, and each sized on its own comes out about
+            // half a letter high. At scale 1 nothing is sized: the icon alone on its own cell.
             int32_t k = (int32_t)utf8proc_encode_char((utf8proc_int32_t)cmd->icon, (utf8proc_uint8_t*)face);
-            face[k] = '\0';
             face_cols = 1;
+            if (scale > 1) {
+                face[k++] = ' ';
+                face_cols = 2;
+                style = FACE_BLOCK;
+            }
+            face[k] = '\0';
         } else {
             snprintf(face, sizeof(face), "%s", cmd->glyph);
             face_cols = chrome_cols(face);
