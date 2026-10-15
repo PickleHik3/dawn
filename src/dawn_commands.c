@@ -6,7 +6,10 @@
 // and the shortcut as printed. The phone-width action bar draws the entries that carry a bar
 // place, and the command menu ("more" on the bar, or Ctrl+]) lists all of them with the shortcut
 // beside each, so every button also teaches its key. The formatting ribbon draws the format group,
-// one button per FormatOp, laid out here in rows that wrap between clusters; the menu leaves that
+// one button per FormatOp, laid out here in rows that wrap between clusters. Where the terminal
+// has kitty text sizing the bar and the ribbon are drawn at twice the size for a finger; their
+// scaled places (commands_bar_layout, commands_ribbon_place) are worked out here too, in screen
+// cells, so the drawing and the tap regions take the same numbers. The menu leaves the format
 // group out, since sixteen rows of styles would bury the rest. The help pages read the same
 // table: every command by task, with its key and how to reach it by touch (its bar button, its
 // ribbon button, or the menu), so a new command is listed in help by adding it here.
@@ -171,6 +174,35 @@ int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32
     return kept;
 }
 
+int32_t commands_bar_gap(int32_t scale)
+{
+    return scale > 1 ? 2 : 3;
+}
+
+int32_t commands_bar_layout(const int32_t* widths, int32_t n, int32_t more_w, int32_t scale, int32_t room, BarSlot* slots)
+{
+    enum { BAR_LAYOUT_MAX = 16 };
+    if (scale < 1)
+        scale = 1;
+    if (n > BAR_LAYOUT_MAX)
+        n = BAR_LAYOUT_MAX;
+    int32_t scaled[BAR_LAYOUT_MAX];
+    for (int32_t i = 0; i < n; i++)
+        scaled[i] = widths[i] * scale;
+    int32_t more_cells = more_w * scale;
+    if (more_cells > room)
+        return -1;
+    int32_t gap = commands_bar_gap(scale);
+    int32_t kept = commands_bar_fit(scaled, n, more_cells, gap, room);
+    int32_t col = 0;
+    for (int32_t i = 0; i <= kept; i++) {
+        int32_t w = i < kept ? scaled[i] : more_cells;
+        slots[i] = (BarSlot) { .col = col, .width = w };
+        col += w + gap;
+    }
+    return kept;
+}
+
 // #endregion
 
 // #region Formatting ribbon
@@ -202,7 +234,8 @@ static bool ribbon_cluster_start(int32_t key)
     return key == DAWN_KEY_FMT_H1 || key == DAWN_KEY_FMT_BULLET || key == DAWN_KEY_FMT_LINK;
 }
 
-int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots)
+//! commands_ribbon_layout with the gap between buttons as a parameter
+static int32_t ribbon_layout_gap(const Command* const* items, int32_t n, int32_t room, int32_t gap, RibbonSlot* slots)
 {
     int32_t row = 0;
     int32_t col = 0; // where the next button would start; 0 on an empty row
@@ -214,7 +247,7 @@ int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t r
             // The whole cluster moves down when it fits on a row of its own but not here.
             int32_t cw = w;
             for (int32_t j = i + 1; j < n && !ribbon_cluster_start(items[j]->key); j++)
-                cw += RIBBON_GAP + ribbon_width(items[j]);
+                cw += gap + ribbon_width(items[j]);
             if (col + cw > room && cw <= room) {
                 row++;
                 col = 0;
@@ -225,17 +258,50 @@ int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t r
             col = 0;
         }
         slots[i] = (RibbonSlot) { .row = row, .col = col, .width = w };
-        col += w + RIBBON_GAP;
+        col += w + gap;
     }
     return n > 0 ? row + 1 : 0;
 }
 
-int32_t commands_ribbon_rows(int32_t room)
+int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots)
+{
+    return ribbon_layout_gap(items, n, room, RIBBON_GAP, slots);
+}
+
+int32_t commands_ribbon_place(const Command* const* items, int32_t n, int32_t room, int32_t scale, RibbonSlot* slots)
+{
+    if (scale <= 1)
+        return commands_ribbon_layout(items, n, room, slots);
+    if (n > RIBBON_MAX)
+        n = RIBBON_MAX;
+    int32_t cells = room / scale;
+    int32_t rows = ribbon_layout_gap(items, n, cells, RIBBON_GAP, slots);
+    if (rows <= 0)
+        return 0;
+    // Big buttons take two rows each, and a row of them is worth more than the space between
+    // them: a gap of one scaled cell (still two screen cells, so tap regions do not overlap) when
+    // that leaves fewer rows.
+    RibbonSlot tight[RIBBON_MAX];
+    int32_t tight_rows = ribbon_layout_gap(items, n, cells, 1, tight);
+    if (tight_rows > 0 && tight_rows < rows) {
+        rows = tight_rows;
+        for (int32_t i = 0; i < n; i++)
+            slots[i] = tight[i];
+    }
+    for (int32_t i = 0; i < n; i++) {
+        slots[i].row *= scale;
+        slots[i].col *= scale;
+        slots[i].width *= scale;
+    }
+    return rows * scale;
+}
+
+int32_t commands_ribbon_rows(int32_t room, int32_t scale)
 {
     const Command* items[RIBBON_MAX];
     RibbonSlot slots[RIBBON_MAX];
     int32_t n = commands_ribbon(items, RIBBON_MAX);
-    return commands_ribbon_layout(items, n, room, slots);
+    return commands_ribbon_place(items, n, room, scale, slots);
 }
 
 // #endregion
