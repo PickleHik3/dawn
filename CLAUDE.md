@@ -50,7 +50,7 @@ Tests are seven plain executables, no framework, no ctest:
 ./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
 ./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
 ./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
-./build/test-commands                              # the command table, action bar fit, ribbon layout, menu lines (dawn_commands); exits non-zero on failure
+./build/test-commands                              # the command table, action bar fit and ribbon layout at scale 1 and 2, menu lines (dawn_commands); exits non-zero on failure
 ./build/test-tips                                  # the one-shot tips' seen set and its "tips_seen" JSON (dawn_tips); exits non-zero on failure
 ```
 
@@ -143,7 +143,13 @@ by default and saved as `"ribbon"` in settings.json, it takes rows from the note
 in `calc_layout`) above the bar's row, wrapping between clusters (`commands_ribbon_layout`). Each button
 is a `DAWN_KEY_FMT_*` key, one per `FormatOp` in order, which `handle_writing` turns into one
 `format_apply` (`dawn_format.c`) and one undo step; a style that `format_state` says is on draws
-underlined. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+underlined. Where the terminal has kitty text sizing (`DAWN_CAP_TEXT_SIZING`) and the bar has a place
+(`action_bar_place`, which does not depend on the mode, so a dialog does not move the note), the bar and
+the ribbon are drawn at scale 2 for a finger: `Layout.ui_scale` is 2, the bar takes two rows from
+`Layout.bar_top` (one more taken from the note), and each ribbon row is two screen rows. The scaled
+places, in screen cells, come from `commands_bar_layout` and `commands_ribbon_place` (pure, tested in
+`test-commands`), and tap regions are as tall as the scale. Without text sizing (tmux, xterm) both stay
+one row per line. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
 
 First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards

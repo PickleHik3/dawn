@@ -1,5 +1,6 @@
 // test_commands.c - host tests for the command table (dawn_commands.c): every entry complete,
-// keys unique, groups in display order, the action bar's items and fit, and the menu's lines,
+// keys unique, groups in display order, the action bar's items and fit and the ribbon's layout
+// (at scale 1, and at scale 2 where kitty text sizing draws them twice the size), the menu's lines,
 // stepping and scrolling, and the help pages' lines and page breaks. Built with USE_LIBAI and
 // DAWN_HAS_SPEAK so the fullest table is checked.
 
