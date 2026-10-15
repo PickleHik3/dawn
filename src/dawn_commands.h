@@ -1,21 +1,22 @@
 // dawn_commands.h - The writing screen's commands, one table read by every place that lists them
 //
 // Each command is the key dawn's writing handler already takes for it, with the words and the
-// shortcut a person sees. The menu bar's dropdowns, the command menu, the formatting ribbon and the help
-// pages draw from this table, so a button and the key it teaches cannot disagree.
+// shortcut a person sees. The tab row's ribbons (File, Formatting, AI), the command menu and the
+// help pages draw from this table, so a button and the key it teaches cannot disagree.
 // Pure: no app, no backend; whether a command can run right now is decided in dawn.c.
 
 #ifndef DAWN_COMMANDS_H
 #define DAWN_COMMANDS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 //! The command groups, in display order
 typedef enum {
     CMD_GROUP_NOTE,
     CMD_GROUP_EDIT,
-    CMD_GROUP_FORMAT, //!< The formatting ribbon's buttons; left out of the command menu
+    CMD_GROUP_FORMAT, //!< The Formatting ribbon's styles; left out of the command menu
     CMD_GROUP_VIEW,
     CMD_GROUP_FIND,
     CMD_GROUP_AI,
@@ -39,7 +40,9 @@ typedef struct {
     int32_t key; //!< The key handle_writing takes for it: a Ctrl code, a character or a DawnKey
     const char* shortcut; //!< The key as printed ("^Z", "esc", "tab"); "" when it has none
     uint32_t flags; //!< CommandFlag bits
-    const char* button; //!< The ribbon button's text ("B", "H1"); NULL to use label
+    const char* caption; //!< The word under its ribbon button ("bold", "heading 1"), lower case
+    const char* glyph; //!< Its button's face without Nerd Font: a letter or a symbol ("B", "H1", "↶"), never Markdown
+    uint32_t icon; //!< Its button's Nerd Font icon (a Material Design code point, U+F0001 on), 0 for none
 } Command;
 
 //! Every command, grouped in display order (the AI ones only where the chat is compiled in).
@@ -52,111 +55,146 @@ const Command* commands_find(int32_t key);
 //! A group's heading in the menu ("note", "edit", ...)
 const char* commands_group_name(CommandGroup group);
 
-//! The text a ribbon button shows for cmd (its label when it has no button text)
-const char* commands_button_label(const Command* cmd);
-
-//! Biggest scale the menu bar, the ribbon and the status line are drawn at
+//! Biggest scale the tab row and the ribbons are drawn at
 #define UI_SCALE_MAX 4
 
-//! The scale the menu bar, the ribbon, the status line and the dropdowns are drawn at where the
-//! terminal sizes text (kitty's OSC 66), chosen from the pane's pixels so a row of them is about a
-//! thirteenth of the pane's width on screen whatever the font: round(cols x cell_w / 13 / cell_h),
-//! between 1 and UI_SCALE_MAX. A pinch to a small font (more columns, smaller cells) raises it and
-//! a large font lowers it, so the chrome stays the same size. Without the cell size (cell_w or
-//! cell_h not above 0): 2 in Termux Launcher's terminal, 1 elsewhere.
+//! The scale the tab row, the ribbons and the command menu are drawn at where the terminal sizes
+//! text (kitty's OSC 66), chosen from the pane's pixels so a row of them is about a thirteenth of
+//! the pane's width on screen whatever the font: round(cols x cell_w / 13 / cell_h), between 1 and
+//! UI_SCALE_MAX. A pinch to a small font (more columns, smaller cells) raises it and a large font
+//! lowers it, so the chrome stays the same size. Without the cell size (cell_w or cell_h not above
+//! 0): 2 in Termux Launcher's terminal, 1 elsewhere.
 int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h, bool launcher);
 
-// #region Menu bar
+// #region Tab row
 
-//! The menu bar's menus, left to right
+//! The tabs across the top, left to right; each drops its own ribbon
 typedef enum {
-    MENUBAR_FILE, //!< The note group
-    MENUBAR_EDIT, //!< The edit and find groups
-    MENUBAR_VIEW, //!< The view group
-    MENUBAR_AI, //!< The ai group; only where the chat is compiled in
-    MENUBAR_HELP, //!< The help group
-    MENUBAR_COUNT
-} MenuBarItem;
+    RIBBON_TAB_FILE, //!< The note, edit and find, and view groups
+    RIBBON_TAB_FORMAT, //!< The format group, then help
+    RIBBON_TAB_AI, //!< The chat, the model and the AI's actions; only where the chat is compiled in
+    RIBBON_TAB_COUNT
+} RibbonTab;
 
-//! Scaled cells between two menus on the bar (one, above scale 1, when two would drop a menu)
-#define MENUBAR_GAP 2
+//! Screen cells either side of a tab's name, inside its tab (the tab's surface and tap region)
+#define TAB_PAD 1
 
-//! The menus this build's bar shows, left to right (AI only where the chat is compiled in).
+//! The tabs this build shows, left to right (AI only where the chat is compiled in).
 //! @return how many were written to out (at most max)
-int32_t menubar_items(MenuBarItem* out, int32_t max);
+int32_t tabs_items(RibbonTab* out, int32_t max);
 
-//! A menu's name as the bar writes it, capitalised as a word processor has them ("File")
-const char* menubar_name(MenuBarItem item);
+//! A tab's name as the row writes it, capitalised as a word processor has them ("Formatting")
+const char* tabs_name(RibbonTab tab);
 
-//! The key that opens item's dropdown (DAWN_KEY_MENU_FILE ... DAWN_KEY_MENU_HELP)
-int32_t menubar_key(MenuBarItem item);
+//! How help names a tab as the way to reach a command by touch ("File ribbon")
+const char* tabs_tap(RibbonTab tab);
 
-//! The menu whose dropdown key opens, or -1 when key opens none
-int32_t menubar_from_key(int32_t key);
+//! The key a tap on tab is (DAWN_KEY_TAB_FILE ...)
+int32_t tabs_key(RibbonTab tab);
 
-//! The menu a group's commands are listed under, or -1 for the format group (the ribbon's)
-int32_t menubar_of_group(CommandGroup group);
+//! The tab key stands for, or -1 when it is no tab's
+int32_t tabs_from_key(int32_t key);
 
-//! How help says to reach a group's commands by touch: "Edit menu"; "ribbon" for the format group
-const char* menubar_tap(CommandGroup group);
-
-//! The menu dir (-1 left, 1 right) from at among the n menus of items, wrapping round; at itself
-//! when it is not among them
-MenuBarItem menubar_neighbour(const MenuBarItem* items, int32_t n, MenuBarItem at, int32_t dir);
-
-//! Where a menu's name goes on the bar, in screen cells
+//! Where a tab goes on the row, in screen cells from the row's left edge
 typedef struct {
-    int32_t col; //!< Cells from the bar's left edge
-    int32_t width; //!< Cells its name takes: its letters times the scale
-} MenuBarSlot;
+    int32_t col; //!< Its first cell (the padding before its name)
+    int32_t width; //!< Its name's letters times the scale, plus TAB_PAD each side
+} TabSlot;
 
-//! Lay the bar's n menus out at scale in room screen cells: each name takes its letters x scale
-//! cells, MENUBAR_GAP scaled cells apart, or (above scale 1) one scaled cell apart when the wider
-//! gap would drop a menu that the narrower keeps; menus are dropped from the right only when even
-//! that does not fit. Tap regions (a name and a cell either side) never overlap.
-//! @param slots receives the kept menus' places (n entries)
-//! @return the number of menus kept, from the left
-int32_t menubar_layout(const MenuBarItem* items, int32_t n, int32_t scale, int32_t room, MenuBarSlot* slots);
+//! Lay the n tabs out side by side at scale in room screen cells, each its name at scale with
+//! TAB_PAD cells either side, touching the next (the padding keeps the names apart).
+//! @param slots receives each tab's place (n entries, all filled)
+//! @return the cells the row of tabs takes, or 0 when they do not all fit room
+int32_t tabs_layout(const RibbonTab* items, int32_t n, int32_t scale, int32_t room, TabSlot* slots);
+
+//! The largest scale up to scale at which all n tabs fit room cells (1 when even that does not)
+int32_t tabs_scale(const RibbonTab* items, int32_t n, int32_t scale, int32_t room);
+
+//! What the right end of the tab row says in at most room columns, the longest of these that fits:
+//! "<alert> · 120 words · 4:59", "<alert> · 120w · 4:59", "<alert> · 4:59", "<alert> · 120w",
+//! "<alert>" (each part only when it is there: alert and timer may be NULL or ""), else "".
+//! The alert ("not saved") always comes first, so a caller can colour it.
+//! @return the columns out takes (its code points)
+int32_t tabs_status(int32_t words, const char* timer, const char* alert, int32_t room, char* out, size_t cap);
 
 // #endregion
 
-// #region Formatting ribbon
+// #region Ribbons
 
-//! Most buttons the ribbon holds
-#define RIBBON_MAX 24
+//! Most buttons one ribbon holds
+#define RIBBON_MAX 32
 
-//! Columns between two ribbon buttons; a button's tap region is its text and one cell either side
-#define RIBBON_GAP 2
+//! Screen cells between two buttons of one section
+#define RIBBON_GAP 1
+
+//! Screen cells between two sections: a gap, the divider's column, a gap
+#define RIBBON_DIVIDER 3
+
+//! Columns of the model button's name (and its state), at the caption's scale
+#define RIBBON_MODEL_COLS 12
+
+//! One button of a tab's ribbon
+typedef struct {
+    const Command* cmd;
+    int32_t section; //!< Which of the tab's sections it is in, 0 first; a divider separates two
+    int32_t width; //!< Screen cells it takes (ribbon_button_cols)
+} RibbonButton;
+
+//! The scale a ribbon button's caption is drawn at under a glyph drawn at scale: half, at least 1
+int32_t ribbon_caption_scale(int32_t scale);
+
+//! Screen rows a ribbon button takes at scale: its glyph's scale rows and its caption's under them
+int32_t ribbon_button_rows(int32_t scale);
+
+//! Columns a button's glyph takes at scale 1: 2 for a Nerd Font icon (it spreads over a space
+//! after it), else its glyph's code points
+int32_t ribbon_glyph_cols(const Command* cmd, bool icons);
+
+//! Screen cells a button takes at scale: its glyph at scale with a cell either side, or its
+//! caption at the caption's scale when that is wider; the model button holds RIBBON_MODEL_COLS
+//! caption columns for the model's name.
+int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons);
+
+//! A tab's buttons in order, with their sections and widths at scale: File is the note group, then
+//! edit and find, then view; Formatting is the format group, then help; AI is the chat and the
+//! model, then undo, title, auto format and read aloud. Commands this build lacks are left out.
+//! @return how many were written to out (at most max)
+int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* out, int32_t max);
+
+//! The first tab whose ribbon holds cmd (left to right), or -1 when none does
+int32_t ribbon_tab_of(const Command* cmd);
+
+//! Screen cells the paging button ("more") takes at scale
+int32_t ribbon_more_cols(int32_t scale);
 
 //! Where a ribbon button goes
 typedef struct {
-    int32_t row; //!< Row of the ribbon, 0 first (screen rows from its top in commands_ribbon_place)
-    int32_t col; //!< Columns from the row's left edge (screen cells in commands_ribbon_place)
-    int32_t width; //!< Columns its text takes (screen cells in commands_ribbon_place)
+    int32_t page; //!< The page it is on, 0 first (always 0 when the ribbon fits at once)
+    int32_t row; //!< Screen rows from the ribbon's top
+    int32_t col; //!< Screen cells from the ribbon's left edge
+    int32_t width; //!< Screen cells it takes
 } RibbonSlot;
 
-//! The ribbon's buttons, left to right (the CMD_GROUP_FORMAT commands in table order).
-//! @return how many were written to out (at most max)
-int32_t commands_ribbon(const Command** out, int32_t max);
+//! What a laid-out ribbon takes
+typedef struct {
+    int32_t rows; //!< Rows of buttons a page shows
+    int32_t pages; //!< 1 when every button shows at once
+    int32_t height; //!< Screen rows the ribbon takes: rows x ribbon_button_rows(scale)
+    int32_t more_col; //!< Where the paging button goes on the first row (pages > 1)
+    int32_t more_width; //!< Its width in screen cells (0 when there is none)
+} RibbonFrame;
 
-//! Lay the ribbon's n buttons out in rows of room columns, RIBBON_GAP apart. A row breaks before
-//! a cluster (inline styles, headings, lists and quote, inserts) that no longer fits on it but
-//! fits on a row of its own; a cluster wider than a row breaks between its buttons.
+//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart within a
+//! section and RIBBON_DIVIDER between two. A row breaks before a section or a cluster (the
+//! format group's inline styles, headings, lists and inserts) that no longer fits on it but fits
+//! on a row of its own, unless packing the buttons wherever they fit takes fewer rows. When the
+//! rows are taller than max_height screen rows, the ribbon pages: as many rows as fit, the room of
+//! each narrowed by a paging button at the right end of the first row.
 //! @param slots receives each button's place (n entries)
-//! @return the number of rows, or 0 when there are no buttons or one is wider than room
-int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots);
-
-//! Lay the ribbon's n buttons out at scale in room screen cells. At scale 1 this is
-//! commands_ribbon_layout. Above it (kitty text sizing) the layout is worked out in scaled cells,
-//! room / scale of them, with the buttons RIBBON_GAP scaled cells apart, or one when that saves a
-//! row; every slot's row, col and width is then multiplied by the scale, so a row of buttons is
-//! scale screen rows and slots are in screen cells.
-//! @param slots receives each button's place in screen rows and cells (n entries)
-//! @return the screen rows the ribbon takes (button rows x scale), 0 when it does not fit
-int32_t commands_ribbon_place(const Command* const* items, int32_t n, int32_t room, int32_t scale, RibbonSlot* slots);
-
-//! Screen rows the ribbon takes at scale in room screen cells (0 when it does not fit at all)
-int32_t commands_ribbon_rows(int32_t room, int32_t scale);
+//! @return false (frame zeroed) when there are no buttons, one is wider than room, or not even one
+//!         row fits max_height
+bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,
+    RibbonSlot* slots, RibbonFrame* frame);
 
 // #endregion
 
@@ -178,15 +216,13 @@ typedef struct {
     int32_t count;
     int32_t selected; //!< Line of the highlighted command, -1 when none can run
     int32_t scroll; //!< First line shown
-    int32_t bar_menu; //!< The MenuBarItem this is the dropdown of; -1 for the full menu (Ctrl+])
     int32_t page; //!< Lines the list showed when last drawn (page up and down step this many)
 } MenuState;
 
-//! Fill m and highlight the first command that enabled() allows. With bar_menu -1, the full menu:
-//! every command but the menu's own and the ribbon's buttons, a heading before each group. With a
-//! MenuBarItem, that menu's dropdown: the commands of its groups (menubar_of_group) in table
-//! order, no headings, "all commands" included.
-void menu_build(MenuState* m, int32_t bar_menu, bool (*enabled)(const Command*));
+//! Fill m with the full menu and highlight the first command that enabled() allows: every command
+//! but the menu's own and the format group's (the Formatting ribbon is their place), a heading
+//! before each group.
+void menu_build(MenuState* m, bool (*enabled)(const Command*));
 
 //! Scaled cells the widest line of m needs: its label, then two cells and its shortcut when it has
 //! one (a heading: its name). Padding around the list is the drawing's.
@@ -217,16 +253,15 @@ typedef struct {
     HelpRowKind kind;
     const char* text; //!< The heading's words or what the item does ("undo"); "" on a blank
     const char* key; //!< The item's key as printed ("^Z"), "" when it has none
-    const char* tap; //!< How to do it by touch: its menu ("Edit menu"), "ribbon" or a gesture ("swipe"); "" when none
-    const char* tap_label; //!< The ribbon's button text ("B"), NULL when none
+    const char* tap; //!< How to do it by touch: its ribbon ("File ribbon") or a gesture ("swipe"); "" when none
 } HelpRow;
 
 //! Most lines help_rows() writes
 #define HELP_ROWS_MAX 96
 
 //! The shortcut pages' lines: a hand-written "move and select" group (the arrow and selection keys
-//! are not commands), then every command under its group's heading in table order with the menu
-//! bar's menu it is in, the format group as the ribbon's buttons, a blank between groups.
+//! are not commands), then every command under its group's heading in table order with the ribbon
+//! it is on (ribbon_tab_of), a blank between groups.
 //! @return how many were written to out (at most max)
 int32_t help_rows(HelpRow* out, int32_t max);
 

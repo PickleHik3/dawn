@@ -97,18 +97,13 @@ void render_conflict(void);
 //! Where render_menu draws the open menu
 typedef struct {
     int32_t scale; //!< The chrome's scale (Layout.ui_scale): the menu is drawn at it where it fits
-    int32_t top; //!< A dropdown's first screen row, under the menu bar
-    int32_t col; //!< A dropdown's menu name's first screen column on the bar
 } MenuPlace;
 
 //! Render the open menu (MODE_MENU) over the note, its lines' shortcuts right-aligned, the
 //! selection highlighted and kept in view (m's scroll and page are updated), commands that cannot
-//! run now drawn dim. A dropdown (m->bar_menu >= 0) hangs from its menu's name on the menu bar, on
-//! the popup's surface with no border, title or headings, at the largest scale up to p->scale at
-//! which all its lines fit below the bar (scale 1 scrolls when even that does not fit). The full
-//! menu (Ctrl+]) is every command under its group's heading, centred: in a bordered box at scale 1,
-//! or on the popup's surface under a title at p->scale when it is above 1 and the menu fits the
-//! width. Each command that can run is a tap on its row; the rest of the menu swallows taps, and
+//! run now drawn dim. The menu (Ctrl+]) is every command under its group's heading, centred: in a
+//! bordered box at scale 1, or on the popup's surface under a title at p->scale when it is above 1
+//! and the menu fits the width. Each command that can run is a tap on its row; the rest of the menu swallows taps, and
 //! a tap anywhere else closes it.
 void render_menu(MenuState* m, const MenuPlace* p);
 

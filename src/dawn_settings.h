@@ -7,7 +7,7 @@
 
 //! Load persisted settings into app state.
 //! Reads <config_dir>/settings.json if present and applies any
-//! recognized keys (theme, timer_mins, nerd_font, meaning_index, ribbon, onboarded, tips_seen) on
+//! recognized keys (theme, timer_mins, nerd_font, meaning_index, onboarded, tips_seen) on
 //! top of existing defaults. Missing or malformed files leave the defaults in place. Applying
 //! meaning_index (embed_set_enabled) is the caller's job.
 void settings_load(void);

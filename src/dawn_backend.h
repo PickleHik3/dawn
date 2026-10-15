@@ -77,17 +77,20 @@ DAWN_ENUM(int32_t) {
     // Commands with no physical key of their own (dawn_commands): a tap region or the command
     // menu synthesises them, and the writing screen handles them like any other key.
     DAWN_KEY_CMD_MENU, //!< Open the command menu (also Ctrl+])
-    DAWN_KEY_CMD_RIBBON, //!< Show or hide the formatting ribbon
     DAWN_KEY_CMD_CHEATSHEET, //!< Open help on its Markdown cheatsheet page
     DAWN_KEY_CMD_TOUR, //!< Open the first-run tour again (MODE_TOUR)
-    // The menu bar's menus, in MenuBarItem order (dawn_commands.h): a tap on a menu's name opens
-    // its dropdown; the menu is key - DAWN_KEY_MENU_FILE.
-    DAWN_KEY_MENU_FILE,
-    DAWN_KEY_MENU_EDIT,
-    DAWN_KEY_MENU_VIEW,
-    DAWN_KEY_MENU_AI,
-    DAWN_KEY_MENU_HELP,
-    // The formatting ribbon's buttons, in FormatOp order (dawn_format.h): the op is
+    DAWN_KEY_CMD_THEME, //!< Switch between the light and the dark theme
+    // The tab row's tabs, in RibbonTab order (dawn_commands.h): a tap on a tab drops its ribbon,
+    // or folds it away when it is the open one; the tab is key - DAWN_KEY_TAB_FILE.
+    DAWN_KEY_TAB_FILE,
+    DAWN_KEY_TAB_FORMAT,
+    DAWN_KEY_TAB_AI,
+    DAWN_KEY_RIBBON_MORE, //!< The open ribbon's next page (its "more" button, when it pages)
+    // The AI ribbon's actions (dawn_chat.c, dawn.c)
+    DAWN_KEY_AI_MODEL, //!< Open the chat's model picker
+    DAWN_KEY_AI_TITLE, //!< Ask the model for the note's title now
+    DAWN_KEY_AI_FORMAT, //!< Ask the model to restructure the note into well-formed Markdown
+    // The Formatting ribbon's styles, in FormatOp order (dawn_format.h): the op is
     // key - DAWN_KEY_FMT_BOLD.
     DAWN_KEY_FMT_BOLD,
     DAWN_KEY_FMT_ITALIC,
