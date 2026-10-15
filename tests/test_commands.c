@@ -61,7 +61,7 @@ static void test_entries(void)
         // Labels and captions are lower case, as dawn writes its hints.
         for (const char* p = c->label; *p; p++)
             CHECK(!(*p >= 'A' && *p <= 'Z'));
-        CHECK(c->caption && c->caption[0] && cols(c->caption) <= 10);
+        CHECK(c->caption && c->caption[0] && cols(c->caption) <= 9); // a ribbon's buttons are as wide as its widest
         for (const char* p = c->caption; *p; p++)
             CHECK(!(*p >= 'A' && *p <= 'Z'));
         // Every button has a face of its own, short, and never bare Markdown syntax.

@@ -7441,6 +7441,53 @@ static void handle_input(void)
 
 // #region Engine API
 
+//! Whether any of a directory listing's names says "nerd", in any case
+static bool names_say_nerd(char** names, int32_t count)
+{
+    for (int32_t i = 0; i < count; i++) {
+        for (const char* p = names[i]; *p; p++) {
+            int32_t k = 0;
+            while (k < 4 && p[k] && (p[k] | 0x20) == "nerd"[k])
+                k++;
+            if (k == 4)
+                return true;
+        }
+    }
+    return false;
+}
+
+//! Whether the launcher's terminal has a Nerd Font to draw the ribbons' icons with: a file under
+//! ~/.termux/fonts/ (or one directory down, where the launcher puts the symbols when a font is
+//! picked: fonts/symbols/SymbolsNerdFontMono.ttf) with "nerd" in its name. Without one every icon
+//! is a missing-glyph box. Read once at start.
+static bool nerd_font_installed(void)
+{
+    const char* home = DAWN_BACKEND(app)->home_dir();
+    char dir[PATH_MAX];
+    if (!home || !home[0] || snprintf(dir, sizeof(dir), "%s/.termux/fonts", home) >= (int)sizeof(dir))
+        return false;
+    char** names = NULL;
+    int32_t count = 0;
+    if (!DAWN_BACKEND(app)->list_dir(dir, &names, &count))
+        return false;
+    bool found = names_say_nerd(names, count);
+    for (int32_t i = 0; i < count && !found; i++) {
+        char sub[PATH_MAX];
+        char** inner = NULL;
+        int32_t n = 0;
+        if (!path_join(sub, sizeof(sub), dir, names[i]) || !DAWN_BACKEND(app)->list_dir(sub, &inner, &n))
+            continue; // a file, not a directory
+        found = names_say_nerd(inner, n);
+        for (int32_t j = 0; j < n; j++)
+            free(inner[j]);
+        free(inner);
+    }
+    for (int32_t i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
+    return found;
+}
+
 bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
 {
     // Header rows in the block cache follow the terminal: scaled only with OSC 66 text sizing.
@@ -7462,12 +7509,13 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
     {
         // The launcher sets TERM_PROGRAM=termux-launcher; inside tmux TERM_PROGRAM is "tmux", but
         // TERMUX_LAUNCHER_PANE (set by the launcher alone) survives. Nerd Font icons default on
-        // only there, where the font is known to be installed; settings.json's "nerd_font"
-        // overrides that either way, and never launcher_term.
+        // only there, and only once the user picked a font that brought the Nerd symbols
+        // (nerd_font_installed); settings.json's "nerd_font" overrides that either way, and never
+        // launcher_term.
         const char* prog = getenv("TERM_PROGRAM");
         const char* pane = getenv("TERMUX_LAUNCHER_PANE");
         app.launcher_term = (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
-        app.nerd_font = app.launcher_term;
+        app.nerd_font = app.launcher_term && nerd_font_installed();
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
     app.onboarded = false; // the tour shows until settings.json says "onboarded": true

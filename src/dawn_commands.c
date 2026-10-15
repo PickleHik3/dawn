@@ -72,14 +72,14 @@ static const Command COMMANDS[] = {
     { "heading 2", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H2, "", CMD_NEEDS_EDIT, "heading 2", "H2", 0xF026C },
     { "heading 3", CMD_GROUP_FORMAT, DAWN_KEY_FMT_H3, "", CMD_NEEDS_EDIT, "heading 3", "H3", 0xF026D },
     { "bullet list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_BULLET, "", CMD_NEEDS_EDIT, "bullets", "•", 0xF0279 },
-    { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, "numbered", "123", 0xF027B },
-    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "☑", 0xF0135 },
+    { "numbered list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_NUMBERED, "", CMD_NEEDS_EDIT, "numbered", "1.", 0xF027B },
+    { "task list", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TASK, "", CMD_NEEDS_EDIT, "task", "☐", 0xF0135 },
     { "quote", CMD_GROUP_FORMAT, DAWN_KEY_FMT_QUOTE, "", CMD_NEEDS_EDIT, "quote", "❝", 0xF027E },
     { "link", CMD_GROUP_FORMAT, DAWN_KEY_FMT_LINK, "", CMD_NEEDS_EDIT, "link", "↗", 0xF0337 },
     { "image", CMD_GROUP_FORMAT, DAWN_KEY_FMT_IMAGE, "", CMD_NEEDS_EDIT, "image", "▣", 0xF02E9 },
     { "table", CMD_GROUP_FORMAT, DAWN_KEY_FMT_TABLE, "", CMD_NEEDS_EDIT, "table", "▦", 0xF04EB },
     { "horizontal rule", CMD_GROUP_FORMAT, DAWN_KEY_FMT_RULE, "", CMD_NEEDS_EDIT, "rule", "—", 0xF0374 },
-    { "code block", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE_BLOCK, "", CMD_NEEDS_EDIT, "code block", "{}", 0xF0169 },
+    { "code block", CMD_GROUP_FORMAT, DAWN_KEY_FMT_CODE_BLOCK, "", CMD_NEEDS_EDIT, "block", "{}", 0xF0169 },
 
     // view
     { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, "focus", "◎", 0xF0208 },
@@ -95,7 +95,7 @@ static const Command COMMANDS[] = {
 #ifdef USE_LIBAI
     // ai
     { "chat", CMD_GROUP_AI, 31, "^/", CMD_NEEDS_MODIFY | CMD_NEEDS_AI, "chat", "✦", 0xF0369 },
-    { "choose the model", CMD_GROUP_AI, DAWN_KEY_AI_MODEL, "", CMD_NEEDS_AI, "model", "AI", 0xF061A },
+    { "choose the model", CMD_GROUP_AI, DAWN_KEY_AI_MODEL, "", CMD_NEEDS_AI, "model", "◇", 0xF061A },
     { "give the note a title", CMD_GROUP_AI, DAWN_KEY_AI_TITLE, "", CMD_NEEDS_MODIFY | CMD_NEEDS_AI, "title", "T", 0xF05F4 },
     { "auto format", CMD_GROUP_AI, DAWN_KEY_AI_FORMAT, "", CMD_NEEDS_EDIT | CMD_NEEDS_AI, "format", "≣", 0xF0068 },
 #ifdef DAWN_HAS_SPEAK
