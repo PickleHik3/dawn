@@ -86,6 +86,46 @@ static void test_bar(void)
     CHECK(commands_bar_fit(w, 4, 4, 3, 11) == 1);
     CHECK(commands_bar_fit(w, 4, 4, 3, 10) == 0); // "more" alone
     CHECK(commands_bar_fit(w, 4, 4, 3, 2) == 0);
+
+    // Scale 1 is the bar as above: the three-cell gap, labels at their own width.
+    BarSlot b[5];
+    CHECK(commands_bar_gap(1) == 3);
+    CHECK(commands_bar_layout(w, 4, 4, 1, 28, b) == 4);
+    CHECK(b[0].col == 0 && b[1].col == 7 && b[2].col == 14 && b[3].col == 19 && b[4].col == 24);
+    CHECK(b[4].width == 4);
+
+    // Scale 2 (kitty text sizing): every label twice as wide, two cells between them. The phone
+    // pane (53 columns) has a 45-cell note, and "undo find Aa AI more" takes 32 + 4 x 2 = 40.
+    CHECK(commands_bar_gap(2) == 2);
+    CHECK(commands_bar_layout(w, 4, 4, 2, 45, b) == 4);
+    CHECK(b[0].col == 0 && b[0].width == 8);
+    CHECK(b[1].col == 10 && b[1].width == 8);
+    CHECK(b[2].col == 20 && b[2].width == 4);
+    CHECK(b[3].col == 26 && b[3].width == 4);
+    CHECK(b[4].col == 32 && b[4].width == 8);
+    CHECK(commands_bar_layout(w, 4, 4, 2, 40, b) == 4);
+    CHECK(commands_bar_layout(w, 4, 4, 2, 39, b) == 3); // AI goes first
+    CHECK(b[3].col == 26 && b[3].width == 8); // "more" right after "Aa"
+    CHECK(commands_bar_layout(w, 4, 4, 2, 8, b) == 0); // "more" alone
+    CHECK(b[0].col == 0 && b[0].width == 8);
+    CHECK(commands_bar_layout(w, 4, 4, 2, 7, b) == -1); // not even "more"
+
+    // At either scale every item stays inside the row, and a tap region (the text and a cell
+    // either side) never overlaps the next one's.
+    for (int32_t scale = 1; scale <= 2; scale++) {
+        for (int32_t room = 4 * scale; room <= 70; room++) {
+            int32_t kept = commands_bar_layout(w, 4, 4, scale, room, b);
+            CHECK(kept >= 0 && kept <= 4);
+            if (kept < 0)
+                continue;
+            CHECK(b[kept].col + b[kept].width <= room);
+            CHECK(b[kept].width == 4 * scale);
+            for (int32_t i = 0; i < kept; i++) {
+                CHECK(b[i].width == w[i] * scale);
+                CHECK((b[i + 1].col - 1) - (b[i].col + b[i].width) >= 1);
+            }
+        }
+    }
 }
 
 static void test_ribbon(void)
@@ -119,7 +159,7 @@ static void test_ribbon(void)
     CHECK(commands_ribbon_layout(items, n, 66, s) == 1);
     CHECK(s[0].col == 0 && s[n - 1].col == 62 && s[n - 1].width == 4);
     CHECK(s[7].width == 1); // the bullet is one cell, three bytes
-    CHECK(commands_ribbon_rows(80) == 1);
+    CHECK(commands_ribbon_rows(80, 1) == 1);
 
     // The phone pane's note is 45 columns: the inserts go down whole, the rest stays up.
     CHECK(commands_ribbon_layout(items, n, 45, s) == 2);
@@ -127,7 +167,9 @@ static void test_ribbon(void)
         CHECK(s[i].row == (i >= 11 ? 1 : 0));
     CHECK(s[10].col + s[10].width == 37);
     CHECK(s[11].col == 0);
-    CHECK(commands_ribbon_rows(65) == 2);
+    CHECK(commands_ribbon_rows(65, 1) == 2);
+    CHECK(commands_ribbon_place(items, n, 45, 1, s) == 2); // scale 1 is the layout above
+    CHECK(s[11].row == 1 && s[11].col == 0 && s[10].col == 36);
 
     // Narrower than a cluster: it breaks between buttons. Every button stays inside the row and
     // RIBBON_GAP apart from the one before it on its row, so tap regions never overlap.
@@ -145,6 +187,45 @@ static void test_ribbon(void)
     }
     CHECK(commands_ribbon_layout(items, n, 4, s) == 0); // "table" does not fit
     CHECK(commands_ribbon_layout(items, 0, 40, s) == 0);
+
+    // Scale 2 (kitty text sizing): the phone pane's 45-cell note is 22 scaled cells. Three rows
+    // of buttons, six screen rows: the styles and headings, the lists with "link", then the rest.
+    // Slots come back in screen rows and cells.
+    CHECK(commands_ribbon_place(items, n, 45, 2, s) == 6);
+    CHECK(commands_ribbon_rows(45, 2) == 6);
+    for (int32_t i = 0; i < n; i++)
+        CHECK(s[i].row == (i <= 6 ? 0 : i <= 11 ? 2 : 4));
+    CHECK(s[1].col == 6 && s[1].width == 2); // two scaled cells after "B"
+    CHECK(s[6].col == 40 && s[6].col + s[6].width == 44); // "H3"
+    CHECK(s[7].col == 0 && s[11].col == 30 && s[11].width == 8); // "•" ... "link"
+    CHECK(s[12].col == 0 && s[15].col == 34 && s[15].col + s[15].width == 42); // "img" ... "code"
+    // The whole 53-column pane (26 scaled cells) also takes three rows.
+    CHECK(commands_ribbon_rows(53, 2) == 6);
+
+    // At 36 cells (18 scaled) the two-cell gap would take five rows; one scaled cell takes three.
+    CHECK(commands_ribbon_layout(items, n, 18, s) == 5);
+    CHECK(commands_ribbon_place(items, n, 36, 2, s) == 6);
+    CHECK(s[1].col == 4 && s[4].row == 0 && s[7].row == 2 && s[13].row == 4);
+
+    // Every scaled button sits on even cells inside the note, two screen rows to a row of
+    // buttons, with tap regions (the text and a cell either side) that never overlap, and the
+    // ribbon never takes more rows than the two-cell layout of the same scaled width.
+    for (int32_t room = 10; room <= 140; room++) {
+        int32_t rows = commands_ribbon_place(items, n, room, 2, s);
+        CHECK(rows >= 2 && rows % 2 == 0);
+        CHECK(rows / 2 <= commands_ribbon_rows(room / 2, 1));
+        for (int32_t i = 0; i < n; i++) {
+            CHECK(s[i].col % 2 == 0 && s[i].width % 2 == 0 && s[i].row % 2 == 0);
+            CHECK(s[i].col >= 0 && s[i].col + s[i].width <= room);
+            CHECK(s[i].row >= 0 && s[i].row < rows);
+            if (i > 0 && s[i].row == s[i - 1].row)
+                CHECK((s[i].col - 1) - (s[i - 1].col + s[i - 1].width) >= 1);
+            if (i > 0)
+                CHECK(s[i].row >= s[i - 1].row);
+        }
+    }
+    CHECK(commands_ribbon_place(items, n, 9, 2, s) == 0); // "table" needs ten cells
+    CHECK(commands_ribbon_place(items, 0, 40, 2, s) == 0);
 }
 
 static bool all_on(const Command* c)

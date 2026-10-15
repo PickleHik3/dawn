@@ -66,6 +66,28 @@ const char* commands_bar_label(const Command* cmd);
 //! @return the number of items (not counting "more") that fit
 int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32_t gap, int32_t room);
 
+//! Screen cells between two action bar items at scale: three at scale 1, two (one scaled space)
+//! at scale 2 and above
+int32_t commands_bar_gap(int32_t scale);
+
+//! Where an action bar item goes, in screen cells
+typedef struct {
+    int32_t col; //!< Cells from the bar's left edge
+    int32_t width; //!< Cells its text takes: its label's columns times the scale
+} BarSlot;
+
+//! Lay the action bar out at scale (1, or 2 where kitty text sizing draws it twice the size, two
+//! rows tall): each label takes widths[i] x scale screen cells, commands_bar_gap(scale) apart,
+//! and items are dropped from the right (commands_bar_fit on the scaled widths) so that "more"
+//! always fits at the end.
+//! @param widths each item's label width in columns at scale 1
+//! @param more_w "more"'s label width at scale 1
+//! @param room the bar's width in screen cells
+//! @param slots receives the kept items' places, then "more"'s (the return value + 1 entries;
+//!              room for n + 1)
+//! @return the number of items (not counting "more") that fit, or -1 when "more" alone does not
+int32_t commands_bar_layout(const int32_t* widths, int32_t n, int32_t more_w, int32_t scale, int32_t room, BarSlot* slots);
+
 // #region Formatting ribbon
 
 //! Most buttons the ribbon holds
@@ -76,9 +98,9 @@ int32_t commands_bar_fit(const int32_t* widths, int32_t n, int32_t more_w, int32
 
 //! Where a ribbon button goes
 typedef struct {
-    int32_t row; //!< Row of the ribbon, 0 first
-    int32_t col; //!< Columns from the row's left edge
-    int32_t width; //!< Columns its text takes
+    int32_t row; //!< Row of the ribbon, 0 first (screen rows from its top in commands_ribbon_place)
+    int32_t col; //!< Columns from the row's left edge (screen cells in commands_ribbon_place)
+    int32_t width; //!< Columns its text takes (screen cells in commands_ribbon_place)
 } RibbonSlot;
 
 //! The ribbon's buttons, left to right (the CMD_GROUP_FORMAT commands in table order).
@@ -92,8 +114,17 @@ int32_t commands_ribbon(const Command** out, int32_t max);
 //! @return the number of rows, or 0 when there are no buttons or one is wider than room
 int32_t commands_ribbon_layout(const Command* const* items, int32_t n, int32_t room, RibbonSlot* slots);
 
-//! Rows the ribbon takes in room columns (0 when it does not fit at all)
-int32_t commands_ribbon_rows(int32_t room);
+//! Lay the ribbon's n buttons out at scale in room screen cells. At scale 1 this is
+//! commands_ribbon_layout. At scale 2 (kitty text sizing) the layout is worked out in scaled cells,
+//! room / 2 of them, with the buttons RIBBON_GAP scaled cells apart, or one when that saves a row;
+//! every slot's row, col and width is then multiplied by the scale, so a row of buttons is two
+//! screen rows and slots are in screen cells.
+//! @param slots receives each button's place in screen rows and cells (n entries)
+//! @return the screen rows the ribbon takes (button rows x scale), 0 when it does not fit
+int32_t commands_ribbon_place(const Command* const* items, int32_t n, int32_t room, int32_t scale, RibbonSlot* slots);
+
+//! Screen rows the ribbon takes at scale in room screen cells (0 when it does not fit at all)
+int32_t commands_ribbon_rows(int32_t room, int32_t scale);
 
 // #endregion
 
