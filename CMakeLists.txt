@@ -207,6 +207,31 @@ if(NOT EMSCRIPTEN)
         target_link_libraries(test-embed PRIVATE m)
     endif()
 
+    # Test target for the formatting commands (dawn_format), linked with the gap buffer alone
+    add_executable(test-format
+        tests/test_format.c
+        src/dawn_format.c
+        src/dawn_gap.c
+    )
+
+    target_include_directories(test-format PRIVATE src third-party)
+
+    if(MSVC)
+        target_compile_options(test-format PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-format PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-format PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-format PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
+
+    target_link_libraries(test-format PRIVATE utf8proc)
+
     # Test target for the storage layer: dawn_fsio (atomic writes, reads, mkdir -p, no-replace
     # moves, quarantine), the note naming rules (dawn_notepath) and the history CRDT, each linked
     # alone with stubs for app and its helpers
@@ -230,6 +255,78 @@ if(NOT EMSCRIPTEN)
             target_link_options(test-store PRIVATE ${SANITIZER_FLAGS})
         endif()
         target_link_libraries(test-store PRIVATE m)
+    endif()
+
+    # Test target for the one-shot tips' seen set (dawn_tips) and its "tips_seen" array in
+    # settings.json; pure, so it links alone with cJSON
+    add_executable(test-tips
+        tests/test_tips.c
+        src/dawn_tips.c
+        third-party/cJSON.c
+    )
+
+    target_include_directories(test-tips PRIVATE src third-party)
+
+    if(MSVC)
+        target_compile_options(test-tips PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-tips PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-tips PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-tips PRIVATE ${SANITIZER_FLAGS})
+        endif()
+        target_link_libraries(test-tips PRIVATE m)
+    endif()
+
+    # Test target for the hit-region registry (dawn_hit), which turns taps into keys; pure, so
+    # it links alone
+    add_executable(test-hit
+        tests/test_hit.c
+        src/dawn_hit.c
+    )
+
+    target_include_directories(test-hit PRIVATE src)
+
+    if(MSVC)
+        target_compile_options(test-hit PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-hit PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-hit PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-hit PRIVATE ${SANITIZER_FLAGS})
+        endif()
+    endif()
+
+    # Test target for the command table (dawn_commands) the action bar and the command menu read;
+    # pure, so it links alone. Built with the AI entries in, so the fullest table is checked.
+    add_executable(test-commands
+        tests/test_commands.c
+        src/dawn_commands.c
+    )
+
+    target_include_directories(test-commands PRIVATE src)
+    target_compile_definitions(test-commands PRIVATE USE_LIBAI DAWN_HAS_SPEAK)
+
+    if(MSVC)
+        target_compile_options(test-commands PRIVATE /W4 /WX /utf-8)
+        target_compile_definitions(test-commands PRIVATE _CRT_SECURE_NO_WARNINGS)
+    else()
+        target_compile_options(test-commands PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -Wunused
+            $<$<C_COMPILER_ID:AppleClang,Clang>:-Wno-keyword-macro -Wno-newline-eof -Wno-deprecated-declarations>
+            ${SANITIZER_FLAGS}
+        )
+        if(SANITIZER_FLAGS)
+            target_link_options(test-commands PRIVATE ${SANITIZER_FLAGS})
+        endif()
     endif()
 else()
     file(GLOB WEB_SRCS src/dawn*.c)

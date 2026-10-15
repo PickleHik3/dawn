@@ -231,17 +231,31 @@ cat document.md | dawn -P
 
 | Key | Action |
 |:----|:-------|
-| `Ctrl+F` | Toggle focus mode |
-| `Ctrl+R` | Toggle plain text (raw markdown) |
-| `Ctrl+L` | Table of contents |
-| `Ctrl+S` | Search |
-| `Ctrl+N` | Jump to/create footnote |
-| `Ctrl+G` | Edit image dimensions |
-| `Ctrl+E` | Edit document title |
+| `Ctrl+O` | Help: every shortcut, a Markdown cheatsheet, recent activity |
+| `Ctrl+]` | Command menu: every command with its shortcut |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` | Redo |
-| `Ctrl+H` | Show all shortcuts |
+| `Ctrl+S` | Search |
+| `Ctrl+L` | Table of contents |
+| `Ctrl+N` | Jump to/create footnote |
+| `Ctrl+F` | Toggle focus mode |
+| `Ctrl+R` | Toggle plain text (raw markdown) |
+| `Ctrl+G` | Edit document title and details |
+| `Ctrl+E` | Edit image |
+| `Ctrl+P` | Pause the timer |
+| `Ctrl+T` | Add five minutes to the timer |
+| `Ctrl+/` | AI chat (AI builds) |
+| `Ctrl+Q` | Read aloud; any key stops (AI builds) |
 | `Esc` | Close panel/modal |
+
+### On a phone
+
+Everything on screen is tappable. At phone width an action bar sits under the note:
+`undo  find  Aa  AI  more`. `Aa` opens the formatting ribbon, which types the Markdown for you
+(bold, headings, lists, links, tables). `more` opens the menu, which lists every command with its
+shortcut. Help, also in the menu, shows each task with its key and its tap, and has a Markdown
+cheatsheet: what you type and what you get. Tap to move the cursor, double-tap to select a word,
+hold and drag to select more.
 
 ---
 

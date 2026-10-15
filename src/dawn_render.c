@@ -3,7 +3,9 @@
 #include "dawn_render.h"
 #include "dawn_block.h"
 #include "dawn_gap.h"
+#include "dawn_hit.h"
 #include "dawn_image.h"
+#include "dawn_md.h"
 #include "dawn_modal.h"
 #include "dawn_notepath.h"
 #include "dawn_notice.h"
@@ -65,15 +67,26 @@ void render_clear(void)
     }
 }
 
+//! The column render_center_text() starts text at
+static int32_t center_col(const char* text)
+{
+    int32_t col = (app.cols - (int32_t)strlen(text) + 2) / 2;
+    return col < 1 ? 1 : col;
+}
+
 void render_center_text(int32_t row, const char* text, DawnColor fg)
 {
-    int32_t len = (int32_t)strlen(text);
-    int32_t col = (app.cols - len + 2) / 2;
-    if (col < 1)
-        col = 1;
-    move_to(row, col);
+    move_to(row, center_col(text));
     set_fg(fg);
     platform_write_str(text);
+}
+
+//! render_center_text() for a hint line, whose hints ("[esc] back") are then tappable
+static void render_center_hints(int32_t row, const char* text, DawnColor fg)
+{
+    render_center_text(row, text, fg);
+    int32_t col = center_col(text);
+    hit_add_hints(col, row, text, app.cols - col + 1, true);
 }
 
 void render_popup_box(int32_t width, int32_t height, int32_t* out_top, int32_t* out_left)
@@ -203,6 +216,14 @@ void render_welcome(void)
     render_text_at(row, col2, "?", get_accent());
     render_text_at(row, col2 + 2, " help", get_dim());
 
+    // Each action, key and word, is also a tap on that key.
+    hit_add(col1, actions_row, 12, 1, HIT_KEY, '\r', 0); // "enter  write"
+    hit_add(col2, actions_row, 10, 1, HIT_KEY, 'h', 0); // "h  history"
+    hit_add(col1, actions_row + 2, 12, 1, HIT_KEY, 't', 0); // "t      timer"
+    hit_add(col2, actions_row + 2, 8, 1, HIT_KEY, 'd', 0); // "d  theme"
+    hit_add(col1, actions_row + 4, 11, 1, HIT_KEY, 'q', 0); // "q      quit"
+    hit_add(col2, actions_row + 4, 7, 1, HIT_KEY, '?', 0); // "?  help"
+
     // The status panel (dawn_status) goes in the bottom right of the space under the actions, a
     // blank row below them where there is room, at most four rows. It also says "ai ready" here.
     int32_t panel_last = bottom_row - 1;
@@ -219,13 +240,13 @@ void render_welcome(void)
 
     // Left: timer setting
     set_fg(get_dim());
-    if (app.timer_mins == 0) {
-        platform_write_str("no timer");
-    } else {
-        char timer_str[16];
+    char timer_str[16];
+    if (app.timer_mins == 0)
+        snprintf(timer_str, sizeof(timer_str), "no timer");
+    else
         snprintf(timer_str, sizeof(timer_str), "%d min", app.timer_mins);
-        platform_write_str(timer_str);
-    }
+    platform_write_str(timer_str);
+    hit_add(content_left, bottom_row, (int32_t)strlen(timer_str), 1, HIT_KEY, 't', 0);
 
     // Right: theme
     const char* theme_str = app.theme == THEME_DARK ? "dark" : "light";
@@ -233,7 +254,117 @@ void render_welcome(void)
     move_to(bottom_row, theme_col);
     set_fg(get_dim());
     platform_write_str(theme_str);
+    hit_add(theme_col, bottom_row, (int32_t)strlen(theme_str), 1, HIT_KEY, 'd', 0);
 }
+
+// #region First-run tour
+
+//! Lines of text on a tour card
+#define TOUR_LINES 3
+
+//! One card of the first-run tour: a word for its title and three short lines
+typedef struct {
+    const char* title;
+    const char* lines[TOUR_LINES];
+} TourCard;
+
+//! The tour's cards in order. Every line fits a phone held upright (53 columns) without wrapping.
+static const TourCard TOUR_CARDS[] = {
+    { "write",
+        { "press enter on the start screen to begin a note.",
+            "dawn saves as you type. esc brings you back.",
+            "history (h) lists your notes." } },
+    { "format",
+        { "tap Aa above the keyboard: bold, headings, lists,",
+            "or type Markdown: **bold**, # heading, - list.",
+            "? opens help, with a Markdown cheatsheet." } },
+#if HAS_LIBAI
+    { "ask",
+        { "tap AI to talk about your note, ask for a rewrite,",
+            "or have it read aloud.",
+            "it can edit the note; ctrl+z undoes." } },
+#endif
+};
+
+int32_t render_tour_cards(void)
+{
+    return (int32_t)(sizeof(TOUR_CARDS) / sizeof(TOUR_CARDS[0]));
+}
+
+void render_tour(void)
+{
+    render_clear();
+
+    int32_t cards = render_tour_cards();
+    int32_t card = app.tour_card < 0 ? 0 : (app.tour_card >= cards ? cards - 1 : app.tour_card);
+    const TourCard* c = &TOUR_CARDS[card];
+    bool last = card == cards - 1;
+
+    // The welcome screen's margins. The card sits centred above the footer: title, text, dots,
+    // with a blank row between them where there is room; below 16 rows (a phone with its keyboard
+    // up has about 12) the blank rows go, never the text.
+    int32_t margin_v = app.rows > 30 ? 3 : 2;
+    int32_t top_row = margin_v + 1;
+    int32_t footer_row = app.rows - margin_v;
+    int32_t gap = app.rows >= 16 ? 1 : 0;
+    int32_t height = 1 + gap + TOUR_LINES + gap + 1;
+    int32_t row = top_row + (footer_row - 1 - top_row - height) / 2;
+    if (row < 1)
+        row = 1;
+    if (footer_row < row + height)
+        footer_row = row + height;
+
+    // Title, in the welcome logo's colour
+    move_to(row, center_col(c->title));
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str(c->title);
+    platform_reset_attrs();
+    set_bg(get_bg());
+
+    // The text, dim, as one block centred on its widest line (cut at the screen's edge)
+    int32_t room = app.cols - 2 > 1 ? app.cols - 2 : 1;
+    int32_t widest = 0;
+    for (int32_t i = 0; i < TOUR_LINES; i++) {
+        int32_t w = (int32_t)strlen(c->lines[i]);
+        if (w > widest)
+            widest = w;
+    }
+    if (widest > room)
+        widest = room;
+    int32_t left = (app.cols - widest + 2) / 2;
+    if (left < 1)
+        left = 1;
+    row += 1 + gap;
+    set_fg(get_dim());
+    for (int32_t i = 0; i < TOUR_LINES; i++) {
+        size_t len = strlen(c->lines[i]);
+        move_to(row + i, left);
+        DAWN_BACKEND(app)->write_str(c->lines[i], len < (size_t)room ? len : (size_t)room);
+    }
+
+    // Dots, the card shown filled: "• ○ ○"
+    row += TOUR_LINES + gap;
+    int32_t dots_col = (app.cols - (cards * 2 - 1) + 2) / 2;
+    move_to(row, dots_col < 1 ? 1 : dots_col);
+    for (int32_t i = 0; i < cards; i++) {
+        if (i > 0)
+            platform_write_char(' ');
+        set_fg(i == card ? get_accent() : get_dim());
+        platform_write_str(i == card ? "•" : "○");
+    }
+
+    // The footer's hints are taps on their keys. Opened again from a command, esc closes it and
+    // the last card's enter goes back to the note.
+    const char* hint;
+    if (last)
+        hint = app.tour_pushed ? "[enter] done" : "[enter] start writing";
+    else
+        hint = app.tour_pushed ? "[enter] next   [esc] close" : "[enter] next   [esc] skip";
+    render_center_hints(footer_row, hint, get_dim());
+}
+
+// #endregion
 
 void render_timer_select(void)
 {
@@ -256,9 +387,11 @@ void render_timer_select(void)
         }
         render_center_text(cy - 2 + (int32_t)i, buf,
             (int32_t)i == app.preset_idx ? get_accent() : get_dim());
+        // A tap anywhere on the row picks it and confirms, as j/k then enter would.
+        hit_add(1, cy - 2 + (int32_t)i, app.cols, 1, HIT_ROW, '\r', (int32_t)i);
     }
 
-    render_center_text(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
+    render_center_hints(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
 }
 
 void render_style_select(void)
@@ -279,9 +412,10 @@ void render_style_select(void)
             i == (int32_t)app.style ? "<" : " ");
         render_center_text(cy - 1 + i * 2, buf, i == (int32_t)app.style ? get_accent() : get_dim());
         render_center_text(cy + i * 2, descs[i], get_dim());
+        hit_add(1, cy - 1 + i * 2, app.cols, 2, HIT_ROW, '\r', i); // the name and its line
     }
 
-    render_center_text(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
+    render_center_hints(app.rows - 2, "[j/k] select   [enter] confirm   [esc] back", get_dim());
 }
 
 //! "2 min ago" / "3 hr ago" / "just now" for the activity list. then_sec/now_sec are both
@@ -305,7 +439,90 @@ static void format_relative_time(int64_t then_sec, int64_t now_sec, char* buf, s
     }
 }
 
-//! MODE_HELP's second page: the activity list (notice_history()), newest first, with relative
+// #region Help
+
+//! The help box's widest: room for the shortcut pages' three columns with two spaces around each
+#define HELP_WIDTH 54
+
+//! Tallest the help box grows
+#define HELP_HEIGHT 26
+
+//! What tab says it turns to, by page ("[tab] markdown")
+static const char* const HELP_PAGE_NAMES[HELP_PAGE_COUNT] = {
+    [HELP_PAGE_SHORTCUTS] = "shortcuts",
+    [HELP_PAGE_CHEATSHEET] = "markdown",
+    [HELP_PAGE_ACTIVITY] = "activity",
+    [HELP_PAGE_MEANING] = "meaning",
+};
+
+//! Display columns of a UTF-8 string, counting each code point as one column
+static int32_t help_cols(const char* s)
+{
+    int32_t n = 0;
+    for (; *s; s++) {
+        if (((unsigned char)*s & 0xC0) != 0x80)
+            n++;
+    }
+    return n;
+}
+
+bool render_help_neighbour(int32_t dir, HelpPage* page, int32_t* screen)
+{
+    int32_t p = (int32_t)app.help_page;
+    int32_t n = render_help_screens(app.help_page);
+    int32_t s = (app.help_screen < n ? app.help_screen : n - 1) + dir;
+    for (;;) {
+        if (s >= 0 && s < n) {
+            *page = (HelpPage)p;
+            *screen = s;
+            return true;
+        }
+        p += dir;
+        if (p < 0 || p >= HELP_PAGE_COUNT)
+            return false;
+        n = render_help_screens((HelpPage)p);
+        s = dir > 0 ? 0 : n - 1;
+    }
+}
+
+//! A help page's footer on row, centred in the box: [<-] back where there is a page before, [tab]
+//! and the page it turns to where there is one after ("next" within a page), and [esc] close.
+//! Each item has a slot of its own, the same on every screen and left blank where the item has
+//! nothing to do, so a finger tapping one spot turns screen after screen. Its hints are tappable
+//! up to the box's right border.
+static void help_footer(int32_t row, int32_t left, int32_t width)
+{
+    HelpPage page;
+    int32_t screen;
+    bool back = render_help_neighbour(-1, &page, &screen);
+    bool next = render_help_neighbour(1, &page, &screen);
+    const char* next_name = !next ? "" : page == app.help_page ? "next" : HELP_PAGE_NAMES[page];
+
+    // The tab slot holds the longest name tab can turn to (any page but the first).
+    int32_t name_w = (int32_t)strlen("next");
+    for (int32_t p = 1; p < HELP_PAGE_COUNT; p++) {
+        if ((int32_t)strlen(HELP_PAGE_NAMES[p]) > name_w)
+            name_w = (int32_t)strlen(HELP_PAGE_NAMES[p]);
+    }
+    char tab[32] = "";
+    if (next)
+        snprintf(tab, sizeof(tab), "[tab] %s", next_name);
+
+    char footer[96];
+    snprintf(footer, sizeof(footer), "%-11s%-*s[esc] close", back ? "[<-] back" : "", (int)(6 + name_w + 2), tab);
+    if ((int32_t)strlen(footer) > width - 4) // too narrow for the words: the keys alone still turn and close
+        snprintf(footer, sizeof(footer), "%-6s%-7s[esc]", back ? "[<-]" : "", next ? "[tab]" : "");
+
+    int32_t col = left + (width - (int32_t)strlen(footer)) / 2;
+    if (col < left + 1)
+        col = left + 1;
+    move_to(row, col);
+    set_fg(get_dim());
+    platform_write_str(footer);
+    hit_add_hints(col, row, footer, left + width - 1 - col, true);
+}
+
+//! HELP_PAGE_ACTIVITY: the activity list (notice_history()), newest first, with relative
 //! times - where a notice can be found again after it has faded off the status line.
 static void render_help_activity(int32_t top, int32_t left, int32_t width, int32_t height)
 {
@@ -352,22 +569,12 @@ static void render_help_activity(int32_t top, int32_t left, int32_t width, int32
     }
     #undef NOTICE_HELP_MAX
 
-    // Where there is a meaning page, this footer points on to it as the first page's points here.
-    const char* footer = DAWN_EMBED_LIVE ? "[<-] keys [tab] meaning [esc] close" : "[<-] shortcuts   [esc] close";
-    move_to(top + height - 2, left + (width - (int32_t)strlen(footer)) / 2);
-    set_fg(get_dim());
-    platform_write_str(footer);
+    // Where there is a meaning page, the footer's tab points on to it.
+    help_footer(top + height - 2, left, width);
 }
 
 static int32_t hist_write_fit(const char* s, int32_t max_cols);
 static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, size_t* lens, int32_t max);
-
-//! Where MODE_HELP's meaning page drew its box and its two actions last, for render_help_hit().
-static struct {
-    bool shown;
-    int32_t top, left, width, height; //!< The box
-    int32_t toggle_row, rebuild_row; //!< The actions' rows
-} help_geo;
 
 //! What the meaning index is doing, in words, for the help page the writer went to: unlike the
 //! search box it also says when there is no embedder yet and how to get one.
@@ -408,7 +615,7 @@ static void help_meaning_phase(const EmbedStatus* st, char* out, size_t cap)
     }
 }
 
-//! MODE_HELP's third page (only where DAWN_EMBED_LIVE): the meaning index's state, model and
+//! HELP_PAGE_MEANING (only where DAWN_EMBED_LIVE): the meaning index's state, model and
 //! size, then its switch (m) and its rebuild (r, twice), each also a row to tap. It has its own
 //! height; short screens lose the blank rows around the actions first.
 static void render_help_meaning(int32_t width)
@@ -445,6 +652,7 @@ static void render_help_meaning(int32_t width)
 
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
     set_bg(get_modal_bg());
 
     int32_t col = left + 3;
@@ -484,7 +692,8 @@ static void render_help_meaning(int32_t width)
     platform_write_str(notes);
     row++;
 
-    help_geo.toggle_row = row;
+    // Each action owns its row across the box's width, so a tap anywhere on it counts.
+    hit_add(left, row, width, 1, HIT_KEY, 'm', 0);
     move_to(row, col);
     set_fg(get_accent());
     platform_write_str("[m] ");
@@ -493,7 +702,7 @@ static void render_help_meaning(int32_t width)
     row += 1 + gap;
 
     // Off, a rebuild would wait unseen until the index is switched on again, so it is not offered.
-    help_geo.rebuild_row = row;
+    hit_add(left, row, width, 1, HIT_KEY, 'r', 0);
     bool armed = app.help_rebuild_armed
         && DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - app.help_rebuild_armed < HELP_REBUILD_CONFIRM_MS;
     move_to(row, col);
@@ -502,156 +711,395 @@ static void render_help_meaning(int32_t width)
     set_fg(!on ? get_dim() : armed ? get_accent() : get_fg());
     hist_write_fit(!on ? "rebuild (turn it on first)" : armed ? "press r again to rebuild" : "rebuild the index", text_w - 4);
 
-    move_to(top + height - 2, left + (width - 27) / 2);
-    set_fg(get_dim());
-    platform_write_str("[<-] activity   [esc] close");
-
-    help_geo.shown = true;
-    help_geo.top = top;
-    help_geo.left = left;
-    help_geo.width = width;
-    help_geo.height = height;
+    help_footer(top + height - 2, left, width);
 }
 
-int32_t render_help_hit(int32_t row, int32_t col)
+//! Where a paginated help page's parts go: the shortcut and cheatsheet pages share this box
+typedef struct {
+    int32_t top, left, width, height;
+    int32_t title_row; //!< The page's name
+    int32_t body_row; //!< Its first line
+    int32_t per_page; //!< Lines the body holds
+    int32_t footer_row;
+} HelpFrame;
+
+//! The help box's width: HELP_WIDTH, or the screen less a column each side when it is narrower
+//! (a phone held upright).
+static int32_t help_width(void)
 {
-    if (!help_geo.shown || row < help_geo.top || row >= help_geo.top + help_geo.height
-        || col < help_geo.left || col >= help_geo.left + help_geo.width)
-        return HELP_HIT_OUTSIDE;
-    if (row == help_geo.toggle_row)
-        return HELP_HIT_TOGGLE;
-    if (row == help_geo.rebuild_row)
-        return HELP_HIT_REBUILD;
-    return HELP_HIT_BOX;
+    int32_t width = app.cols - 2 < HELP_WIDTH ? app.cols - 2 : HELP_WIDTH;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    return width;
+}
+
+//! The paginated pages' box: HELP_HEIGHT rows, or the screen's height when it is shorter, so the
+//! footer and its taps stay on screen. Below 16 rows (a phone with its keyboard up has about 12)
+//! the blank rows around the title and above the footer go, leaving the body the room.
+//! top and left are set once the box is drawn (help_frame_place).
+static HelpFrame help_frame(void)
+{
+    HelpFrame f = { 0 };
+    f.width = help_width();
+    f.height = app.rows < HELP_HEIGHT ? app.rows : HELP_HEIGHT;
+    f.per_page = f.height - (f.height >= 16 ? 7 : 4);
+    if (f.per_page < 1)
+        f.per_page = 1;
+    return f;
+}
+
+//! Draw f's box and place its rows; a tap inside it on none of its hints does nothing, outside it
+//! closes help.
+static void help_frame_place(HelpFrame* f)
+{
+    render_popup_box(f->width, f->height, &f->top, &f->left);
+    hit_add(f->left, f->top, f->width, f->height, HIT_INERT, 0, 0);
+    bool roomy = f->height >= 16;
+    f->title_row = f->top + (roomy ? 2 : 1);
+    f->body_row = f->top + (roomy ? 4 : 2);
+    f->footer_row = f->top + f->height - 2;
+    set_bg(get_modal_bg());
+}
+
+//! A paginated page's name, centred, with "2/4" after it when it takes several screens
+static void help_title(const HelpFrame* f, const char* title, int32_t screen, int32_t screens)
+{
+    char count[32] = "";
+    if (screens > 1)
+        snprintf(count, sizeof(count), " %d/%d", screen + 1, screens);
+    int32_t w = (int32_t)(strlen(title) + strlen(count));
+    move_to(f->title_row, f->left + (f->width - w) / 2);
+    set_fg(get_fg());
+    platform_set_bold(true);
+    platform_write_str(title);
+    platform_reset_attrs();
+    set_bg(get_modal_bg());
+    set_fg(get_dim());
+    platform_write_str(count);
+}
+
+//! app.help_screen held within a page of screens screens
+static int32_t help_screen_in(int32_t screens)
+{
+    if (app.help_screen >= screens)
+        return screens > 0 ? screens - 1 : 0;
+    return app.help_screen < 0 ? 0 : app.help_screen;
+}
+
+//! The shortcut pages' lines, paginated for f
+//! @return the number of pages
+static int32_t help_shortcut_pages(const HelpFrame* f, HelpRow* rows, int32_t* n, HelpSpan* pages)
+{
+    *n = help_rows(rows, HELP_ROWS_MAX);
+    return help_paginate(rows, *n, f->per_page, pages, HELP_ROWS_MAX);
+}
+
+//! Where the shortcut pages' three columns start and how wide each may be drawn
+typedef struct {
+    int32_t label, key, tap; //!< Screen columns
+    int32_t label_w, key_w, tap_w, heading_w;
+} HelpColumns;
+
+//! One line of a shortcut page on row: a group's heading, or what to do, its key and its tap
+static void help_shortcut_line(const HelpRow* r, int32_t row, const HelpColumns* c)
+{
+    if (r->kind == HELP_ROW_HEADING) {
+        move_to(row, c->label);
+        set_fg(get_accent());
+        platform_set_bold(true);
+        hist_write_fit(r->text, c->heading_w);
+        platform_reset_attrs();
+        set_bg(get_modal_bg());
+        return;
+    }
+    if (r->kind != HELP_ROW_ITEM)
+        return;
+    move_to(row, c->label);
+    set_fg(get_fg());
+    hist_write_fit(r->text, c->label_w);
+    if (r->key[0]) {
+        move_to(row, c->key);
+        set_fg(get_accent());
+        hist_write_fit(r->key, c->key_w);
+    }
+    if (r->tap[0] && c->tap_w > 0) {
+        move_to(row, c->tap);
+        set_fg(get_dim());
+        int32_t w = hist_write_fit(r->tap, c->tap_w);
+        if (r->tap_label && c->tap_w - w > 1) {
+            platform_write_char(' ');
+            set_fg(get_fg());
+            hist_write_fit(r->tap_label, c->tap_w - w - 1);
+        }
+    }
+}
+
+//! HELP_PAGE_SHORTCUTS: every command by task, read from the command table (dawn_commands): what
+//! it does, its key, and how to reach it by touch ("bar" and the button, "ribbon" and the button,
+//! or "menu", which is "more" on the bar), under the table's group headings.
+static void render_help_shortcuts(HelpFrame* f)
+{
+    HelpRow rows[HELP_ROWS_MAX];
+    HelpSpan pages[HELP_ROWS_MAX];
+    int32_t n = 0;
+    int32_t count = help_shortcut_pages(f, rows, &n, pages);
+    int32_t screen = help_screen_in(count);
+    help_title(f, "SHORTCUTS", screen, count);
+
+    // Each column is as wide as its widest entry; the room around them shrinks to fit the box, and
+    // only then are the labels cut.
+    int32_t label_w = 0, key_w = 0, tap_w = 0;
+    for (int32_t i = 0; i < n; i++) {
+        if (rows[i].kind != HELP_ROW_ITEM)
+            continue;
+        int32_t lw = help_cols(rows[i].text), kw = help_cols(rows[i].key);
+        int32_t tw = help_cols(rows[i].tap) + (rows[i].tap_label ? 1 + help_cols(rows[i].tap_label) : 0);
+        label_w = lw > label_w ? lw : label_w;
+        key_w = kw > key_w ? kw : key_w;
+        tap_w = tw > tap_w ? tw : tap_w;
+    }
+    // Left pad, label to key, key to tap, right pad
+    static const int8_t SPACING[][4] = { { 2, 2, 2, 2 }, { 1, 2, 2, 1 }, { 1, 2, 1, 1 }, { 1, 1, 1, 1 } };
+    enum { SPACINGS = sizeof(SPACING) / sizeof(SPACING[0]) };
+    int32_t inner = f->width - 2;
+    int32_t sp = 0;
+    while (sp < SPACINGS - 1
+        && SPACING[sp][0] + label_w + SPACING[sp][1] + key_w + SPACING[sp][2] + tap_w + SPACING[sp][3] > inner)
+        sp++;
+    int32_t over = SPACING[sp][0] + label_w + SPACING[sp][1] + key_w + SPACING[sp][2] + tap_w + SPACING[sp][3] - inner;
+    if (over > 0)
+        label_w = label_w - over > 4 ? label_w - over : 4;
+    HelpColumns cols = {
+        .label = f->left + 1 + SPACING[sp][0],
+        .label_w = label_w,
+        .key_w = key_w,
+    };
+    cols.key = cols.label + label_w + SPACING[sp][1];
+    cols.tap = cols.key + key_w + SPACING[sp][2];
+    cols.tap_w = f->left + f->width - 1 - cols.tap;
+    cols.heading_w = f->left + f->width - 1 - cols.label;
+
+    if (count > 0) {
+        // A page that opens inside a group shows its heading again first.
+        const HelpSpan* pg = &pages[screen];
+        int32_t row = f->body_row;
+        if (pg->heading >= 0)
+            help_shortcut_line(&rows[pg->heading], row++, &cols);
+        for (int32_t i = pg->first; i < pg->end; i++)
+            help_shortcut_line(&rows[i], row++, &cols);
+    }
+
+    help_footer(f->footer_row, f->left, f->width);
+}
+
+//! How a cheatsheet row's "you get" side is drawn
+typedef enum {
+    CHEAT_PLAIN,
+    CHEAT_BOLD,
+    CHEAT_ITALIC,
+    CHEAT_STRIKE,
+    CHEAT_CODE, //!< The note's code colour (md_apply MD_CODE)
+    CHEAT_H1, //!< The note's heading look (md_apply), without the larger size
+    CHEAT_H2,
+    CHEAT_QUOTE, //!< A dim bar before the text
+    CHEAT_LINK, //!< Underlined
+    CHEAT_DIM,
+    CHEAT_TABLE, //!< Cells apart by a dim bar
+} CheatLook;
+
+//! The cheatsheet's rows: what you type, what you get, and how that looks
+static const struct {
+    const char* typed;
+    const char* got;
+    CheatLook look;
+} CHEATS[] = {
+    { "**bold**", "bold", CHEAT_BOLD },
+    { "*italic*", "italic", CHEAT_ITALIC },
+    { "~~struck~~", "struck", CHEAT_STRIKE },
+    { "`code`", "code", CHEAT_CODE },
+    { "# heading", "heading", CHEAT_H1 },
+    { "## smaller heading", "smaller heading", CHEAT_H2 },
+    { "- item", "• item", CHEAT_PLAIN },
+    { "1. item", "1. item", CHEAT_PLAIN },
+    { "- [ ] task", "☐ task", CHEAT_PLAIN },
+    { "- [x] done", "☑ done", CHEAT_PLAIN },
+    { "> quote", "quote", CHEAT_QUOTE },
+    { "[text](url)", "text", CHEAT_LINK },
+    { "![alt](image.png)", "the picture", CHEAT_DIM },
+    { "---", "──────────", CHEAT_DIM },
+    { "```", "a code block", CHEAT_CODE },
+    { "| a | b |", "a │ b", CHEAT_TABLE },
+};
+
+#define CHEAT_COUNT ((int32_t)(sizeof(CHEATS) / sizeof(CHEATS[0])))
+
+//! The line under the cheatsheet's rows
+#define CHEAT_NOTE "the ribbon (Aa on the bar) types these for you"
+
+//! Draw a cheatsheet row's "you get" side at the cursor, in at most room columns
+static void help_cheat_got(int32_t i, int32_t room)
+{
+    const char* got = CHEATS[i].got;
+    switch (CHEATS[i].look) {
+    case CHEAT_PLAIN:
+        set_fg(get_fg());
+        break;
+    case CHEAT_BOLD:
+        set_fg(get_fg());
+        set_bold(true);
+        break;
+    case CHEAT_ITALIC:
+        set_fg(get_fg());
+        set_italic(true);
+        break;
+    case CHEAT_STRIKE:
+        set_fg(get_fg());
+        set_strikethrough(true);
+        break;
+    case CHEAT_CODE:
+        md_apply(MD_CODE);
+        break;
+    case CHEAT_H1:
+        md_apply(MD_H1);
+        set_bg(get_modal_bg());
+        break;
+    case CHEAT_H2:
+        md_apply(MD_H2);
+        set_bg(get_modal_bg());
+        break;
+    case CHEAT_QUOTE:
+        set_fg(get_dim());
+        platform_write_str("│ ");
+        set_fg(get_fg());
+        room -= 2;
+        break;
+    case CHEAT_LINK:
+        set_fg(get_fg());
+        set_underline(UNDERLINE_STYLE_SINGLE);
+        break;
+    case CHEAT_DIM:
+        set_fg(get_dim());
+        break;
+    case CHEAT_TABLE: {
+        // Drawn in parts so the bar between the cells is dim; got only gave the width.
+        set_fg(get_fg());
+        platform_write_str("a ");
+        set_fg(get_dim());
+        platform_write_str("│");
+        set_fg(get_fg());
+        platform_write_str(" b");
+        got = "";
+        break;
+    }
+    }
+    hist_write_fit(got, room);
+    // md_apply(0) also puts the text size back to one cell; the box's own ground comes back after.
+    md_apply(0);
+    set_bg(get_modal_bg());
+}
+
+//! HELP_PAGE_CHEATSHEET: Markdown for someone who has never written it, what you type on the left
+//! in dim, what the note shows on the right in the note's own styles, and under them that the
+//! ribbon types it for you. Split over screens like the shortcuts when the box is short.
+static void render_help_cheatsheet(HelpFrame* f)
+{
+    int32_t rows_per = 0;
+    bool blank = false;
+    int32_t screens = help_pages_with_note(CHEAT_COUNT, f->per_page, &rows_per, &blank);
+    int32_t screen = help_screen_in(screens);
+    help_title(f, "MARKDOWN", screen, screens);
+
+    int32_t typed_w = 0, got_w = 0;
+    for (int32_t i = 0; i < CHEAT_COUNT; i++) {
+        int32_t tw = help_cols(CHEATS[i].typed), gw = help_cols(CHEATS[i].got);
+        typed_w = tw > typed_w ? tw : typed_w;
+        got_w = gw > got_w ? gw : got_w;
+    }
+    int32_t gap = 3;
+    int32_t inner = f->width - 2;
+    if (typed_w + gap + got_w + 2 > inner)
+        gap = 1;
+    int32_t used = typed_w + gap + got_w;
+    int32_t c_typed = f->left + 1 + (inner - used > 2 ? (inner - used) / 2 : 1);
+    int32_t c_got = c_typed + typed_w + gap;
+    int32_t got_room = f->left + f->width - 1 - c_got;
+
+    int32_t first = screen * rows_per;
+    int32_t end = first + rows_per < CHEAT_COUNT ? first + rows_per : CHEAT_COUNT;
+    if (screen == screens - 1)
+        end = CHEAT_COUNT;
+    int32_t row = f->body_row;
+    for (int32_t i = first; i < end; i++, row++) {
+        move_to(row, c_typed);
+        set_fg(get_dim());
+        hist_write_fit(CHEATS[i].typed, typed_w);
+        if (got_room > 0) {
+            move_to(row, c_got);
+            help_cheat_got(i, got_room);
+        }
+    }
+
+    if (screen == screens - 1) {
+        if (blank)
+            row++;
+        int32_t note_w = help_cols(CHEAT_NOTE);
+        int32_t c_note = f->left + 1 + (inner - note_w > 2 ? (inner - note_w) / 2 : 1);
+        move_to(row, c_note);
+        set_fg(get_dim());
+        hist_write_fit(CHEAT_NOTE, f->left + f->width - 1 - c_note);
+    }
+
+    help_footer(f->footer_row, f->left, f->width);
+}
+
+int32_t render_help_screens(HelpPage page)
+{
+    HelpFrame f = help_frame();
+    switch (page) {
+    case HELP_PAGE_SHORTCUTS: {
+        HelpRow rows[HELP_ROWS_MAX];
+        HelpSpan pages[HELP_ROWS_MAX];
+        int32_t n = 0;
+        int32_t count = help_shortcut_pages(&f, rows, &n, pages);
+        return count > 0 ? count : 1;
+    }
+    case HELP_PAGE_CHEATSHEET: {
+        int32_t rows_per = 0;
+        bool blank = false;
+        return help_pages_with_note(CHEAT_COUNT, f.per_page, &rows_per, &blank);
+    }
+    case HELP_PAGE_ACTIVITY:
+        return 1;
+    case HELP_PAGE_MEANING:
+        return DAWN_EMBED_LIVE ? 1 : 0;
+    default:
+        return 0;
+    }
 }
 
 void render_help(void)
 {
-    // 44 columns, or the screen less a column each side when it is narrower (a phone held upright).
-    int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
-    if (width < 24)
-        width = app.cols < 24 ? app.cols : 24;
-    help_geo.shown = false;
-    if (app.help_page == 2 && DAWN_EMBED_LIVE) {
-        render_help_meaning(width);
+    if (app.help_page == HELP_PAGE_MEANING && DAWN_EMBED_LIVE) {
+        render_help_meaning(help_width());
         return;
     }
 
-    int32_t height = 26;
-    int32_t top, left;
-    render_popup_box(width, height, &top, &left);
-
-    if (app.help_page == 1) {
-        render_help_activity(top, left, width, height);
-        return;
+    HelpFrame f = help_frame();
+    help_frame_place(&f);
+    switch (app.help_page) {
+    case HELP_PAGE_ACTIVITY:
+        render_help_activity(f.top, f.left, f.width, f.height);
+        break;
+    case HELP_PAGE_CHEATSHEET:
+        render_help_cheatsheet(&f);
+        break;
+    default:
+        render_help_shortcuts(&f);
+        break;
     }
-
-    int32_t col1 = left + 4;
-    int32_t col2 = left + 20;
-
-    set_bg(get_modal_bg());
-
-    // Title
-    move_to(top + 2, left + width / 2 - 9);
-    set_fg(get_fg());
-    platform_set_bold(true);
-    platform_write_str("KEYBOARD SHORTCUTS");
-    platform_reset_attrs();
-    set_bg(get_modal_bg());
-
-    int32_t cy = top + 4;
-    move_to(cy++, col1);
-    set_fg(get_accent());
-    platform_set_bold(true);
-    platform_write_str("NAVIGATION");
-    platform_reset_attrs();
-    set_bg(get_modal_bg());
-    set_fg(get_dim());
-
-    move_to(cy, col1);
-    platform_write_str("arrows");
-    move_to(cy++, col2);
-    platform_write_str("move cursor");
-    move_to(cy, col1);
-    platform_write_str("opt+arrows");
-    move_to(cy++, col2);
-    platform_write_str("word jump");
-    move_to(cy, col1);
-    platform_write_str("pgup/pgdn");
-    move_to(cy++, col2);
-    platform_write_str("scroll page");
-    move_to(cy, col1);
-    platform_write_str("^L");
-    move_to(cy++, col2);
-    platform_write_str("table of contents");
-    move_to(cy, col1);
-    platform_write_str("^S");
-    move_to(cy++, col2);
-    platform_write_str("search document");
-
-    cy++;
-    move_to(cy++, col1);
-    set_fg(get_accent());
-    platform_set_bold(true);
-    platform_write_str("EDITING");
-    platform_reset_attrs();
-    set_bg(get_modal_bg());
-    set_fg(get_dim());
-
-    move_to(cy, col1);
-    platform_write_str("^C ^X ^V");
-    move_to(cy++, col2);
-    platform_write_str("copy/cut/paste");
-    move_to(cy, col1);
-    platform_write_str("^Z ^Y");
-    move_to(cy++, col2);
-    platform_write_str("undo/redo");
-    move_to(cy, col1);
-    platform_write_str("^W ^D");
-    move_to(cy++, col2);
-    platform_write_str("delete word/elem");
-    move_to(cy, col1);
-    platform_write_str("tab shift+tab");
-    move_to(cy++, col2);
-    platform_write_str("indent list");
-
-    cy++;
-    move_to(cy++, col1);
-    set_fg(get_accent());
-    platform_set_bold(true);
-    platform_write_str("FEATURES");
-    platform_reset_attrs();
-    set_bg(get_modal_bg());
-    set_fg(get_dim());
-
-    move_to(cy, col1);
-    platform_write_str("^F");
-    move_to(cy++, col2);
-    platform_write_str("focus mode");
-    move_to(cy, col1);
-    platform_write_str("^R");
-    move_to(cy++, col2);
-    platform_write_str("plain text mode");
-    move_to(cy, col1);
-    platform_write_str("^G ^E");
-    move_to(cy++, col2);
-    platform_write_str("edit title/image");
-    move_to(cy, col1);
-    platform_write_str("^P ^T");
-    move_to(cy++, col2);
-    platform_write_str("pause/timer");
-#if HAS_LIBAI
-    move_to(cy, col1);
-    platform_write_str("^/");
-    move_to(cy++, col2);
-    platform_write_str("AI chat");
-#endif
-
-    // Footer
-    move_to(top + height - 2, left + (width - 30) / 2);
-    set_fg(get_dim());
-    platform_write_str("[tab] activity   [esc] close");
 }
+
+// #endregion
 
 //! Display columns of a UTF-8 string, counting each code point as one column
 static int32_t hist_cols(const char* s, size_t len)
@@ -702,7 +1150,7 @@ void render_history(void)
 
     if (app.hist_count == 0) {
         render_center_text(app.rows / 2, "no history yet", get_dim());
-        render_center_text(app.rows / 2 + 2, "[esc] back", get_dim());
+        render_center_hints(app.rows / 2 + 2, "[esc] back", get_dim());
         return;
     }
 
@@ -718,6 +1166,8 @@ void render_history(void)
     for (int32_t i = 0; i < visible && start + i < app.hist_count; i++) {
         int32_t idx = start + i;
         HistoryEntry* entry = &app.history[idx];
+        // A tap on the row (the width its highlight spans) opens that note, as enter would.
+        hit_add(2, 4 + i, app.cols - 2, 1, HIT_ROW, '\r', idx);
 
         if (idx == app.hist_sel) {
             // The selected row sits one rung above the page (surface_container_highest)
@@ -798,6 +1248,7 @@ void render_history(void)
     move_to(app.rows - 1, 4);
     set_fg(get_dim());
     hist_write_fit(hint_buf, hint_room);
+    hit_add_hints(4, app.rows - 1, hint_buf, hint_room, true);
 }
 
 void render_finished(void)
@@ -828,11 +1279,11 @@ void render_finished(void)
     }
     render_center_text(cy + 1, stats, get_accent());
 
-    render_center_text(cy + 4, "[c] continue   [enter] new   [esc] menu", get_dim());
-    render_center_text(cy + 5, "[o] finder   [q] quit", get_dim());
+    render_center_hints(cy + 4, "[c] continue   [enter] new   [esc] menu", get_dim());
+    render_center_hints(cy + 5, "[o] finder   [q] quit", get_dim());
 #if HAS_LIBAI
     if (app.ai_ready) {
-        render_center_text(cy + 7, "[/] reflect with ai", get_dim());
+        render_center_hints(cy + 7, "[/] reflect with ai", get_dim());
     }
 #endif
 }
@@ -891,6 +1342,7 @@ void render_fm_edit(void)
     for (int32_t i = 0; i < app.fm_edit.field_count && row < top + box_height - 3; i++) {
         FmEditField* field = &app.fm_edit.fields[i];
         bool is_current = (i == app.fm_edit.current_field);
+        int32_t field_row = row;
 
         move_to(row, content_left);
         FM_KEY_LABEL(field->key, is_current);
@@ -1017,6 +1469,8 @@ void render_fm_edit(void)
             break;
         }
         }
+        // A tap on a field's rows makes it the current field, as tab would.
+        hit_add(content_left, field_row, content_width, row - field_row + 1, HIT_ROW, 0, i);
         row++;
     }
 
@@ -1033,27 +1487,30 @@ void render_fm_edit(void)
     }
 
     move_to(top + box_height - 2, content_left);
+    const char* hint;
     if (app.fm_edit.adding_field) {
-        FM_HINT("enter:add  esc:cancel");
+        hint = "enter:add  esc:cancel";
     } else if (app.fm_edit.current_field >= 0 && app.fm_edit.current_field < app.fm_edit.field_count) {
         FmEditField* f = &app.fm_edit.fields[app.fm_edit.current_field];
         switch (f->kind) {
         case FM_FIELD_BOOL:
-            FM_HINT("tab:next  space:toggle  enter:save  esc:cancel");
+            hint = "tab:next  space:toggle  enter:save  esc:cancel";
             break;
         case FM_FIELD_DATETIME:
-            FM_HINT("tab:next  </>:part  +/-:adj  enter:save  esc:cancel");
+            hint = "tab:next  </>:part  +/-:adj  enter:save  esc:cancel";
             break;
         case FM_FIELD_LIST:
-            FM_HINT("tab:next  ^N:add  ^D/bksp:del  ^←/→:item  enter:save  esc:cancel");
+            hint = "tab:next  ^N:add  ^D/bksp:del  ^←/→:item  enter:save  esc:cancel";
             break;
         default:
-            FM_HINT("tab:next  +:add  ^S:save  esc:cancel");
+            hint = "tab:next  +:add  ^S:save  esc:cancel";
             break;
         }
     } else {
-        FM_HINT("tab:next  +:add field  enter:save  esc:cancel");
+        hint = "tab:next  +:add field  enter:save  esc:cancel";
     }
+    FM_HINT(hint);
+    hit_add_hints(content_left, top + box_height - 2, hint, app.cols - content_left + 1, false);
 
     move_to(cursor_row, cursor_col);
     platform_set_cursor_visible(true);
@@ -1074,6 +1531,14 @@ static void render_block_edit_image(void)
         app.block_edit.image.height_len, app.block_edit.image.height_pct, 3);
 
     MODAL_HELP(9, "tab:field  p:%/px  enter:save  esc:cancel");
+
+    // A tap on a field's row makes it the current field; the hints are taps on their keys, but
+    // not p, which alt and title would take as text.
+    static const int32_t field_rows[] = { 0, 1, 3, 4 };
+    for (int32_t f = 0; f < 4; f++)
+        hit_add(_modal_content_left, _modal_field_row + field_rows[f], _modal_content_width, 1, HIT_ROW, 0, f);
+    hit_add_hints(_modal_content_left, _modal_content_top + 9, "tab:field  p:%/px  enter:save  esc:cancel",
+        _modal_content_width, false);
 
     MODAL_END();
 }
@@ -1164,6 +1629,8 @@ void render_toc(void)
 
         int32_t entry_idx = toc->filtered[idx];
         TocEntry* entry = &toc->entries[entry_idx];
+        // A tap on the row (the width its highlight spans) jumps to that heading, as enter would.
+        hit_add(left + 1, list_start + i, width - 2, 1, HIT_ROW, '\r', idx);
 
         // The selected row sits one rung above the modal (surface_container_highest)
         if (idx == toc->selected) {
@@ -1210,26 +1677,130 @@ void render_toc(void)
         set_bg(get_modal_bg());
     }
 
-    // Scroll indicators
+    // Scroll indicators, each a tap that pages that way (two columns, room for a finger)
     if (toc->scroll > 0) {
         move_to(list_start, content_right);
         set_fg(get_dim());
         platform_write_str("↑");
+        hit_add(content_right - 1, list_start, 2, 1, HIT_KEY, DAWN_KEY_PGUP, 0);
     }
     if (toc->scroll + visible < toc->filtered_count) {
         move_to(list_start + visible - 1, content_right);
         set_fg(get_dim());
         platform_write_str("↓");
+        hit_add(content_right - 1, list_start + visible - 1, 2, 1, HIT_KEY, DAWN_KEY_PGDN, 0);
     }
 
     // Footer
     move_to(top + height - 2, content_left);
     set_fg(get_dim());
     platform_write_str("↑↓:nav  enter:jump  esc:close");
+    hit_add_hints(content_left, top + height - 2, "↑↓:nav  enter:jump  esc:close", content_width, true);
 
     // Position cursor at filter
     move_to(filter_row, content_left + 8 + toc->filter_len);
     platform_set_cursor_visible(true);
+}
+
+void render_menu(MenuState* m)
+{
+    // As wide as help (44 columns, or the screen less a column each side on a phone), and as tall
+    // as the list, never taller than the screen: with the keyboard up a phone pane is about 12
+    // rows, so the list scrolls inside the box. Rows: border, title, the list, hints, border.
+    int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    int32_t height = m->count + 4;
+    if (height > app.rows)
+        height = app.rows;
+    int32_t visible = height - 4;
+    if (visible < 1)
+        visible = 1;
+    menu_scroll_to(m, visible);
+
+    int32_t top, left;
+    render_popup_box(width, height, &top, &left);
+    // A tap inside the box on none of its rows does nothing; outside it closes the menu.
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
+
+    int32_t content_left = left + 2;
+    int32_t content_right = left + width - 3; // last column text may use
+    DawnColor modal = get_modal_bg();
+    set_bg(modal);
+
+    // Title, with the key that opens the menu without a finger
+    move_to(top + 1, content_left);
+    set_fg(get_fg());
+    platform_write_str("commands");
+    set_fg(get_dim());
+    platform_write_str("  ^]");
+
+    int32_t list_top = top + 2;
+    for (int32_t i = 0; i < visible; i++) {
+        int32_t idx = m->scroll + i;
+        if (idx >= m->count)
+            break;
+        const MenuLine* line = &m->lines[idx];
+        int32_t row = list_top + i;
+        if (!line->cmd) {
+            move_to(row, content_left);
+            set_fg(get_accent());
+            platform_write_str(commands_group_name(line->group));
+            continue;
+        }
+
+        bool sel = idx == m->selected;
+        if (line->enabled)
+            hit_add(left + 1, row, width - 2, 1, HIT_ROW, '\r', idx);
+        if (sel) {
+            // The selected row sits one rung above the modal (surface_container_highest)
+            move_to(row, left + 1);
+            set_bg(get_row_select_bg());
+            for (int32_t c = 0; c < width - 2; c++)
+                platform_write_char(' ');
+        }
+
+        const char* sc = line->cmd->shortcut;
+        int32_t sc_w = hist_cols(sc, strlen(sc));
+        DawnColor text = !line->enabled ? get_border() : sel ? get_fg() : get_dim();
+        move_to(row, content_left);
+        if (sel) {
+            set_fg(get_accent());
+            platform_write_str("> ");
+        } else {
+            platform_write_str("  ");
+        }
+        set_fg(text);
+        hist_write_fit(line->cmd->label, content_right - content_left - 2 - sc_w - 1);
+        if (sc_w > 0) {
+            move_to(row, content_right - sc_w + 1);
+            set_fg(line->enabled ? get_dim() : get_border());
+            platform_write_str(sc);
+        }
+        set_bg(modal);
+    }
+
+    // More above or below, each a tap that pages that way (the mark and a cell beside it)
+    if (m->scroll > 0) {
+        move_to(top + 1, content_right - 5);
+        set_fg(get_dim());
+        platform_write_str("↑ more");
+        hit_add(content_right - 6, top + 1, 8, 1, HIT_KEY, DAWN_KEY_PGUP, 0);
+    }
+    if (m->scroll + visible < m->count) {
+        move_to(top + height - 2, content_right - 5);
+        set_fg(get_dim());
+        platform_write_str("↓ more");
+        hit_add(content_right - 6, top + height - 2, 8, 1, HIT_KEY, DAWN_KEY_PGDN, 0);
+    }
+
+    // Footer hints, tappable; left of the "↓ more" mark
+    const char* footer = "enter:run  esc:close";
+    move_to(top + height - 2, content_left);
+    set_fg(get_dim());
+    platform_write_str(footer);
+    hit_add_hints(content_left, top + height - 2, footer, content_right - 7 - content_left, true);
+    platform_set_cursor_visible(false);
 }
 
 //! Where render_search() drew its result rows last, for render_search_hit().
@@ -1519,12 +2090,6 @@ void render_search(void)
     move_to(search_row, content_left + 6 + query_cols);
     platform_set_cursor_visible(true);
 }
-//! Where MODE_CONFLICT's choices were drawn last, for render_conflict_hit().
-static struct {
-    bool shown;
-    int32_t left, width; //!< The dialog's columns
-    int32_t rows[CONFLICT_CHOICES]; //!< Each choice's row
-} conflict_geo;
 
 //! Break text into lines of at most width code points, at spaces where a word fits and inside a
 //! word that alone is wider. Returns the number of lines (at most max).
@@ -1622,11 +2187,14 @@ void render_conflict(void)
     }
     row++;
 
-    conflict_geo.shown = true;
-    conflict_geo.left = left;
-    conflict_geo.width = width;
+    // Each choice owns its row across the dialog's width, so a tap anywhere on it is its key.
+    static const int32_t keys[CONFLICT_CHOICES] = {
+        [CONFLICT_RELOAD] = 'r',
+        [CONFLICT_OVERWRITE] = 'o',
+        [CONFLICT_KEEP] = 'k',
+    };
     for (int32_t c = 0; c < CONFLICT_CHOICES; c++) {
-        conflict_geo.rows[c] = row;
+        hit_add(left, row, width, 1, HIT_KEY, keys[c], 0);
         move_to(row, col);
         set_fg(get_accent());
         platform_write_str(labels[c]);
@@ -1639,16 +2207,6 @@ void render_conflict(void)
         }
         row += 1 + gap;
     }
-}
-
-int32_t render_conflict_hit(int32_t row, int32_t col)
-{
-    if (!conflict_geo.shown || col < conflict_geo.left || col >= conflict_geo.left + conflict_geo.width)
-        return -1;
-    for (int32_t c = 0; c < CONFLICT_CHOICES; c++)
-        if (row == conflict_geo.rows[c])
-            return c;
-    return -1;
 }
 
 // #endregion

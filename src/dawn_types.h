@@ -124,8 +124,20 @@ DAWN_ENUM(uint8_t) {
     MODE_BLOCK_EDIT, //!< Block editor (modal) - images, etc.
     MODE_TOC, //!< Table of contents navigation (modal)
     MODE_SEARCH, //!< Document search (modal)
-    MODE_CONFLICT //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
+    MODE_CONFLICT, //!< The note changed elsewhere while edited here: reload, overwrite or keep editing (modal)
+    MODE_MENU, //!< Every writing command with its shortcut (dawn_commands), over the note (modal)
+    MODE_TOUR //!< The first-run tour's cards; on a first run in place of the start screen, else pushed
 } AppMode;
+
+//! MODE_HELP's pages in tab order. The shortcuts and the cheatsheet each take as many screens as
+//! the box needs at the screen's height (render_help_screens()); app.help_screen is the one shown.
+DAWN_ENUM(uint8_t) {
+    HELP_PAGE_SHORTCUTS, //!< Every command by task, with its key and its tap (dawn_commands)
+    HELP_PAGE_CHEATSHEET, //!< Markdown: what you type and what you get
+    HELP_PAGE_ACTIVITY, //!< The notices, newest first (notice_history)
+    HELP_PAGE_MEANING, //!< The meaning index's state, switch and rebuild (only where DAWN_EMBED_LIVE)
+    HELP_PAGE_COUNT
+} HelpPage;
 
 //! Push a modal mode (saves current mode for later restoration)
 #define MODE_PUSH(new_mode)       \
@@ -316,11 +328,15 @@ typedef struct {
     bool launcher_term; //!< Running in Termux Launcher's terminal, also inside tmux there: it draws block,
         //!< braille and legacy-computing eighths as seamless geometry (never set by settings.json)
     bool preview_mode; //!< Read-only preview mode
-    int32_t help_page; //!< MODE_HELP's page: 0 = shortcuts, 1 = activity list (notice_history),
-        //!< 2 = the meaning index (only where DAWN_EMBED_LIVE)
+    HelpPage help_page; //!< MODE_HELP's page
+    int32_t help_screen; //!< Which of help_page's screens shows, 0 first (render_help_screens() has the count)
     int64_t help_rebuild_armed; //!< When r was first pressed on the meaning page, DAWN_CLOCK_MS (0 = not armed):
         //!< a second press within HELP_REBUILD_CONFIRM_MS rebuilds the index
     bool meaning_index; //!< settings.json "meaning_index": the meaning index runs (embed_set_enabled)
+    bool ribbon; //!< settings.json "ribbon": the formatting ribbon shows on the writing screen
+    bool onboarded; //!< settings.json "onboarded": the first-run tour was finished or skipped
+    int32_t tour_card; //!< MODE_TOUR's card, 0 first
+    bool tour_pushed; //!< MODE_TOUR was opened from a command: it pops back instead of going to the start screen
 
     // Display
     int32_t rows, cols; //!< Display dimensions

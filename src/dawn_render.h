@@ -3,6 +3,7 @@
 #ifndef DAWN_RENDER_H
 #define DAWN_RENDER_H
 
+#include "dawn_commands.h"
 #include "dawn_types.h"
 
 // #region Utility Functions
@@ -30,26 +31,37 @@ void render_popup_box(int32_t width, int32_t height, int32_t* out_top, int32_t* 
 //! Render the welcome/menu screen
 void render_welcome(void);
 
+//! How many cards the first-run tour has (the "ask" card only where the chat is compiled in)
+int32_t render_tour_cards(void);
+
+//! Render MODE_TOUR: app.tour_card, centred like the welcome screen, with the dots that mark it
+//! and the footer's tappable hints. app.tour_pushed says whether esc skips or closes.
+void render_tour(void);
+
 //! Render the timer selection screen
 void render_timer_select(void);
 
 //! Render the style selection screen
 void render_style_select(void);
 
-//! Render the help screen: app.help_page 0 = keyboard shortcuts, 1 = activity (notices), 2 = the
-//! meaning index's state with its switch and rebuild (drawn only where DAWN_EMBED_LIVE)
+//! Render the help screen app.help_screen of page app.help_page (HelpPage): the shortcuts by task
+//! from the command table, the Markdown cheatsheet, the activity list (notices), or the meaning
+//! index's state with its switch and rebuild (only where DAWN_EMBED_LIVE). The box swallows taps
+//! (HIT_INERT); its footer hints and the meaning page's two action rows are taps on their keys.
 void render_help(void);
+
+//! How many screens page takes at the screen's current size: the shortcuts and the cheatsheet
+//! split over as many as their lines need, the others take one, and the meaning page none where
+//! the meaning index is not compiled in.
+int32_t render_help_screens(HelpPage page);
+
+//! The help screen after (dir 1) or before (dir -1) the one shown, as tab and <- turn to it:
+//! the next screen of the same page, else the first (or last) screen of the next page that has one.
+//! @return false when there is none that way
+bool render_help_neighbour(int32_t dir, HelpPage* page, int32_t* screen);
 
 //! How long the meaning page's rebuild waits for its confirming second r (or tap)
 #define HELP_REBUILD_CONFIRM_MS 3000
-
-//! What render_help_hit() found under a tap
-enum { HELP_HIT_OUTSIDE = -1, HELP_HIT_BOX, HELP_HIT_TOGGLE, HELP_HIT_REBUILD };
-
-//! What screen cell (row, col), both 1-based, is on the help box's meaning page as last rendered:
-//! each action owns its row across the box's width, so a tap anywhere on it counts.
-//! @return a HELP_HIT_* value; HELP_HIT_OUTSIDE also when the meaning page is not showing
-int32_t render_help_hit(int32_t row, int32_t col);
 
 //! Render the session history browser
 void render_history(void);
@@ -78,13 +90,15 @@ int32_t render_search_hit(int32_t row, int32_t col);
 enum { CONFLICT_RELOAD, CONFLICT_OVERWRITE, CONFLICT_KEEP, CONFLICT_CHOICES };
 
 //! Render the dialog shown when the note changed elsewhere while it had unsaved edits here
-//! (MODE_CONFLICT): what happened, where the writer's text is kept, and the three choices.
+//! (MODE_CONFLICT): what happened, where the writer's text is kept, and the three choices, each
+//! a tap on its key (r, o, k) across the dialog's width.
 void render_conflict(void);
 
-//! The choice drawn on screen cell (row, col), both 1-based, in the dialog as last rendered: each
-//! choice owns its row across the dialog's width, so a tap anywhere on it counts.
-//! @return a CONFLICT_* value, or -1 for none
-int32_t render_conflict_hit(int32_t row, int32_t col);
+//! Render the command menu (MODE_MENU) over the note: every command of dawn_commands under its
+//! group's heading, its shortcut right-aligned, the selection highlighted and kept in view (m's
+//! scroll is updated), commands that cannot run now drawn dim. Each command that can run is a
+//! tap on its row; the rest of the box swallows taps.
+void render_menu(MenuState* m);
 
 // #endregion
 

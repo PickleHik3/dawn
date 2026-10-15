@@ -4,6 +4,7 @@
 // its fade purely from clock time, so render_status_bar() can call it every frame without this
 // module tracking any redraw state of its own - dawn.c's frame-skip logic is what decides to keep
 // asking (see the timed-redraw note added there alongside notice_post()'s call sites).
+// NOTICE_TIP fades exactly like NOTICE_INFO here; only render_status_bar() draws it differently.
 
 #include "dawn_notice.h"
 #include "dawn_types.h"

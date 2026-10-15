@@ -8,13 +8,16 @@
 #include "dawn_block.h"
 #include "dawn_chat.h"
 #include "dawn_clipboard.h"
+#include "dawn_commands.h"
 #include "dawn_date.h"
 #include "dawn_embed.h"
 #include "dawn_file.h"
 #include "dawn_fm.h"
 #include "dawn_footnote.h"
+#include "dawn_format.h"
 #include "dawn_gap.h"
 #include "dawn_highlight.h"
+#include "dawn_hit.h"
 #include "dawn_image.h"
 #include "dawn_input.h"
 #include "dawn_nav.h"
@@ -30,6 +33,7 @@
 #include "dawn_theme.h"
 #include "dawn_title.h"
 #include "dawn_timer.h"
+#include "dawn_tips.h"
 #include "dawn_toc.h"
 #include "dawn_utils.h"
 #include "dawn_voice.h"
@@ -45,6 +49,12 @@
 //! Maximum nesting depth for inline markdown styles
 #define MAX_STYLE_DEPTH 8
 
+//! Fewest text rows the formatting ribbon leaves the note; on a shorter screen it does not show
+#define RIBBON_MIN_NOTE_ROWS 3
+
+// A ribbon button's key minus DAWN_KEY_FMT_BOLD is its FormatOp.
+_Static_assert(DAWN_KEY_FMT_CODE_BLOCK - DAWN_KEY_FMT_BOLD + 1 == FORMAT_COUNT, "one format key per FormatOp");
+
 //! Layout calculation result
 typedef struct {
     int32_t text_area_cols;
@@ -59,6 +69,10 @@ typedef struct {
     int32_t text_width;
     int32_t top_margin;
     int32_t text_height;
+    int32_t ribbon_top; //!< First screen row of the formatting ribbon (when ribbon_rows > 0)
+    int32_t ribbon_rows; //!< Screen rows the ribbon takes from the note; 0 when it does not show
+    int32_t ui_scale; //!< 2 where the action bar and the ribbon draw at twice the size (kitty text sizing, and the bar has a place), else 1
+    int32_t bar_top; //!< First screen row of the action bar, which takes ui_scale rows above the status line
 } Layout;
 
 //! Render context passed to rendering functions
@@ -116,6 +130,18 @@ typedef struct {
 
 // #region Pure Helper Functions
 
+//! Whether the screen gives the action bar a place, whatever the mode: phone width or the
+//! launcher's terminal, never with a chat open (a sheet takes the status line away, and a focused
+//! chat would take the bar's keys), in preview or print. action_bar_shown() adds the screen and
+//! the rows; calc_layout() sizes the bar and the ribbon from this alone, so the note does not
+//! move when a dialog opens over it.
+static bool action_bar_place(void)
+{
+    if (app.ctx.mode == DAWN_MODE_PRINT || app.preview_mode || app.ai_open)
+        return false;
+    return app.launcher_term || app.cols < AI_PANEL_MIN_COLS;
+}
+
 //! Calculate layout dimensions based on window size and AI panel state
 static inline Layout calc_layout(void)
 {
@@ -127,9 +153,10 @@ static inline Layout calc_layout(void)
     l.ai_rows = app.rows;
     l.note_rows = app.rows;
 
-    if (app.ai_open && app.cols < AI_PANEL_MIN_COLS) {
-        // A phone-width terminal has no room beside the note: the chat rises from the bottom as a
-        // sheet, full width, and the note keeps the rows above it. Recomputed every frame, so the
+    if (app.ai_open && (app.cols < AI_PANEL_MIN_COLS || app.launcher_term)) {
+        // A phone-width terminal has no room beside the note, and a phone with a small font is
+        // still a phone (the launcher's terminal, whatever its width): the chat rises from the
+        // bottom as a sheet, full width, and the note keeps the rows above it. Recomputed every frame, so the
         // keyboard showing or hiding (which changes app.rows) resizes both.
         l.ai_cols = app.cols;
         l.ai_start_col = 1;
@@ -162,7 +189,14 @@ static inline Layout calc_layout(void)
         l.ai_cols = 1;
     if (l.text_area_cols < 1)
         l.text_area_cols = 1;
-    l.margin = l.text_area_cols > 80 ? (l.text_area_cols - 70) / 2 : 4;
+    // A desktop terminal reads best in a column of about 70 cells, centred. A phone is a page,
+    // not a desk: in Termux Launcher's terminal the note fills the pane (a pinch out, which gives
+    // more columns, then gives more text per line instead of wider margins), with two cells of
+    // margin on either side so a finger can land before the first letter.
+    if (app.launcher_term)
+        l.margin = l.text_area_cols > 12 ? 2 : 0;
+    else
+        l.margin = l.text_area_cols > 80 ? (l.text_area_cols - 70) / 2 : 4;
     l.text_width = l.text_area_cols - l.margin * 2;
     if (l.text_width < 1) {
         l.margin = 0;
@@ -174,8 +208,28 @@ static inline Layout calc_layout(void)
     // input line), so it ends one row above the sheet: row note_rows is the one blank row between
     // the note's last line and the sheet's edge.
     l.text_height = l.ai_sheet ? l.note_rows - l.top_margin : app.rows - l.top_margin - 2;
+    // Where the terminal sizes text (kitty's OSC 66) and the action bar has a place, the bar and
+    // the ribbon draw at scale 2 so a finger can hit them: the bar is then two rows tall, the
+    // second taken from the bottom of the text, and the blank row above it stays. A chat sheet
+    // never comes with scale 2 (an open chat gives the bar no place).
+    l.ui_scale = HAS_CAP(DAWN_CAP_TEXT_SIZING) && action_bar_place() ? 2 : 1;
+    l.bar_top = app.rows - l.ui_scale;
+    l.text_height -= l.ui_scale - 1;
     if (l.text_height < 1)
         l.text_height = 1;
+    // The formatting ribbon, while it is on, takes its rows from the bottom of the text: they sit
+    // on top of the action bar's rows (blank ones without the bar), with the one blank row kept
+    // between them and the text, so the note never draws under a button. At scale 2 each row of
+    // buttons is two screen rows. Never with a chat open, in preview or print, nor when it would
+    // leave the note fewer than RIBBON_MIN_NOTE_ROWS.
+    if (app.ribbon && !app.ai_open && !app.preview_mode && app.ctx.mode != DAWN_MODE_PRINT) {
+        int32_t rows = commands_ribbon_rows(l.text_width, l.ui_scale);
+        if (rows > 0 && l.text_height - rows >= RIBBON_MIN_NOTE_ROWS) {
+            l.ribbon_rows = rows;
+            l.ribbon_top = l.bar_top - rows;
+            l.text_height -= rows;
+        }
+    }
     return l;
 }
 
@@ -1061,7 +1115,8 @@ static void update_title(void)
     case MODE_FM_EDIT:
     case MODE_BLOCK_EDIT:
     case MODE_TOC:
-    case MODE_SEARCH: {
+    case MODE_SEARCH:
+    case MODE_MENU: {
         // Use document title if available, otherwise "Dawn"
         const char* title = fm_get_string(app.frontmatter, "title");
         DAWN_BACKEND(app)->set_title(title ? title : "Dawn");
@@ -3089,6 +3144,272 @@ skip_chat:
 
 // #endregion
 
+// #region Commands: the phone action bar, the formatting ribbon and the command menu
+
+//! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
+static MenuState menu;
+
+//! The key of a command picked in the menu, pressed at the top of the next handle_input() as if
+//! it had been typed, so running it from the menu is the same as pressing its shortcut.
+static int32_t pending_key = DAWN_KEY_NONE;
+
+//! Whether cmd can run on the writing screen now: its CommandFlag needs against the app's state.
+static bool command_enabled(const Command* cmd)
+{
+    if (!cmd)
+        return false;
+    if ((cmd->flags & CMD_NEEDS_EDIT) && !CAN_EDIT())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_MODIFY) && !CAN_MODIFY())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_SELECTION) && !has_selection())
+        return false;
+    if ((cmd->flags & CMD_NEEDS_TIMER) && !(app.timer_on && app.timer_mins > 0))
+        return false;
+#if HAS_LIBAI
+    if ((cmd->flags & CMD_NEEDS_AI) && !app.ai_ready)
+        return false;
+#endif
+    return true;
+}
+
+//! Whether the action bar shows: where the screen gives it a place (action_bar_place), on the
+//! writing screen and under its command menu, and not when its rows are the note's.
+static bool action_bar_shown(const Layout* L)
+{
+    if (!action_bar_place())
+        return false;
+    if (app.mode != MODE_WRITING && app.mode != MODE_MENU)
+        return false;
+    return L->bar_top >= L->top_margin + L->text_height;
+}
+
+//! The action bar, on the blank row above the status line: the commands dawn_commands places on
+//! the bar ("undo   find   Aa   AI"), then "more" for the command menu, in the status line's dim,
+//! a command that cannot run now dimmer, "Aa" underlined (pressed) while the ribbon is on. Where
+//! the terminal sizes text it is drawn at L->ui_scale 2: two rows tall from L->bar_top, each label
+//! twice as wide, placed by commands_bar_layout. Each is a tap on its key (its text and a cell
+//! either side, on all of the bar's rows), registered only on the writing screen itself. Items are
+//! dropped from the right when the row is too narrow; "more" always stays.
+static void render_action_bar(const Layout* L)
+{
+    if (!action_bar_shown(L))
+        return;
+
+    enum { BAR_MAX = 8 };
+    const Command* items[BAR_MAX];
+    int32_t widths[BAR_MAX];
+    int32_t n = commands_bar(items, BAR_MAX);
+    for (int32_t i = 0; i < n; i++)
+        widths[i] = (int32_t)strlen(commands_bar_label(items[i])); // plain ASCII labels
+    const Command* more = commands_find(DAWN_KEY_CMD_MENU);
+    if (!more)
+        return;
+    int32_t more_w = (int32_t)strlen(commands_bar_label(more));
+    int32_t scale = L->ui_scale;
+    BarSlot slots[BAR_MAX + 1];
+    int32_t kept = commands_bar_layout(widths, n, more_w, scale, L->text_width, slots);
+    if (kept < 0)
+        return;
+
+    int32_t row = L->bar_top;
+    bool taps = app.mode == MODE_WRITING;
+    set_bg(get_bg());
+    for (int32_t i = 0; i <= kept; i++) {
+        const Command* c = i < kept ? items[i] : more;
+        int32_t col = L->margin + 1 + slots[i].col;
+        int32_t w = slots[i].width;
+        const char* label = commands_bar_label(c);
+        move_to(row, col);
+        set_fg(command_enabled(c) ? get_dim() : get_border());
+        bool pressed = c->key == DAWN_KEY_CMD_RIBBON && app.ribbon; // like a pressed ribbon button
+        if (pressed)
+            set_underline(UNDERLINE_STYLE_SINGLE);
+        print_scaled_str(label, strlen(label), scale);
+        if (pressed)
+            clear_underline();
+        if (taps) {
+            int32_t from = col > 1 ? col - 1 : col;
+            int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
+            hit_add(from, row, to - from + 1, scale, HIT_KEY, c->key, 0);
+        }
+    }
+}
+
+//! The cursor and selection as dawn_format takes them
+static FormatCursor format_cursor(void)
+{
+    return (FormatCursor) {
+        .cursor = app.cursor,
+        .anchor = app.selecting ? app.sel_anchor : app.cursor,
+        .selecting = app.selecting,
+    };
+}
+
+//! A ribbon button's key: its FormatOp on the cursor or the selection, as one undo step. The
+//! cursor and selection follow the text (an insert selects the part to type over).
+static void format_key(int32_t key)
+{
+    FormatOp op = (FormatOp)(key - DAWN_KEY_FMT_BOLD);
+    FormatCursor fc = format_cursor();
+    // The op runs on a copy first: a button that changes nothing (bold on nothing, H1 on an H1
+    // line) must leave no undo step behind, and save_undo_state() frees the redo tail and may
+    // evict the oldest state, which cannot be taken back once done.
+    size_t len = gap_len(&app.text);
+    char* copy = malloc(len > 0 ? len : 1);
+    if (!copy)
+        return;
+    gap_copy_to(&app.text, 0, len, copy);
+    GapBuffer probe;
+    gap_init(&probe, len + GAP_BUFFER_GAP_SIZE);
+    gap_insert_str(&probe, 0, copy, len);
+    free(copy);
+    FormatCursor probe_fc = fc;
+    bool changes = format_apply(&probe, op, &probe_fc);
+    gap_free(&probe);
+    if (!changes)
+        return;
+    save_undo_state(); // the note as it was: Ctrl+Z comes back here
+    if (!format_apply(&app.text, op, &fc))
+        return; // the probe changed, so this does too
+    app.cursor = fc.cursor;
+    app.sel_anchor = fc.anchor;
+    app.selecting = fc.selecting;
+    // The block cache reparses on a length change only; a same-length edit must say so.
+    if (app.block_cache)
+        block_cache_invalidate((BlockCache*)app.block_cache);
+}
+
+//! The formatting ribbon: the format group's buttons ("B  I  S  `  H1 ...") on the rows calc_layout
+//! keeps for it, in the status line's dim, wrapped between clusters when the row is narrow. Where
+//! the terminal sizes text they are drawn at L->ui_scale 2, each button two rows tall and twice as
+//! wide, laid out in scaled cells by commands_ribbon_place. A style that is on at the cursor or
+//! over the selection is underlined, a pressed button; when the note cannot be edited (focus mode)
+//! every button is dimmer. Each is a tap on its key (its text and a cell either side, on all of its
+//! rows) and the rest of the ribbon swallows taps, registered only on the writing screen itself.
+static void render_ribbon(const Layout* L)
+{
+    if (L->ribbon_rows <= 0)
+        return;
+    const Command* items[RIBBON_MAX];
+    RibbonSlot slots[RIBBON_MAX];
+    int32_t n = commands_ribbon(items, RIBBON_MAX);
+    int32_t scale = L->ui_scale;
+    if (commands_ribbon_place(items, n, L->text_width, scale, slots) <= 0)
+        return;
+
+    bool taps = app.mode == MODE_WRITING;
+    bool can = CAN_EDIT();
+    FormatCursor fc = format_cursor();
+    // format_state scans the selection's lines, and a frame comes every few milliseconds: the
+    // pressed states are worked out again only when the cursor, the selection or the text
+    // (its length, or an undo step) changed since the last frame.
+    static struct {
+        bool valid;
+        FormatCursor fc;
+        size_t len;
+        int32_t undo_count, undo_pos;
+        bool pressed[FORMAT_COUNT];
+    } cache;
+    size_t len = gap_len(&app.text);
+    if (!cache.valid || cache.fc.cursor != fc.cursor || cache.fc.anchor != fc.anchor
+        || cache.fc.selecting != fc.selecting || cache.len != len || cache.undo_count != app.undo_count
+        || cache.undo_pos != app.undo_pos) {
+        for (int32_t i = 0; i < n && i < FORMAT_COUNT; i++)
+            cache.pressed[i] = format_state(&app.text, &fc, (FormatOp)(items[i]->key - DAWN_KEY_FMT_BOLD));
+        cache.valid = true;
+        cache.fc = fc;
+        cache.len = len;
+        cache.undo_count = app.undo_count;
+        cache.undo_pos = app.undo_pos;
+    }
+    if (taps)
+        hit_add(1, L->ribbon_top, L->text_area_cols, L->ribbon_rows, HIT_INERT, 0, 0);
+    set_bg(get_bg());
+    for (int32_t i = 0; i < n; i++) {
+        int32_t row = L->ribbon_top + slots[i].row;
+        int32_t col = L->margin + 1 + slots[i].col;
+        int32_t w = slots[i].width;
+        bool pressed = can && i < FORMAT_COUNT && cache.pressed[i];
+        const char* label = commands_bar_label(items[i]);
+        move_to(row, col);
+        set_fg(can ? get_dim() : get_border());
+        if (pressed)
+            set_underline(UNDERLINE_STYLE_SINGLE);
+        print_scaled_str(label, strlen(label), scale);
+        if (pressed)
+            clear_underline();
+        if (taps) {
+            int32_t from = col > 1 ? col - 1 : col;
+            int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
+            hit_add(from, row, to - from + 1, scale, HIT_KEY, items[i]->key, 0);
+        }
+    }
+}
+
+//! The status panel's corner (dawn_status) on the writing screen without a chat sheet: the blank
+//! rows between the text and the status line, less the ribbon's and the action bar's (ui_scale
+//! rows from bar_top, left blank when the bar does not show).
+static void status_area_writing(const Layout* L)
+{
+    int32_t top = L->bar_top - 1 - L->ribbon_rows;
+    int32_t bottom = action_bar_shown(L) || L->ribbon_rows > 0 ? top : app.rows - 1;
+    status_area(top, bottom, L->text_area_cols, status_panel_cols(L), false);
+}
+
+//! Rows the command menu's list shows (render_menu's box less its border, title and hints)
+static int32_t menu_page(void)
+{
+    int32_t h = menu.count + 4 < app.rows ? menu.count + 4 : app.rows;
+    return h - 4 > 1 ? h - 4 : 1;
+}
+
+// #endregion
+
+// #region One-shot tips
+
+//! The tip posted and not yet drawn, TIP_COUNT for none: a tip counts as given (and is saved as
+//! seen) only once render_status_bar() has drawn it.
+static TipId tip_pending = TIP_COUNT;
+
+//! Give a one-shot tip (dawn_tips) as a NOTICE_TIP, which takes the writing screen's whole status
+//! line. Only where that line is drawn and shows notices: the writing screen, not printing or
+//! previewing, not in focus mode, not under the chat's bottom sheet; and never over another
+//! notice (a sticky error among them). The moment comes again, and the tip waits for it.
+static void tip_show(TipId id, const char* text)
+{
+    if (tips_seen(id) || IS_PRINT_MODE() || app.mode != MODE_WRITING || app.preview_mode || app.focus_mode
+        || app.plain_mode)
+        return; // plain text draws no status line, so a tip would never be drawn or marked seen
+    if (notice_current(NULL, NULL, NULL) || calc_layout().ai_sheet)
+        return;
+    notice_post(NOTICE_TIP, text);
+    tip_pending = id;
+}
+
+//! The status line drew a NOTICE_TIP: the tip behind it is given, and remembered.
+static void tip_drawn(void)
+{
+    if (tip_pending == TIP_COUNT)
+        return;
+    tips_mark(tip_pending);
+    tip_pending = TIP_COUNT;
+    settings_save();
+}
+
+//! Bytes of s's first cols code points (each counted as one column)
+static size_t tip_prefix(const char* s, int32_t cols)
+{
+    size_t n = 0;
+    for (; s[n]; n++) {
+        if (((unsigned char)s[n] & 0xC0) != 0x80 && cols-- <= 0)
+            break;
+    }
+    return n;
+}
+
+// #endregion
+
 // #region Status Bar Rendering
 
 //! Render status bar
@@ -3101,6 +3422,27 @@ static void render_status_bar(const Layout* L)
     move_to(app.rows, 1);
     for (int32_t i = 0; i < L->text_area_cols; i++)
         out_char(' ');
+
+    // A one-shot tip (dawn_tips) has the line to itself while it shows, dim and fading like any
+    // notice: no word count, timer, selection or hints, so all of the text width is its own.
+    const char* tip_text;
+    NoticeKind tip_kind;
+    float tip_fresh;
+    if (!app.focus_mode && notice_current(&tip_text, &tip_kind, &tip_fresh) && tip_kind == NOTICE_TIP) {
+        int32_t room = status_right - status_left + 1;
+        size_t len = strlen(tip_text);
+        size_t fit = room > 0 ? tip_prefix(tip_text, room) : 0;
+        bool cut = fit < len;
+        if (cut)
+            len = room > 1 ? tip_prefix(tip_text, room - 1) : 0; // the ellipsis takes a cell
+        move_to(app.rows, status_left);
+        set_fg(color_lerp(get_bg(), get_dim(), tip_fresh));
+        out_str_n(tip_text, len);
+        if (cut && room > 0)
+            out_str("…");
+        tip_drawn();
+        return;
+    }
 
     move_to(app.rows, status_left);
     set_fg(get_dim());
@@ -3850,8 +4192,12 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
-    // The status panel's corner (dawn_status): the two blank rows under the text.
-    status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+    // Plain text has no status line, but the action bar and the ribbon still show (on a phone the
+    // bar is the way back out). The status panel's corner (dawn_status): the blank rows under the
+    // text.
+    render_ribbon(&L);
+    render_action_bar(&L);
+    status_area_writing(&L);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
     status_cursor(cursor_screen_row, cursor_screen_col);
@@ -3986,6 +4332,8 @@ static void render(void)
         last_mode = app.mode;
     }
 
+    // Taps are looked up in what this frame draws (dawn_hit): each screen registers its own.
+    hit_frame_begin();
     sync_begin();
     cursor_visible(false);
     scrollind_frame_begin();
@@ -4017,7 +4365,12 @@ static void render(void)
         render_fm_edit();
         break;
     case MODE_HELP:
-        render_writing();
+        // Help over what it was opened from: the start screen's ? would otherwise show the last
+        // note's status line under the box.
+        if (app.prev_mode == MODE_WELCOME)
+            render_welcome();
+        else
+            render_writing();
         render_help();
         break;
     case MODE_BLOCK_EDIT:
@@ -4038,6 +4391,13 @@ static void render(void)
     case MODE_CONFLICT:
         render_writing();
         render_conflict();
+        break;
+    case MODE_MENU:
+        render_writing();
+        render_menu(&menu);
+        break;
+    case MODE_TOUR:
+        render_tour();
         break;
     }
 
@@ -4732,6 +5092,14 @@ static void handle_writing(int32_t key)
     // this is where a touch-detached view reattaches to the cursor (dawn_touch).
     app.view_detached = false;
 
+    // The formatting ribbon's buttons, one key per FormatOp (a range, which a portable switch
+    // cannot spell as one case).
+    if (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK) {
+        if (CAN_EDIT())
+            format_key(key);
+        return;
+    }
+
     switch (key) {
     case '\x1b':
         if (app.ai_open)
@@ -4776,8 +5144,31 @@ static void handle_writing(int32_t key)
         footnote_jump(&app.text, &app.cursor);
         break;
     case 15:
-        app.help_page = 0;
+        app.help_page = HELP_PAGE_SHORTCUTS;
+        app.help_screen = 0;
         MODE_PUSH(MODE_HELP);
+        break;
+    case DAWN_KEY_CMD_CHEATSHEET:
+        app.help_page = HELP_PAGE_CHEATSHEET;
+        app.help_screen = 0;
+        MODE_PUSH(MODE_HELP);
+        break;
+    case DAWN_KEY_CMD_TOUR: // "welcome tour" in the menu: the first-run cards again, back to the note after
+        app.tour_card = 0;
+        app.tour_pushed = true;
+        MODE_PUSH(MODE_TOUR);
+        break;
+
+    case 29: // Ctrl+] - the command menu (dawn_commands), also "more" on the action bar
+    case DAWN_KEY_CMD_MENU:
+        menu_build(&menu, command_enabled);
+        MODE_PUSH(MODE_MENU);
+        break;
+    case DAWN_KEY_CMD_RIBBON: // "Aa" on the action bar, "formatting" in the menu
+        if (!CAN_MODIFY())
+            break;
+        app.ribbon = !app.ribbon;
+        settings_save();
         break;
 
     case 12: // Ctrl+L - Table of Contents
@@ -5434,22 +5825,13 @@ static void handle_ai_input(int32_t key)
 
 //! A key on MODE_HELP's meaning page: m switches the index off or on (and remembers it in
 //! settings.json), r arms a rebuild and a second r within HELP_REBUILD_CONFIRM_MS starts it; a tap
-//! on either row does the same. A tap elsewhere in the box, and the release, drag and scroll that
-//! come with taps, do nothing (the release after a tap on a row would otherwise close help).
+//! on either row arrives as that key (render_help registers them). A swipe over the page does
+//! nothing.
 //! @return false for any other key, which closes help
 static bool help_meaning_key(int32_t key)
 {
-    if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_SCROLL_UP
-        || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
+    if (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN)
         return true;
-    if (key == DAWN_KEY_MOUSE_CLICK) {
-        int32_t hit = render_help_hit(input_last_mouse_row(), input_last_mouse_col());
-        if (hit == HELP_HIT_OUTSIDE)
-            return false;
-        if (hit == HELP_HIT_BOX)
-            return true;
-        key = hit == HELP_HIT_TOGGLE ? 'm' : 'r';
-    }
     if (key == 'm') {
         app.meaning_index = !app.meaning_index;
         embed_set_enabled(app.meaning_index);
@@ -5473,9 +5855,212 @@ static bool help_meaning_key(int32_t key)
     return false;
 }
 
+// #region Taps on hit regions (dawn_hit)
+
+//! A drag of a scroll pill in progress: the press landed on its track (HIT_PILL), and every
+//! DAWN_KEY_MOUSE_DRAG until the release moves the pane's content with the finger.
+static struct {
+    bool active;
+    ScrollIndPane pane;
+    int32_t grab; //!< scrollind_grab(): how far down the pill the finger holds it, in pixels
+} pill_drag;
+
+//! Scroll the dragged pane so its pill sits under a finger on screen row row. The note detaches
+//! from the cursor, as a swipe does, so render_writing() doesn't scroll it back.
+static void pill_follow(int32_t row)
+{
+    int32_t offset = scrollind_offset_at(pill_drag.pane, row, pill_drag.grab);
+    if (pill_drag.pane == SCROLLIND_CHAT) {
+        // chat_scroll counts rows up from the newest; the offset counts down from the oldest.
+        app.chat_scroll = chat_max_scroll - offset;
+        if (app.chat_scroll < 0)
+            app.chat_scroll = 0;
+    } else {
+        app.view_detached = true;
+        app.scroll_y = offset;
+    }
+}
+
+//! A press on a pane's pill track: hold the pill where the finger landed on it, or jump it to
+//! centre on a finger beside it. A press while the chat's model picker is open is the picker's.
+//! @return false when the press is not the pill's after all
+static bool pill_press(int32_t pane, int32_t row)
+{
+    if (pane < 0 || pane >= SCROLLIND_PANE_COUNT)
+        return false;
+#if HAS_LIBAI
+    // The picker lies over the chat's messages, and its rows reach the pill's columns.
+    if (pane == SCROLLIND_CHAT && chat_picker.open)
+        return false;
+#endif
+    pill_drag.active = true;
+    pill_drag.pane = (ScrollIndPane)pane;
+    bool on_pill = false;
+    pill_drag.grab = scrollind_grab(pill_drag.pane, row, &on_pill);
+    touch_state.press_active = false;
+    touch_state.tap_run = 0;
+    if (!on_pill)
+        pill_follow(row);
+    return true;
+}
+
+//! Pick row row of the current screen's list (HIT_ROW), before the region's key is pressed.
+//! @return false when the screen has no such row
+static bool hit_pick_row(int32_t row)
+{
+    if (row < 0)
+        return false;
+    switch (app.mode) {
+    case MODE_HISTORY:
+        if (row >= app.hist_count)
+            return false;
+        app.hist_sel = row;
+        return true;
+    case MODE_TIMER_SELECT:
+        if (row >= (int32_t)NUM_PRESETS)
+            return false;
+        app.preset_idx = row;
+        app.timer_mins = TIMER_PRESETS[row];
+        settings_save();
+        return true;
+    case MODE_STYLE:
+        if (row > STYLE_ELEGANT)
+            return false;
+        app.style = (WritingStyle)row;
+        return true;
+    case MODE_TOC: {
+        TocState* toc = (TocState*)app.toc_state;
+        if (!toc || row >= toc->filtered_count)
+            return false;
+        toc->selected = row;
+        return true;
+    }
+    case MODE_FM_EDIT:
+        // While a new field's name is being typed the rows stay put.
+        if (app.fm_edit.adding_field || row >= app.fm_edit.field_count)
+            return false;
+        app.fm_edit.current_field = row;
+        return true;
+    case MODE_BLOCK_EDIT:
+        if (row > 3)
+            return false;
+        app.block_edit.field = row;
+        return true;
+    case MODE_MENU:
+        if (row >= menu.count || !menu.lines[row].cmd || !menu.lines[row].enabled)
+            return false;
+        menu.selected = row;
+        return true;
+    default:
+        return false;
+    }
+}
+
+//! Touch before the mode sees the key: a press looks up what the last frame drew under the finger
+//! (dawn_hit). A key region becomes that key, which the mode then handles like a typed one; a
+//! list row is picked, then its key pressed; a pill track starts a drag that the following drag
+//! events move and the release ends; a box with nothing there swallows the press. A press on
+//! nothing reaches the mode unchanged (the note's own cursor and selection taps), and a swipe
+//! over a list moves its highlight.
+//! @return the key for the mode to handle, or DAWN_KEY_NONE when the touch is used up
+static int32_t touch_to_key(int32_t key)
+{
+    if (pill_drag.active && app.mode != MODE_WRITING)
+        pill_drag.active = false;
+
+    if (key == DAWN_KEY_MOUSE_CLICK) {
+        pill_drag.active = false;
+        int32_t row = input_last_mouse_row();
+        HitTarget t;
+        if (!hit_find(input_last_mouse_col(), row, &t))
+            return key;
+        switch (t.kind) {
+        case HIT_KEY:
+            return t.key;
+        case HIT_ROW:
+            return hit_pick_row(t.arg) && t.key ? t.key : DAWN_KEY_NONE;
+        case HIT_PILL:
+            return pill_press(t.arg, row) ? DAWN_KEY_NONE : key;
+        case HIT_INERT:
+            return DAWN_KEY_NONE;
+        }
+        return key;
+    }
+
+    if (pill_drag.active && (key == DAWN_KEY_MOUSE_DRAG || key == DAWN_KEY_MOUSE_RELEASE)) {
+        if (key == DAWN_KEY_MOUSE_DRAG)
+            pill_follow(input_last_mouse_row());
+        else
+            pill_drag.active = false;
+        return DAWN_KEY_NONE;
+    }
+
+    if ((app.mode == MODE_HISTORY || app.mode == MODE_TOC || app.mode == MODE_MENU)
+        && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
+        return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_UP : DAWN_KEY_DOWN;
+
+    // A swipe over the tour turns its cards like the arrows.
+    if (app.mode == MODE_TOUR && (key == DAWN_KEY_MOUSE_SCROLL_UP || key == DAWN_KEY_MOUSE_SCROLL_DOWN))
+        return key == DAWN_KEY_MOUSE_SCROLL_UP ? DAWN_KEY_LEFT : DAWN_KEY_RIGHT;
+
+    return key;
+}
+
+//! End the tour (enter on its last card, esc on any): remember it was seen, then go to the start
+//! screen, or back where it was opened from when a command opened it again.
+static void tour_end(void)
+{
+    if (!app.onboarded) {
+        app.onboarded = true;
+        settings_save();
+    }
+    app.tour_card = 0;
+    if (app.tour_pushed) {
+        app.tour_pushed = false;
+        MODE_POP();
+    } else {
+        app.mode = MODE_WELCOME;
+    }
+}
+
+//! A key on MODE_TOUR: enter or -> turns to the next card, <- to the one before (a swipe and a
+//! tap on the footer's hints arrive as these keys); enter on the last card, or esc, ends it.
+static void tour_key(int32_t key)
+{
+    int32_t cards = render_tour_cards();
+    switch (key) {
+    case DAWN_KEY_RIGHT:
+        if (app.tour_card < cards - 1)
+            app.tour_card++;
+        break;
+    case DAWN_KEY_LEFT:
+        if (app.tour_card > 0)
+            app.tour_card--;
+        break;
+    case '\r':
+    case '\n':
+        if (app.tour_card < cards - 1)
+            app.tour_card++;
+        else
+            tour_end();
+        break;
+    case '\x1b':
+        tour_end();
+        break;
+    default:
+        break;
+    }
+}
+
+// #endregion
+
 static void handle_input(void)
 {
-    int32_t key = input_read_key();
+    // A command picked in the menu is pressed now, through the same path as a typed key.
+    int32_t key = pending_key;
+    pending_key = DAWN_KEY_NONE;
+    if (key == DAWN_KEY_NONE)
+        key = input_read_key();
     if (key == DAWN_KEY_NONE)
         return;
 
@@ -5505,6 +6090,11 @@ static void handle_input(void)
     if (voice_handle_key(key))
         return;
 
+    // A tap on something drawn as tappable is the key it stands for (dawn_hit).
+    key = touch_to_key(key);
+    if (key == DAWN_KEY_NONE)
+        return;
+
     switch (app.mode) {
     case MODE_WELCOME:
         switch (key) {
@@ -5530,7 +6120,8 @@ static void handle_input(void)
             settings_save();
             break;
         case '?':
-            app.help_page = 0;
+            app.help_page = HELP_PAGE_SHORTCUTS;
+            app.help_screen = 0;
             MODE_PUSH(MODE_HELP);
             break;
         }
@@ -6189,11 +6780,9 @@ static void handle_input(void)
         break;
 
     case MODE_CONFLICT: {
-        // r / o / k (or esc), or a tap on one of the three rows.
+        // r / o / k (or esc); a tap on one of the three rows arrives as its key (render_conflict).
         int32_t choice = -1;
-        if (key == DAWN_KEY_MOUSE_CLICK)
-            choice = render_conflict_hit(input_last_mouse_row(), input_last_mouse_col());
-        else if (key == 'r' || key == 'R')
+        if (key == 'r' || key == 'R')
             choice = CONFLICT_RELOAD;
         else if (key == 'o' || key == 'O')
             choice = CONFLICT_OVERWRITE;
@@ -6215,22 +6804,76 @@ static void handle_input(void)
         break;
     }
 
+    case MODE_MENU:
+        // The release and drag that follow a tap are no keys: the one after the tap on "more"
+        // would otherwise act at once. A tap outside the box (no region there) closes the menu;
+        // enter closes it and then presses the command's key (pending_key).
+        if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
+            break;
+        switch (key) {
+        case DAWN_KEY_UP:
+        case 'k':
+            menu.selected = menu_step(&menu, menu.selected, -1, 1);
+            break;
+        case DAWN_KEY_DOWN:
+        case 'j':
+            menu.selected = menu_step(&menu, menu.selected, 1, 1);
+            break;
+        case DAWN_KEY_PGUP:
+            menu.selected = menu_step(&menu, menu.selected, -1, menu_page());
+            break;
+        case DAWN_KEY_PGDN:
+            menu.selected = menu_step(&menu, menu.selected, 1, menu_page());
+            break;
+        case DAWN_KEY_HOME:
+            menu.selected = menu_step(&menu, menu.selected, -1, menu.count);
+            break;
+        case DAWN_KEY_END:
+            menu.selected = menu_step(&menu, menu.selected, 1, menu.count);
+            break;
+        case '\r':
+        case '\n':
+            if (menu.selected >= 0 && menu.selected < menu.count && menu.lines[menu.selected].enabled)
+                pending_key = menu.lines[menu.selected].cmd->key;
+            MODE_POP();
+            break;
+        case '\x1b':
+        case 29:
+        case DAWN_KEY_CMD_MENU:
+        case DAWN_KEY_MOUSE_CLICK:
+            MODE_POP();
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case MODE_TOUR:
+        tour_key(key);
+        break;
+
     case MODE_HELP: {
-        // A second page (Tab or -> to get there, <- back) lists notices newest-first, so a
-        // failed save or an AI edit can be found again without adding anything to the page itself.
-        // A third, where the meaning index is compiled in, shows what it is doing and has its
-        // switch and its rebuild. Any other key closes help.
-        int32_t last_page = DAWN_EMBED_LIVE ? 2 : 1;
-        if (key == '\t' || key == DAWN_KEY_RIGHT) {
-            if (app.help_page < last_page)
-                app.help_page++;
-        } else if (key == DAWN_KEY_LEFT) {
-            if (app.help_page > 0)
-                app.help_page--;
-        } else if (app.help_page != 2 || !help_meaning_key(key)) {
+        // Tab or -> turns to the next screen, <- back (HelpPage order): the shortcuts and the
+        // Markdown cheatsheet over as many screens as the box needs at this height, then the
+        // notices newest-first, so a failed save or an AI edit can be found again, then, where the
+        // meaning index is compiled in, what it is doing with its switch and its rebuild. Any
+        // other key closes help, and so does a tap outside the box (render_help makes its footer
+        // hints taps on their keys and the rest of the box inert). The release and drag that
+        // follow a tap are no keys: the one after the tap that opened help, or turned its page,
+        // would otherwise close it at once.
+        if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
+            break;
+        if (key == '\t' || key == DAWN_KEY_RIGHT || key == DAWN_KEY_LEFT) {
+            HelpPage page;
+            int32_t screen;
+            if (render_help_neighbour(key == DAWN_KEY_LEFT ? -1 : 1, &page, &screen)) {
+                app.help_page = page;
+                app.help_screen = screen;
+            }
+        } else if (app.help_page != HELP_PAGE_MEANING || !help_meaning_key(key)) {
             MODE_POP();
         }
-        if (app.help_page != 2)
+        if (app.help_page != HELP_PAGE_MEANING)
             app.help_rebuild_armed = 0;
         break;
     }
@@ -6415,7 +7058,17 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
         app.nerd_font = app.launcher_term;
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
+    app.ribbon = false; // the formatting ribbon is off until "Aa" turns it on ("ribbon": true)
+    app.onboarded = false; // the tour shows until settings.json says "onboarded": true
     settings_load();
+    // A first run opens on the tour's cards instead of the start screen; a note named on the
+    // command line still opens straight away (it sets MODE_WRITING after this), and the tour
+    // waits for a later start.
+    if (!app.onboarded) {
+        app.mode = MODE_TOUR;
+        app.tour_card = 0;
+        app.tour_pushed = false;
+    }
     embed_set_enabled(app.meaning_index); // before embed_start(), which then stays quiet when off
     if (theme_override >= 0) {
         app.theme = (Theme)theme_override;
@@ -6504,6 +7157,8 @@ static bool on_note_screen(void)
     case MODE_TOC:
     case MODE_SEARCH:
     case MODE_CONFLICT:
+    case MODE_MENU:
+    case MODE_TOUR:
         return app.prev_mode == MODE_WRITING;
     default:
         return false;
@@ -6593,8 +7248,10 @@ bool dawn_frame(void)
         if (app.last_save_time == 0)
             app.last_save_time = now;
         else if (now - app.last_save_time >= 5) {
-            if (!app.save_paused || note_conflict_text_changed())
-                save_session();
+            // The first save that wrote a note with text gives its tip (once, on the status line).
+            if ((!app.save_paused || note_conflict_text_changed()) && save_session() && !app.dirty
+                && !app.save_paused && gap_len(&app.text) > 0)
+                tip_show(TIP_FIRST_SAVE, "saved · dawn saves as you type");
             app.last_save_time = now;
         }
     }
@@ -6627,6 +7284,10 @@ bool dawn_frame(void)
         embed_tell_failure();
     }
     handle_input();
+    // The first selection on the writing screen, however it was made (shift and arrows, a drag,
+    // a double tap, select all), gives its tip once.
+    if (app.mode == MODE_WRITING && !tips_seen(TIP_FIRST_SELECT) && has_selection())
+        tip_show(TIP_FIRST_SELECT, "selected · Aa formats it, AI can rewrite it");
     render();
 
     return true;
@@ -7209,13 +7870,16 @@ static void render_writing(void)
     // Under a sheet the note has no status line: the chat's input line is the bottom edge.
     if (!L.ai_sheet)
         render_status_bar(&L);
+    render_ribbon(&L);
+    render_action_bar(&L);
 
     // The status panel's corner (dawn_status): the two blank rows between the text and the status
-    // line, or the one between the text and a chat sheet.
+    // line (one when the action bar or the ribbon takes the lower), or the one between the text and
+    // a chat sheet.
     if (L.ai_sheet)
         status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
     else
-        status_area(app.rows - 2, app.rows - 1, L.text_area_cols, status_panel_cols(&L), false);
+        status_area_writing(&L);
 
     if (app.ai_open) {
         render_ai_panel(&L);

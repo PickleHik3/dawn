@@ -74,6 +74,30 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_MOUSE_CLICK,
     DAWN_KEY_MOUSE_RELEASE, //!< Button 0 released (SGR 'm' terminator)
     DAWN_KEY_MOUSE_DRAG, //!< Motion while button 0 held (SGR btn 32, needs mode 1002)
+    // Commands with no physical key of their own (dawn_commands): a tap region or the command
+    // menu synthesises them, and the writing screen handles them like any other key.
+    DAWN_KEY_CMD_MENU, //!< Open the command menu (also Ctrl+])
+    DAWN_KEY_CMD_RIBBON, //!< Show or hide the formatting ribbon
+    DAWN_KEY_CMD_CHEATSHEET, //!< Open help on its Markdown cheatsheet page
+    DAWN_KEY_CMD_TOUR, //!< Open the first-run tour again (MODE_TOUR)
+    // The formatting ribbon's buttons, in FormatOp order (dawn_format.h): the op is
+    // key - DAWN_KEY_FMT_BOLD.
+    DAWN_KEY_FMT_BOLD,
+    DAWN_KEY_FMT_ITALIC,
+    DAWN_KEY_FMT_STRIKE,
+    DAWN_KEY_FMT_CODE,
+    DAWN_KEY_FMT_H1,
+    DAWN_KEY_FMT_H2,
+    DAWN_KEY_FMT_H3,
+    DAWN_KEY_FMT_BULLET,
+    DAWN_KEY_FMT_NUMBERED,
+    DAWN_KEY_FMT_TASK,
+    DAWN_KEY_FMT_QUOTE,
+    DAWN_KEY_FMT_LINK,
+    DAWN_KEY_FMT_IMAGE,
+    DAWN_KEY_FMT_TABLE,
+    DAWN_KEY_FMT_RULE,
+    DAWN_KEY_FMT_CODE_BLOCK,
     DAWN_KEY_THEME_DARK, //!< Launcher reports dark mode (CSI ?997;1n)
     DAWN_KEY_THEME_LIGHT, //!< Launcher reports light mode (CSI ?997;2n)
     DAWN_KEY_BTAB,

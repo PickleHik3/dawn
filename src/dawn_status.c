@@ -14,8 +14,8 @@
 // is open the model's own rows stay out: the chat says the same.
 // Nothing is shown while nothing runs: an index that is current, off, failed (a notice says so),
 // waiting for TAI or without an embedder shows nothing. The one exception is the welcome screen's
-// "ai ready" row (an endpoint is configured and the model is not busy): it names the loaded model,
-// else the configured one, and rests with a still star in place of a spinner. It counts as going
+// resting row: "ai ready" naming the loaded model once the runtime reports one, else "ai loads on
+// first use" naming the configured one; a still star stands in for the spinner. It counts as going
 // on, so it slides in once and stays; a load or a job takes its place without the panel moving,
 // and it comes back the same way. It never shows inside a note, and goes at once, without
 // lingering, when the welcome screen does.
@@ -233,11 +233,16 @@ static int32_t collect_model(StatusLine* out, int32_t n, int64_t now)
     else if (strcmp(job, "quiet work") == 0)
         n = add_line(out, n, ICON_QUIET, BAR_NONE, 0, "working in the background", NULL);
 
-    // The welcome screen's "ai ready", while no other model row is out. It is active like any
+    // The welcome screen's resting row, while no other model row is out. It is active like any
     // row, so the panel slides in once and rests, and a load swaps rows with it without sliding.
+    // "ai ready" only once the runtime reports a loaded model: before that the model is loaded on
+    // first use (a note's first question, or the live title), and saying ready would be a lie
+    // the note then corrects with its "loading the model" row.
     if (n == 0 && g.area && g.welcome && g.configured) {
-        const char* model = g.info.loaded_model[0] ? g.info.loaded_model : session_model_id();
-        n = add_line(out, n, ICON_MODEL, BAR_NONE, 0, "ai ready", model);
+        if (g.info.loaded_model[0])
+            n = add_line(out, n, ICON_MODEL, BAR_NONE, 0, "ai ready", g.info.loaded_model);
+        else
+            n = add_line(out, n, ICON_MODEL, BAR_NONE, 0, "ai loads on first use", session_model_id());
         out[n - 1].rest = true;
     }
     return n;

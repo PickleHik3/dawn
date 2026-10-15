@@ -1651,6 +1651,10 @@ static char* build_body(const config_t* cfg, session_t* s, const stream_t* st, c
     cJSON* body = cJSON_CreateObject();
     if (cfg->model)
         cJSON_AddStringToObject(body, "model", cfg->model);
+    // Names the launcher feature this request serves, so TAI loads by Dawn chat's plan and keeps
+    // the note search model loaded alongside it. Only TAI gets it: other servers reject unknown fields.
+    if (cfg->tai)
+        cJSON_AddStringToObject(body, "function", "dawn_chat");
     cJSON_AddBoolToObject(body, "stream", true);
     // Asks for a final usage-only chunk (choices: []) so prompt/completion token counts can
     // calibrate the caller's own char-based estimate. Servers that don't understand the option

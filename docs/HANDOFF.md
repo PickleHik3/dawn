@@ -4,6 +4,85 @@ A rolling note for the next agent. Read it before starting; before ending a sess
 move finished items out, add what you left open, and date your entry. Newest session first. Keep
 it short: a line per item, with file:line or the command that shows it.
 
+## 2026-10-14 · touch and onboarding
+
+Done (on `tl`):
+- Hit regions and taps on every screen, and the draggable scroll pill: merge `0bd05f7` (`src/dawn_hit.c`).
+- The help box shrinks to a 24-row pane so its footer taps land: `4242eab`.
+- The pure format module (bold, lists, headings, inserts on the gap buffer): `3b830e6` (`src/dawn_format.c`).
+- The command table, the phone action bar and the command menu (Ctrl+], "more"): merge `18c1b5b` (`src/dawn_commands.c`).
+- The formatting ribbon toggled by `Aa`: merge `28fe8ca`.
+- Help by task with keys and taps, and the Markdown cheatsheet page: merge `bfc7186`.
+- First-run tour (`MODE_TOUR`, `render_tour` in `src/dawn_render.c`, `tour_key` in `src/dawn.c`) and the
+  one-shot tips' seen set (`src/dawn_tips.c`, `"onboarded"` and `"tips_seen"` in settings.json,
+  `./build/test-tips`): `9b6b594`. "welcome tour" in the menu's help group opens the tour again.
+- Help footer items keep their columns on every screen (blank back slot on the first): `2488424`.
+- The action bar and the ribbon draw at scale 2 (kitty text sizing, as headings do) where the
+  terminal has it: twice as tall and wide, tap regions to match; unchanged elsewhere. Merge
+  `d8dd401` (`commands_bar_layout`, `commands_ribbon_place` in `src/dawn_commands.c`; `ui_scale`,
+  `bar_top` in the Layout). Checked on the emulator 2026-10-15: both rows of a button tap, the
+  underline shows on scaled text, the menu opens over the scaled bar.
+- The start screen's panel says "ai ready" only once the runtime reports a loaded model, else
+  "ai loads on first use" with the configured model (`0459a14`, `src/dawn_status.c`); the user saw
+  "ai ready" followed by "loading the model" in the note.
+- In the launcher the note fills the pane with 2-cell margins (upstream centres a 70-column
+  reading column once the terminal is wider than 80, which on a phone with a small font or after
+  a pinch out put the note in a narrow column mid-screen), and the chat is a bottom sheet at any
+  width (`calc_layout`, `3bcc1fe`). The user reported the column on the A065.
+- Installed on the user's phone (A065) over SSH as `~/.local/bin/dawn` (build `0.1.3+d8dd401`);
+  the store build is kept beside it as `dawn.store-2026-10-10`. The `3bcc1fe` build is pushed to
+  `/sdcard/Download/dawn-arm64` (SSH over the Tailscale relay started corrupting connections);
+  install with `cp /sdcard/Download/dawn-arm64 ~/.local/bin/dawn`. PR #1 on GitHub has it all.
+
+- Two one-shot tips, each shown once as a `NOTICE_TIP` that has the writing screen's whole status
+  line to itself (`tip_show`, `tip_drawn` and `render_status_bar` in `src/dawn.c`): the first
+  selection ("selected · Aa formats it, AI can rewrite it") and the first autosave of a note with
+  text ("saved · dawn saves as you type"). A tip is marked seen only once the line drew it: `6ce9eb1`.
+  The other two tips planned (leaving a note, the first Markdown mark) were dropped: the tour's
+  cards say both, the start screen draws no notices, and ? types a question mark in a note.
+
+Open:
+1. Tips: the save tip comes only from the 5-second autosave, not the frontmatter editor's save or
+   esc. "Aa" in the selection tip names the phone's action bar, which a wide desktop terminal does
+   not draw.
+2. Checked on the emulator (x86_64 cross build of `ca712d0`, launcher terminal 53x30 with the keyboard
+   up; recipe in `tests/ux/phone/README.md`): welcome grid taps (history, write, timer, help), the
+   finished screen's "[esc] menu", the timer picker rows, the history row, the bar
+   (`undo find Aa AI more`), the ribbon (B on a word gives `**brave**`, H1 a scaled heading, both
+   pressed), the menu (cut/copy dim without a selection, pause timer dim without a timer, page down,
+   "find" opens search, "title and details" and "table of contents" open their dialogs), the AI sheet
+   from the bar, the pill's track tap (jumps to the end), the three tour cards by tapping
+   "[enter] next" and "[enter] start writing" (`onboarded` saved), both tips in full on the status
+   line once (`tips_seen` saved; selection made with the on-screen Ctrl then A), help page 1/4 with
+   the tap column, five "[tab]" taps at one spot walking 2/4, 3/4, 4/4, Markdown, Activity, and the
+   cheatsheet with real styles.
+   Still owed on the phone (A065, the user's; the user does these): Ctrl+] from the in-app keyboard,
+   the meaning page's m/r taps, the selection tip after a drag and a double tap, the chat pill with
+   the model picker open, and everything at 53x12 (the emulator gives 30 rows with the keyboard up).
+3. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
+4. Launcher side, not done: a dawn-aware extra-keys row (esc, ctrl, tab, arrows). Long press was
+   explicitly not done. Found on the emulator: the launcher's terminal sends a finger drag as wheel
+   events, never as SGR drag motion (`?1002`), so the pill follows the swipe instead of the finger
+   (the track tap works). If the launcher sent drag motion while `?1002` is on, dawn's pill drag
+   would work as written (`pill_follow` in `src/dawn.c`).
+5. Review leftovers (PR #1 review, judged marginal): `pill_transmit` keeps a stale pill when its
+   malloc fails (`src/dawn_scrollind.c`); a hint cut mid-word by an ellipsis still registers its
+   key over the stub (`hit_add_hints`); when settings.json cannot be written the tour returns on
+   the next launch. Known warts: a kitty-scaled heading paints over the top rows of a popup (menu, search) and
+   leaves a grey block beside the menu box at its rows (pre-existing with search).
+
+## 2026-10-08 · chat requests name the dawn_chat feature
+
+Done: `5ae91ba` (`libai/ai_bridge_openai.c` `build_body`) sends `"function": "dawn_chat"` when the
+provider is TAI (never to an `openai` provider, which rejects unknown fields). The launcher's feature
+load plan (launcher branch `feat/tai-feature-plan`, spec
+`project-docs/active/tai-feature-load-plan-2026-10-08.md`) then loads Dawn chat by its own plan and
+keeps the note search model loaded beside it.
+
+Open:
+1. Not pinned in tlstore (`DAWN_COMMIT` in `../tlstore/recipes/cross/build-dawn.sh`) and not released.
+   Ship it with the launcher release that carries `feat/tai-feature-plan`; an older launcher ignores the field.
+
 ## 2026-10-08 · earlier live titles for short notes
 
 Done: `20caf6c` (`src/dawn_title.c`) lowers the first live title from 160 to 60 characters and lets

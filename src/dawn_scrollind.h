@@ -28,6 +28,17 @@ void scrollind_show(ScrollIndPane pane, int32_t col, int32_t track_row, int32_t 
 //! a pane can drop its own text hint ("↑ scroll for more") in favour of one.
 bool scrollind_available(void);
 
+//! A press on the pane's pill track (its HIT_PILL region, registered by scrollind_show over the
+//! pane's two rightmost columns) at screen row row: how far down the pill the finger holds it, in
+//! pixels, to keep through a drag. That is where it landed on the pill (*on_pill true), or the
+//! pill's middle when it landed on the track beside it (the caller then jumps the pill to centre
+//! on the finger). on_pill may be NULL.
+int32_t scrollind_grab(ScrollIndPane pane, int32_t row, bool* on_pill);
+
+//! The content offset (first visible row, 0 to content - viewport) that puts the pane's pill
+//! under a finger on screen row row holding it grab pixels down, from where it was last placed.
+int32_t scrollind_offset_at(ScrollIndPane pane, int32_t row, int32_t grab);
+
 //! End a frame: hides every pane that wasn't shown since scrollind_frame_begin().
 void scrollind_frame_end(void);
 

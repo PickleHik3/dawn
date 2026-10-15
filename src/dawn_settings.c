@@ -1,8 +1,10 @@
 // dawn_settings.c - settings.json in the config directory: theme, timer, Nerd Font boxes, the
-// meaning index switch.
+// meaning index switch, the formatting ribbon, whether the first-run tour was seen ("onboarded")
+// and which one-shot tips were given ("tips_seen", dawn_tips).
 //
 // A save rewrites only the keys dawn sets and keeps every other one the file holds (nerd_font,
-// written by hand or by the launcher, among them). A settings.json that does not parse is set
+// written by hand or by the launcher, among them), and keeps tip names a newer dawn wrote in
+// "tips_seen". A settings.json that does not parse is set
 // aside as settings.json.corrupt-<time>, with a notice, and the defaults are used; one that cannot
 // be read is not written over. A failed write says so once, until a write gets through again.
 
@@ -11,6 +13,7 @@
 #include "dawn_file.h"
 #include "dawn_notepath.h"
 #include "dawn_notice.h"
+#include "dawn_tips.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -135,6 +138,16 @@ void settings_load(void)
     if (cJSON_IsBool(meaning_j))
         app.meaning_index = cJSON_IsTrue(meaning_j);
 
+    cJSON* ribbon_j = cJSON_GetObjectItem(root, "ribbon");
+    if (cJSON_IsBool(ribbon_j))
+        app.ribbon = cJSON_IsTrue(ribbon_j);
+
+    cJSON* onboarded_j = cJSON_GetObjectItem(root, "onboarded");
+    if (cJSON_IsBool(onboarded_j))
+        app.onboarded = cJSON_IsTrue(onboarded_j);
+
+    tips_load_json(cJSON_GetObjectItem(root, "tips_seen"));
+
     cJSON* timer_j = cJSON_GetObjectItem(root, "timer_mins");
     if (cJSON_IsNumber(timer_j)) {
         int32_t mins = (int32_t)timer_j->valuedouble;
@@ -163,6 +176,9 @@ void settings_save(void)
     set_item(root, "theme", cJSON_CreateString(app.theme == THEME_DARK ? "dark" : "light"));
     set_item(root, "timer_mins", cJSON_CreateNumber((double)app.timer_mins));
     set_item(root, "meaning_index", cJSON_CreateBool(app.meaning_index));
+    set_item(root, "ribbon", cJSON_CreateBool(app.ribbon));
+    set_item(root, "onboarded", cJSON_CreateBool(app.onboarded));
+    set_item(root, "tips_seen", tips_save_json(cJSON_GetObjectItem(root, "tips_seen")));
 
     char* json = cJSON_Print(root);
     cJSON_Delete(root);
