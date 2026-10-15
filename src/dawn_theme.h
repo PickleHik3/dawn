@@ -210,9 +210,12 @@ void print_scaled_str(const char* str, size_t len, int32_t scale);
 
 //! Print a string at scaled size as one block width cells wide (OSC 66 s=scale:w=width), so it
 //! covers width * scale columns whatever its characters are: a Nerd Font icon and a space come out
-//! full size this way, where each sized on its own comes out small. Plain text at scale 1 or
-//! without text sizing.
-void print_scaled_block(const char* str, size_t len, int32_t scale, int32_t width);
+//! full size this way, where each sized on its own comes out small. With num/denom > 0 the text
+//! is drawn at that part of the block's size (n=, d=), centred in its rows (v=2) and set in its
+//! columns by halign (h=: 0 left, 1 right, 2 centred); 0, 0 for full size. Plain text at scale 1
+//! or without text sizing.
+void print_scaled_block(const char* str, size_t len, int32_t scale, int32_t width, int32_t num, int32_t denom,
+    int32_t halign);
 
 //! Print a single character at fractionally scaled size
 //! Uses Kitty text sizing protocol: effective size = scale * (num/denom)

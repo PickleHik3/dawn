@@ -290,7 +290,8 @@ static inline Layout calc_layout(void)
     if (l.text_height < 1)
         l.text_height = 1;
     // The open tab's ribbon hangs under the tab row, its rows of buttons ui_scale + a caption's rows
-    // each, with the one blank row kept between it and the text, so the note never draws under a
+    // each and a blank row apart when scaled (ribbon_row_gap), with the one blank row kept between
+    // it and the text, so the note never draws under a
     // button. It pages rather than leave the note fewer than RIBBON_MIN_NOTE_ROWS, and while it
     // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open.
     if (l.tabs && ribbon_ui.tab >= 0 && !app.ai_open) {
@@ -3453,11 +3454,18 @@ typedef enum {
     FACE_BLOCK = 1 << 3, //!< One OSC 66 block face_cols wide (w=): a Nerd Font icon and its space
 } FaceStyle;
 
+//! A Nerd Font icon on a ribbon button is drawn this part of its block's size (OSC 66 n= and d=),
+//! so it keeps a margin inside its box rather than filling it edge to edge (a tall icon poked out
+//! of it): at scale 2 an icon 1.5 rows high with a quarter row clear above and below.
+#define RIBBON_ICON_NUM 3
+#define RIBBON_ICON_DEN 4
+
 //! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
 //! surface scale rows tall with face centred in it (face_cols columns at face_scale, set in style;
-//! FACE_BLOCK sends it as one block of face_cols cells, print_scaled_block),
-//! and caption centred under it on the ribbon's band at the caption's scale. Pressed: the box
-//! tinted with the accent and the face in it; disabled: face and caption in the border's colour.
+//! FACE_BLOCK sends it as one block of face_cols cells drawn RIBBON_ICON_NUM/DEN of its size,
+//! print_scaled_block), and caption centred under it on the ribbon's band at the caption's scale.
+//! Pressed: the box tinted with the accent and the face in it; disabled: face and caption in the
+//! border's colour.
 static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, const char* face,
     int32_t face_cols, int32_t face_scale, uint32_t style, const char* caption, bool enabled, bool pressed)
 {
@@ -3469,6 +3477,19 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
     }
     int32_t fw = face_cols * face_scale;
     int32_t fx = (w - fw) / 2;
+    int32_t halign = 2; // the icon centred in its block (h=2)
+    if (style & FACE_BLOCK) {
+        // A block covers fw cells, an even count, so centred in a box an odd count of cells wider
+        // it sits half a cell left of centre (4 cells in File's 7). The launcher draws the shrunk
+        // icon fw * NUM / DEN cells wide (3 at scale 2); when that leaves an even count in the box,
+        // the icon goes at its block's left edge (h=0) and the block where that centres it: a
+        // 3-cell icon from cell 2 of 7.
+        int32_t iw = fw * RIBBON_ICON_NUM;
+        if ((w - fw) % 2 != 0 && iw % RIBBON_ICON_DEN == 0 && (w - iw / RIBBON_ICON_DEN) % 2 == 0) {
+            fx = (w - iw / RIBBON_ICON_DEN) / 2;
+            halign = 0;
+        }
+    }
     move_to(top + (scale - face_scale) / 2, col + (fx > 0 ? fx : 0));
     set_fg(!enabled ? get_border() : pressed ? get_accent() : get_fg());
     if (style & FACE_BOLD)
@@ -3478,7 +3499,7 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
     if (style & FACE_STRIKE)
         set_strikethrough(true);
     if (style & FACE_BLOCK)
-        print_scaled_block(face, strlen(face), face_scale, face_cols);
+        print_scaled_block(face, strlen(face), face_scale, face_cols, RIBBON_ICON_NUM, RIBBON_ICON_DEN, halign);
     else
         print_scaled_str(face, strlen(face), face_scale);
     if (style & FACE_BOLD)
@@ -3578,7 +3599,8 @@ static void format_key(int32_t key)
 //! page showing, a divider between two sections side by side, a thin rule above a section stacked
 //! under another, and on a ribbon that pages a "more" button at the right end of its first row.
 //! Each button is a box with its glyph centred in it (the Nerd Font icon when the font is there, at
-//! a scale one two-cell OSC 66 block of the icon and a space;
+//! a scale one two-cell OSC 66 block of the icon and a space, the icon drawn three quarters of the
+//! block's size; a blank row (ribbon_row_gap) between two rows of buttons;
 //! bold, italic and strike set in their own style) over its caption, drawn at L->ui_scale; the
 //! model button's glyph is the model's short name when it fits, its caption whether the model is
 //! loaded. While the ribbon drops open only its rows already down are drawn. A command that

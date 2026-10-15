@@ -1075,8 +1075,12 @@ static void web_repeat_char(char c, int32_t n)
     web_state.cursor_col += n;
 }
 
-static void web_write_scaled(const char* str, size_t len, int32_t scale, int32_t width)
+static void web_write_scaled(const char* str, size_t len, int32_t scale, int32_t width, int32_t num, int32_t denom,
+    int32_t halign)
 {
+    (void)num; // drawn full size and from the left here
+    (void)denom;
+    (void)halign;
     if (scale <= 1) {
         web_write_str(str, len);
         return;
