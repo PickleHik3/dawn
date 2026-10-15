@@ -193,11 +193,13 @@ typedef struct {
     int32_t more_width; //!< Its width in screen cells (0 when there is none)
 } RibbonFrame;
 
-//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart. Sections
-//! wrap as blocks: a section sits beside the one before it (after RIBBON_DIVIDER cells, where a
-//! divider goes) only when that one took a single row and the whole of this one fits there;
-//! otherwise it starts at the left edge of a new row, under a RIBBON_RULE-row rule, its buttons
-//! spread evenly over the rows it needs (the buttons are one width, so they form a grid). When the rows
+//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart. A section
+//! either goes on after the one before it on the same row (after RIBBON_DIVIDER cells, where a
+//! divider goes; it needs its first button to fit there, and what does not fit wraps to the left
+//! edge of the rows under it) or starts at the left edge of a new row, under a RIBBON_RULE-row rule.
+//! Of those choices the one with the fewest rows wins, then the one splitting the fewest sections
+//! over rows, so a section stays a block unless going on saves a row. A section on rows of its own
+//! spreads its buttons evenly over them (the buttons are one width, so they form a grid). When the rows
 //! and rules are taller than max_height screen rows, the ribbon pages: as many rows as fit on each
 //! page (no rule opens a page), the room of each narrowed by a paging button at the right end of
 //! the first row.
