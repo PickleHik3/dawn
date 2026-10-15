@@ -149,8 +149,9 @@ int32_t ribbon_caption_scale(int32_t scale);
 //! Screen rows a ribbon button takes at scale: its glyph's scale rows and its caption's under them
 int32_t ribbon_button_rows(int32_t scale);
 
-//! Columns a button's glyph takes at scale 1: 2 for a Nerd Font icon (it spreads over a space
-//! after it), else its glyph's code points
+//! Columns a button's glyph is given at scale 1: 2, the Nerd Font icon's block (the icon and a
+//! space, one OSC 66 block w=2) and the widest text glyph alike, so a button is as wide with the
+//! font as without it; more only for a text glyph wider than that
 int32_t ribbon_glyph_cols(const Command* cmd, bool icons);
 
 //! Screen cells a button needs at scale: its glyph at scale with a cell either side, or its

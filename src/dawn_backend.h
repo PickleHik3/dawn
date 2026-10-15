@@ -198,7 +198,9 @@ typedef struct DawnBackend {
     void (*write_str)(const char* s, size_t len);
     void (*write_char)(char c);
     void (*repeat_char)(char c, int32_t n);
-    void (*write_scaled)(const char* s, size_t len, int32_t scale);
+    //! s at scale (kitty's OSC 66 s=); width > 0 makes it one block of width cells (w=), scale*width
+    //! columns, as a Nerd Font icon and a space need to come out full size; 0 sizes each character
+    void (*write_scaled)(const char* s, size_t len, int32_t scale, int32_t width);
     void (*write_scaled_frac)(const char* s, size_t len, int32_t scale, int32_t num, int32_t denom);
     void (*flush)(void);
     void (*sync_begin)(void);

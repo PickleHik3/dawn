@@ -337,7 +337,8 @@ int32_t ribbon_glyph_cols(const Command* cmd, bool icons)
         return 0;
     if (icons && cmd->icon)
         return 2;
-    return text_cols(cmd->glyph ? cmd->glyph : cmd->label);
+    int32_t w = text_cols(cmd->glyph ? cmd->glyph : cmd->label);
+    return w > 2 ? w : 2;
 }
 
 int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons)

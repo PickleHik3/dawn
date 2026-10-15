@@ -151,7 +151,9 @@ with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer t
 `RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
 Icons are Nerd Font code points, used only when `app.nerd_font` (on in the launcher when a file under
 `~/.termux/fonts/` names "nerd", `nerd_font_installed`; settings.json's `"nerd_font"` wins); otherwise
-each button has a text glyph. Ctrl+] (and "all commands", the "menu" button in Formatting's help
+each button has a text glyph. Above scale 1 an icon goes out as one OSC 66 block of the icon and a
+space, `s=<scale>:w=2` (`print_scaled_block`, `FACE_BLOCK`), 2×scale columns: the launcher draws a
+Nerd icon full size only so, and sized alone it comes out half height. Ctrl+] (and "all commands", the "menu" button in Formatting's help
 section) opens the full grouped command menu (`MODE_MENU`, `menu_build`, drawn by `render_menu` in
 `dawn_render.c`), every command but the format group's. Help (`MODE_HELP`, Ctrl+O) reads the same
 table: its shortcut pages list every command by group with its key and its ribbon ("File ribbon", or

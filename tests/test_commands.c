@@ -303,7 +303,11 @@ static void test_ribbons(void)
     // caption widens it.
     CHECK(ribbon_button_cols(b[0].cmd, 2, true) == 6); // bold: icon 6, caption 4
     CHECK(ribbon_button_cols(b[8].cmd, 2, true) == 7); // numbered list: its caption
-    CHECK(ribbon_glyph_cols(b[0].cmd, true) == 2 && ribbon_glyph_cols(b[0].cmd, false) == 1);
+    // A glyph is given two columns with the Nerd Font (the icon and a space, one OSC 66 block) and
+    // without it, so the buttons are as wide either way.
+    CHECK(ribbon_glyph_cols(b[0].cmd, true) == 2 && ribbon_glyph_cols(b[0].cmd, false) == 2);
+    for (int32_t i = 0; i < n; i++)
+        CHECK(ribbon_button_cols(b[i].cmd, 3, true) == ribbon_button_cols(b[i].cmd, 3, false));
     CHECK(ribbon_button_cols(b[0].cmd, 1, false) == 4); // "bold" under "B" and its two cells
     CHECK(ribbon_button_cols(b[3].cmd, 2, false) == 6); // "<>" at 2, and a cell either side
     CHECK(ribbon_button_cols(b[0].cmd, 4, true) == 10 && ribbon_button_cols(b[8].cmd, 4, true) == 14);

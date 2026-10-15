@@ -1075,7 +1075,7 @@ static void web_repeat_char(char c, int32_t n)
     web_state.cursor_col += n;
 }
 
-static void web_write_scaled(const char* str, size_t len, int32_t scale)
+static void web_write_scaled(const char* str, size_t len, int32_t scale, int32_t width)
 {
     if (scale <= 1) {
         web_write_str(str, len);
@@ -1090,7 +1090,7 @@ static void web_write_scaled(const char* str, size_t len, int32_t scale)
     buf[len] = '\0';
 
     // Calculate display width (each char takes scale cells)
-    int32_t display_width = utf8_display_width(str, len) * scale;
+    int32_t display_width = (width > 0 ? width : utf8_display_width(str, len)) * scale;
 
     js_draw_text_scaled(web_state.cursor_col, web_state.cursor_row, buf, scale,
         web_state.fg_r, web_state.fg_g, web_state.fg_b,

@@ -600,7 +600,7 @@ void print_scaled_char(char c, int32_t scale)
         return;
     }
     char str[2] = { c, '\0' };
-    DAWN_BACKEND(app)->write_scaled(str, 1, scale);
+    DAWN_BACKEND(app)->write_scaled(str, 1, scale, 0);
 }
 
 void print_scaled_str(const char* str, size_t len, int32_t scale)
@@ -609,7 +609,16 @@ void print_scaled_str(const char* str, size_t len, int32_t scale)
         DAWN_BACKEND(app)->write_str(str, len);
         return;
     }
-    DAWN_BACKEND(app)->write_scaled(str, len, scale);
+    DAWN_BACKEND(app)->write_scaled(str, len, scale, 0);
+}
+
+void print_scaled_block(const char* str, size_t len, int32_t scale, int32_t width)
+{
+    if (scale <= 1 || !dawn_ctx_has(&app.ctx, DAWN_CAP_TEXT_SIZING)) {
+        DAWN_BACKEND(app)->write_str(str, len);
+        return;
+    }
+    DAWN_BACKEND(app)->write_scaled(str, len, scale, width);
 }
 
 void print_scaled_frac_char(char c, int32_t scale, int32_t num, int32_t denom)
@@ -625,7 +634,7 @@ void print_scaled_frac_char(char c, int32_t scale, int32_t num, int32_t denom)
     } else if (scale > 1) {
         // Fallback to integer scaling if fractional not supported
         char str[2] = { c, '\0' };
-        DAWN_BACKEND(app)->write_scaled(str, 1, scale);
+        DAWN_BACKEND(app)->write_scaled(str, 1, scale, 0);
     } else {
         DAWN_BACKEND(app)->write_char(c);
     }
@@ -642,7 +651,7 @@ void print_scaled_frac_str(const char* str, size_t len, int32_t scale, int32_t n
         DAWN_BACKEND(app)->write_scaled_frac(str, len, scale, num, denom);
     } else if (scale > 1) {
         // Fallback to integer scaling if fractional not supported
-        DAWN_BACKEND(app)->write_scaled(str, len, scale);
+        DAWN_BACKEND(app)->write_scaled(str, len, scale, 0);
     } else {
         DAWN_BACKEND(app)->write_str(str, len);
     }
