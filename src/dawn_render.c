@@ -275,7 +275,7 @@ static const TourCard TOUR_CARDS[] = {
             "dawn saves as you type. esc brings you back.",
             "history (h) lists your notes." } },
     { "format",
-        { "the ribbon under the menus: bold, headings, lists,",
+        { "tap Formatting at the top: bold, headings, lists,",
             "or type Markdown: **bold**, # heading, - list.",
             "? opens help, with a Markdown cheatsheet." } },
 #if HAS_LIBAI
@@ -825,18 +825,13 @@ static void help_shortcut_line(const HelpRow* r, int32_t row, const HelpColumns*
     if (r->tap[0] && c->tap_w > 0) {
         move_to(row, c->tap);
         set_fg(get_dim());
-        int32_t w = hist_write_fit(r->tap, c->tap_w);
-        if (r->tap_label && c->tap_w - w > 1) {
-            platform_write_char(' ');
-            set_fg(get_fg());
-            hist_write_fit(r->tap_label, c->tap_w - w - 1);
-        }
+        hist_write_fit(r->tap, c->tap_w);
     }
 }
 
 //! HELP_PAGE_SHORTCUTS: every command by task, read from the command table (dawn_commands): what
-//! it does, its key, and how to reach it by touch (its menu on the menu bar, "Edit menu", or
-//! "ribbon" and the button), under the table's group headings.
+//! it does, its key, and how to reach it by touch (the ribbon it is on, "File ribbon"), under the
+//! table's group headings.
 static void render_help_shortcuts(HelpFrame* f)
 {
     HelpRow rows[HELP_ROWS_MAX];
@@ -853,7 +848,7 @@ static void render_help_shortcuts(HelpFrame* f)
         if (rows[i].kind != HELP_ROW_ITEM)
             continue;
         int32_t lw = help_cols(rows[i].text), kw = help_cols(rows[i].key);
-        int32_t tw = help_cols(rows[i].tap) + (rows[i].tap_label ? 1 + help_cols(rows[i].tap_label) : 0);
+        int32_t tw = help_cols(rows[i].tap);
         label_w = lw > label_w ? lw : label_w;
         key_w = kw > key_w ? kw : key_w;
         tap_w = tw > tap_w ? tw : tap_w;
@@ -934,7 +929,7 @@ static const struct {
 #define CHEAT_COUNT ((int32_t)(sizeof(CHEATS) / sizeof(CHEATS[0])))
 
 //! The line under the cheatsheet's rows
-#define CHEAT_NOTE "the ribbon (View › formatting) types these"
+#define CHEAT_NOTE "the Formatting tab's ribbon types these"
 
 //! Draw a cheatsheet row's "you get" side at the cursor, in at most room columns
 static void help_cheat_got(int32_t i, int32_t room)
@@ -1812,29 +1807,6 @@ void render_menu(MenuState* m, const MenuPlace* p)
 {
     int32_t scale = p && p->scale > 1 ? p->scale : 1;
     int32_t need = menu_list_cols(m);
-
-    // A dropdown hangs from its menu's name: its left edge a cell before the name (the open
-    // menu's tab), moved left when it would run off the screen. It always keeps the chrome's
-    // scale (so it stays the size of the bar on screen at any font), shrunk only when its width
-    // cannot fit the screen; its lines scroll in the rows between the bar and the status line.
-    // The box starts on the row right under the bar and is inert from there, so no note text
-    // shows between them.
-    if (m->bar_menu >= 0 && p) {
-        int32_t top = p->top > 0 ? p->top : 1;
-        int32_t rows = app.rows - top + 1 - scale; // less the status line's rows
-        int32_t s = scale;
-        while (s > 1 && need * s + 2 > app.cols)
-            s--;
-        int32_t cols = need * s + 2 <= app.cols ? need : (app.cols - 2) / s;
-        int32_t width = cols * s + 2;
-        int32_t left = p->col - 1;
-        if (left + width - 1 > app.cols)
-            left = app.cols - width + 1;
-        if (left < 1)
-            left = 1;
-        render_menu_surface(m, s, top, left, cols, rows, false);
-        return;
-    }
 
     // The full menu at the chrome's scale where its widest line fits the screen less a column each
     // side, centred, a row clear above and below; the list scrolls inside.

@@ -49,11 +49,14 @@
 //! Maximum nesting depth for inline markdown styles
 #define MAX_STYLE_DEPTH 8
 
-//! Fewest text rows the formatting ribbon leaves the note; on a shorter screen it does not show,
-//! and the menu bar and the status line drop to scale 1 before they leave fewer
+//! Fewest text rows an open ribbon leaves the note; on a shorter screen it pages or does not show,
+//! and the tab row drops to scale 1 before it leaves fewer
 #define RIBBON_MIN_NOTE_ROWS 3
 
-// A ribbon button's key minus DAWN_KEY_FMT_BOLD is its FormatOp.
+//! How long a ribbon takes to drop open under its tab, row by row
+#define RIBBON_DROP_MS 150
+
+// A Formatting ribbon button's key minus DAWN_KEY_FMT_BOLD is its FormatOp.
 _Static_assert(DAWN_KEY_FMT_CODE_BLOCK - DAWN_KEY_FMT_BOLD + 1 == FORMAT_COUNT, "one format key per FormatOp");
 
 //! Layout calculation result
@@ -70,12 +73,14 @@ typedef struct {
     int32_t text_width;
     int32_t top_margin;
     int32_t text_height;
-    bool menubar; //!< The menu bar shows on the top ui_scale rows (chrome_place())
-    int32_t ribbon_top; //!< First screen row of the formatting ribbon (when ribbon_rows > 0)
-    int32_t ribbon_rows; //!< Screen rows the ribbon takes from the note; 0 when it does not show
-    int32_t ui_scale; //!< Scale of the menu bar, the ribbon, the status line and the dropdowns: from the pane's pixels where the terminal sizes text and the menu bar shows (commands_ui_scale), else 1
-    int32_t status_scale; //!< Scale of the status line: half of ui_scale, at least 1
-    int32_t status_top; //!< First screen row of the status line, which takes the bottom status_scale rows
+    bool tabs; //!< The tab row shows on the top ui_scale rows (chrome_place()), and the bottom row is the notice line
+    int32_t chrome_left; //!< First screen column of the tab row's tabs and the ribbon's buttons
+    int32_t chrome_room; //!< Screen columns the tabs and the ribbon's buttons may take from chrome_left
+    int32_t ribbon_top; //!< First screen row of the open ribbon (when ribbon_rows > 0)
+    int32_t ribbon_rows; //!< Screen rows the open ribbon takes from the note now (fewer while it drops); 0 when none shows
+    int32_t ribbon_max; //!< Screen rows the ribbon may take at most (ribbon_layout's max_height)
+    int32_t ui_scale; //!< Scale of the tab row, the ribbons and the command menu: from the pane's pixels where the terminal sizes text and the tab row shows (commands_ui_scale), else 1
+    int32_t status_top; //!< The status line's row where there is no tab row (the bottom one)
 } Layout;
 
 //! Render context passed to rendering functions
@@ -133,10 +138,44 @@ typedef struct {
 
 // #region Pure Helper Functions
 
-//! Whether the screen gives the menu bar and the ribbon a place, whatever the mode: phone width or
-//! the launcher's terminal (also under a chat sheet, where the ribbon hides), never in preview or
+//! The tab row's open ribbon (dawn_commands): which tab, how far it has dropped, which page shows
+static struct {
+    int32_t tab; //!< The open tab (RibbonTab), -1 when none is
+    int64_t drop_ms; //!< When it started dropping (DAWN_CLOCK_MS), 0 once it is all down
+    int32_t drop_from; //!< Screen rows it showed when it started (another tab's ribbon, or none)
+    int32_t page; //!< The page showing, when it pages
+    int32_t pages; //!< Its pages as last drawn
+} ribbon_ui = { .tab = -1 };
+
+//! Screen rows of a full ribbon height rows tall to show now: all of them once it has dropped (or
+//! at once under DAWN_REDUCED_MOTION), else from drop_from to height over RIBBON_DROP_MS, a row at
+//! a time.
+static int32_t ribbon_shown(int32_t height)
+{
+    if (ribbon_ui.drop_ms == 0 || voice_reduced_motion())
+        return height;
+    int64_t t = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS) - ribbon_ui.drop_ms;
+    if (t >= RIBBON_DROP_MS || t < 0) {
+        ribbon_ui.drop_ms = 0;
+        return height;
+    }
+    int32_t from = ribbon_ui.drop_from < height ? ribbon_ui.drop_from : 0;
+    int32_t rows = from + (int32_t)((height - from) * t / RIBBON_DROP_MS);
+    return rows < 0 ? 0 : (rows > height ? height : rows);
+}
+
+//! Fold the open ribbon away.
+static void ribbon_close(void)
+{
+    ribbon_ui.tab = -1;
+    ribbon_ui.drop_ms = 0;
+    ribbon_ui.page = 0;
+}
+
+//! Whether the screen gives the tab row and its ribbons a place, whatever the mode: phone width or
+//! the launcher's terminal (also over a chat sheet, where no ribbon opens), never in preview or
 //! print. calc_layout() sizes the chrome from this alone, so the note does not move when a dialog
-//! opens over it. Focus mode keeps the menu bar: on a phone it is the way back out.
+//! opens over it. Focus mode keeps the tab row: on a phone it is the way back out.
 static bool chrome_place(void)
 {
     if (app.ctx.mode == DAWN_MODE_PRINT || app.preview_mode)
@@ -145,8 +184,8 @@ static bool chrome_place(void)
 }
 
 //! The chrome's scale where the terminal sizes text (kitty's OSC 66): from the pane's width and
-//! cell size in pixels (commands_ui_scale), so the menu bar, the ribbon and the status line keep
-//! their size on screen when a pinch changes the font. 1 without text sizing.
+//! cell size in pixels (commands_ui_scale), so the tab row and the ribbons keep their size on
+//! screen when a pinch changes the font. 1 without text sizing.
 static int32_t ui_scale_now(void)
 {
     if (!HAS_CAP(DAWN_CAP_TEXT_SIZING))
@@ -217,39 +256,52 @@ static inline Layout calc_layout(void)
         l.margin = 0;
         l.text_width = l.text_area_cols;
     }
-    // Where the chrome has a place (chrome_place) the menu bar takes the top ui_scale rows drawn at
-    // ui_scale and the status line the bottom status_scale rows drawn at half that; where the terminal sizes text
-    // that scale comes from the pane's pixels, so they stay one size on screen at any font. They
-    // drop to scale 1 before they leave the note fewer than RIBBON_MIN_NOTE_ROWS.
-    l.menubar = chrome_place();
-    l.ui_scale = l.menubar ? ui_scale_now() : 1;
-    if (l.ui_scale > 1 && l.note_rows - l.ui_scale - (l.ui_scale / 2 > 1 ? l.ui_scale / 2 : 1) - 2 < RIBBON_MIN_NOTE_ROWS)
-        l.ui_scale = 1;
-    l.status_scale = l.ui_scale / 2 > 1 ? l.ui_scale / 2 : 1;
-    l.status_top = app.rows - l.status_scale + 1;
-    // Text starts on row top_margin: under one blank row, or under the menu bar and a blank row.
-    // Without a sheet it ends above the status line: two blank rows above it on a desktop
-    // terminal, one under the chrome. Under a sheet there is no status line (the chat has its own
-    // input line), so it ends one row above the sheet: row note_rows is the one blank row between
-    // the note's last line and the sheet's edge.
-    l.top_margin = l.menubar ? l.ui_scale + 2 : 2;
+    // Where the chrome has a place (chrome_place) the tab row takes the top ui_scale rows, drawn at
+    // ui_scale; where the terminal sizes text that scale comes from the pane's pixels, so the row
+    // stays one size on screen at any font. It drops to the largest scale at which all the tabs fit
+    // the width, and to scale 1 before it leaves the note fewer than RIBBON_MIN_NOTE_ROWS. The tabs
+    // and the ribbon's buttons start a cell before the note's text (their padding), as wide as the
+    // note's column and that padding.
+    l.tabs = chrome_place();
+    l.ui_scale = l.tabs ? ui_scale_now() : 1;
+    l.chrome_left = l.margin > 0 ? l.margin : 1;
+    l.chrome_room = l.text_area_cols - 2 * (l.chrome_left - 1);
+    if (l.tabs) {
+        RibbonTab items[RIBBON_TAB_COUNT];
+        int32_t n = tabs_items(items, RIBBON_TAB_COUNT);
+        l.ui_scale = tabs_scale(items, n, l.ui_scale, l.chrome_room);
+        if (l.ui_scale > 1 && l.note_rows - l.ui_scale - 2 < RIBBON_MIN_NOTE_ROWS)
+            l.ui_scale = 1;
+    }
+    l.status_top = app.rows;
+    // Text starts on row top_margin: under one blank row, or under the tab row and a blank row.
+    // On a desktop terminal it ends two blank rows above the status line. Under the tab row there is
+    // no status line: the text runs to the row above the bottom one, which is the notice line (a
+    // notice or a tip while one is up, else blank). Under a sheet it ends one row above the sheet:
+    // row note_rows is the one blank row between the note's last line and the sheet's edge.
+    l.top_margin = l.tabs ? l.ui_scale + 2 : 2;
     if (l.ai_sheet)
         l.text_height = l.note_rows - l.top_margin;
-    else if (l.menubar)
-        l.text_height = l.status_top - 1 - l.top_margin;
+    else if (l.tabs)
+        l.text_height = app.rows - l.top_margin;
     else
         l.text_height = app.rows - l.top_margin - 2;
     if (l.text_height < 1)
         l.text_height = 1;
-    // The formatting ribbon, while it is on, sits under the menu bar (on the top rows where there
-    // is none) at ui_scale, each row of buttons ui_scale screen rows, with the one blank row kept
-    // between it and the text, so the note never draws under a button. Never with a chat open, in
-    // preview or print, nor when it would leave the note fewer than RIBBON_MIN_NOTE_ROWS.
-    if (app.ribbon && !app.ai_open && !app.preview_mode && app.ctx.mode != DAWN_MODE_PRINT) {
-        int32_t rows = commands_ribbon_rows(l.text_width, l.ui_scale);
-        if (rows > 0 && l.text_height - rows >= RIBBON_MIN_NOTE_ROWS) {
+    // The open tab's ribbon hangs under the tab row, its rows of buttons ui_scale + a caption's rows
+    // each, with the one blank row kept between it and the text, so the note never draws under a
+    // button. It pages rather than leave the note fewer than RIBBON_MIN_NOTE_ROWS, and while it
+    // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open.
+    if (l.tabs && ribbon_ui.tab >= 0 && !app.ai_open) {
+        RibbonButton b[RIBBON_MAX];
+        RibbonSlot slots[RIBBON_MAX];
+        RibbonFrame f;
+        int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, l.ui_scale, app.nerd_font, b, RIBBON_MAX);
+        l.ribbon_max = l.text_height - RIBBON_MIN_NOTE_ROWS;
+        if (ribbon_layout(b, n, l.chrome_room, l.ui_scale, l.ribbon_max, slots, &f)) {
+            int32_t rows = ribbon_shown(f.height);
             l.ribbon_rows = rows;
-            l.ribbon_top = l.menubar ? l.ui_scale + 1 : 1;
+            l.ribbon_top = l.ui_scale + 1;
             l.top_margin += rows;
             l.text_height -= rows;
         }
@@ -2670,6 +2722,24 @@ static void chat_picker_key(int32_t key)
     }
 }
 
+//! The AI ribbon's model button: the chat opens (focused) with its model picker up, which is where
+//! the picker draws. The chat is not primed for it, so choosing another model loads only that one.
+static void model_picker_open(void)
+{
+    if (!app.ai_ready || !CAN_MODIFY())
+        return;
+    if (!app.ai_open) {
+        if (!session_chat_may_open())
+            return;
+        app.ai_open = true;
+        if (!app.ai_session)
+            ai_init_session();
+    }
+    app.ai_focused = true;
+    ribbon_close();
+    chat_picker_open();
+}
+
 //! Draw the picker over the chat's message rows: one row per model, the one in use marked, the
 //! highlighted one on the selected-row surface.
 static void render_chat_picker(int32_t top, int32_t max_rows, int32_t col, int32_t width)
@@ -3168,7 +3238,7 @@ skip_chat:
 
 // #endregion
 
-// #region Commands: the menu bar, the formatting ribbon and the menus
+// #region Commands: the tab row, its ribbons and the command menu
 
 //! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
 static MenuState menu;
@@ -3197,100 +3267,232 @@ static bool command_enabled(const Command* cmd)
     return true;
 }
 
-//! The menu bar's menus this frame, left to right, and where each goes (menubar_layout on the
-//! note's width at L->ui_scale).
-//! @return how many show (0 where the menu bar has no place)
-static int32_t menubar_shown(const Layout* L, MenuBarItem* items, MenuBarSlot* slots)
+//! Code points of s (every tab name, caption and status word here is one cell each)
+static int32_t chrome_cols(const char* s)
 {
-    if (!L->menubar)
-        return 0;
-    int32_t n = menubar_items(items, MENUBAR_COUNT);
-    return menubar_layout(items, n, L->ui_scale, L->text_width, slots);
+    int32_t w = 0;
+    for (; *s; s++)
+        w += ((unsigned char)*s & 0xC0) != 0x80;
+    return w;
 }
 
-//! The menu bar on the top L->ui_scale rows: "File  Edit  View  AI  Help" from the note's left
-//! edge in the status line's dim, drawn at L->ui_scale (so it keeps its size on screen whatever
-//! the font); the menu whose dropdown is open sits on the popup's surface, a tab the dropdown
-//! hangs from. Each name is a tap on its DAWN_KEY_MENU_* key (its text and a cell either side, on
-//! all of the bar's rows) and the rest of the bar swallows taps, registered on the writing screen
-//! and under its menus, so a tap on another name switches dropdowns.
-static void render_menubar(const Layout* L)
+#if HAS_LIBAI
+//! Bytes of s's first cols code points
+static size_t chrome_prefix(const char* s, int32_t cols)
 {
-    MenuBarItem items[MENUBAR_COUNT];
-    MenuBarSlot slots[MENUBAR_COUNT];
-    int32_t kept = menubar_shown(L, items, slots);
-    if (kept <= 0)
+    size_t n = 0;
+    for (; s[n]; n++) {
+        if (((unsigned char)s[n] & 0xC0) != 0x80 && cols-- <= 0)
+            break;
+    }
+    return n;
+}
+#endif
+
+//! The tab row's band, the open tab and its ribbon: the tint the row sits on, and the one the open
+//! tab shares with its ribbon (so the tab reads as the ribbon's top)
+static DawnColor tab_band_bg(void) { return get_ai_bg(); }
+static DawnColor ribbon_band_bg(void) { return get_modal_bg(); }
+
+//! A tap on tab: its ribbon drops open under it (from what the last one showed), or folds away
+//! when it is the open one. A chat sheet gives way to it: the two never share the screen.
+static void ribbon_toggle(int32_t tab)
+{
+    if (tab < 0 || tab >= RIBBON_TAB_COUNT)
         return;
+    if (ribbon_ui.tab == tab) {
+        ribbon_close();
+        return;
+    }
+    int32_t from = calc_layout().ribbon_rows;
+    if (app.ai_open) {
+        app.ai_open = false;
+        app.ai_focused = false;
+        from = 0;
+    }
+    ribbon_ui.tab = tab;
+    ribbon_ui.page = 0;
+    ribbon_ui.drop_from = from;
+    ribbon_ui.drop_ms = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    if (ribbon_ui.drop_ms == 0)
+        ribbon_ui.drop_ms = 1;
+}
+
+//! The words at the tab row's right end: what the note says about itself (not saved, saving
+//! paused), the word count and the timer, as many as fit (tabs_status); the alert in the accent.
+static void render_tab_status(const Layout* L, int32_t tabs_end)
+{
+    int32_t ss = ribbon_caption_scale(L->ui_scale); // the row's small print, on its bottom rows
+    int32_t right = L->chrome_left + L->chrome_room - 1 - TAB_PAD; // last cell it may use
+    int32_t room = (right - (L->chrome_left + tabs_end + 1) + 1) / ss;
+    if (room <= 0)
+        return;
+    char timer[24] = "";
+    if (app.timer_mins > 0 && app.timer_on) {
+        int32_t rem = timer_remaining();
+        snprintf(timer, sizeof(timer), "%s%d:%02d", app.timer_paused ? "‖ " : "", rem / 60, rem % 60);
+    }
+    const char* alert = app.save_failed ? "not saved" : app.save_paused ? "saving paused" : NULL;
+    char out[96];
+    int32_t w = tabs_status(count_words(&app.text), timer, alert, room, out, sizeof(out));
+    if (w <= 0)
+        return;
+    move_to(L->ui_scale - ss + 1, right - w * ss + 1);
+    set_bg(tab_band_bg());
+    size_t split = alert ? strlen(alert) : 0;
+    if (split > strlen(out))
+        split = strlen(out);
+    if (split > 0) {
+        set_fg(get_accent());
+        print_scaled_str(out, split, ss);
+    }
+    set_fg(get_dim());
+    print_scaled_str(out + split, strlen(out) - split, ss);
+}
+
+//! The tab row on the top L->ui_scale rows, a band of its own tint across the width: "File
+//! Formatting AI" from the note's left edge, drawn at L->ui_scale (so it keeps its size on screen
+//! whatever the font). The open tab sits on its ribbon's surface, named in the text colour; the
+//! others are dim. Each tab is a tap on its DAWN_KEY_TAB_* key (its name and its padding, on all of
+//! the row's rows) and the rest of the row swallows taps, registered on the writing screen only.
+//! The right end says the word count and the timer when there is room.
+static void render_tabs(const Layout* L)
+{
+    if (!L->tabs)
+        return;
+    RibbonTab items[RIBBON_TAB_COUNT];
+    TabSlot slots[RIBBON_TAB_COUNT];
+    int32_t n = tabs_items(items, RIBBON_TAB_COUNT);
     int32_t scale = L->ui_scale;
-    bool taps = app.mode == MODE_WRITING || app.mode == MODE_MENU;
-    int32_t open = app.mode == MODE_MENU ? menu.bar_menu : -1;
+    tabs_layout(items, n, scale, L->chrome_room, slots);
+    bool taps = app.mode == MODE_WRITING;
+    set_bg(tab_band_bg());
+    for (int32_t r = 1; r <= scale; r++) {
+        move_to(r, 1);
+        out_spaces(L->text_area_cols);
+    }
     if (taps)
         hit_add(1, 1, L->text_area_cols, scale, HIT_INERT, 0, 0);
-    for (int32_t i = 0; i < kept; i++) {
-        int32_t col = L->margin + 1 + slots[i].col;
-        int32_t from = col > 1 ? col - 1 : col;
-        int32_t to = col + slots[i].width <= L->text_area_cols ? col + slots[i].width : L->text_area_cols;
-        const char* name = menubar_name(items[i]);
-        bool is_open = (int32_t)items[i] == open;
-        if (is_open) {
-            set_bg(get_modal_bg());
-            for (int32_t r = 0; r < scale; r++) {
-                move_to(1 + r, from);
-                for (int32_t c = from; c <= to; c++)
-                    out_char(' ');
+    int32_t end = 0;
+    for (int32_t i = 0; i < n; i++) {
+        if (slots[i].col + slots[i].width > L->chrome_room)
+            break; // narrower than even scale 1 holds: the tabs that fit
+        int32_t col = L->chrome_left + slots[i].col;
+        const char* name = tabs_name(items[i]);
+        bool open = (int32_t)items[i] == ribbon_ui.tab && !app.ai_open;
+        set_bg(open ? ribbon_band_bg() : tab_band_bg());
+        if (open) {
+            for (int32_t r = 1; r <= scale; r++) {
+                move_to(r, col);
+                out_spaces(slots[i].width);
             }
-        } else {
-            set_bg(get_bg());
         }
-        move_to(1, col);
-        set_fg(is_open ? get_fg() : get_dim());
+        move_to(1, col + TAB_PAD);
+        set_fg(open ? get_fg() : get_dim());
+        if (open)
+            set_bold(true);
         print_scaled_str(name, strlen(name), scale);
+        if (open)
+            set_bold(false);
         if (taps)
-            hit_add(from, 1, to - from + 1, scale, HIT_KEY, menubar_key(items[i]), 0);
+            hit_add(col, 1, slots[i].width, scale, HIT_KEY, tabs_key(items[i]), 0);
+        end = slots[i].col + slots[i].width;
     }
+    render_tab_status(L, end);
     set_bg(get_bg());
 }
 
-//! Where the open menu goes (render_menu): a dropdown under its name on the menu bar, or the full
-//! menu centred, both at the chrome's scale.
+//! Marks a ribbon button's tap region (dawn_hit's arg), so the key it gives is known to be a
+//! command run on purpose: esc from "close" leaves the note even with the ribbon open.
+#define HIT_ARG_COMMAND 1
+
+//! Set by touch_to_key() and the command menu for the key being handled: it is a command run from
+//! a ribbon button or the menu, not a key typed (cleared at the top of handle_input()).
+static bool key_is_command = false;
+
+#if HAS_LIBAI
+//! The model button's two lines: the model's name (as the chat header has it) and whether it is
+//! loaded, loading or not; TAI's runtime is read at most every 3 s for it.
+static void ribbon_model_text(char* name, size_t name_cap, char* state, size_t state_cap)
+{
+    static ai_runtime_info_t info;
+    static int64_t read_at = 0;
+    int64_t now = DAWN_BACKEND(app)->clock(DAWN_CLOCK_MS);
+    if (read_at == 0 || now - read_at >= 3000) {
+        if (session_ai_configured())
+            ai_runtime_info(&info);
+        else
+            memset(&info, 0, sizeof(info));
+        read_at = now;
+    }
+    session_header(name, name_cap, NULL, 0);
+    const char* st = session_waking_since() > 0 || info.loading ? "loading"
+        : info.state == AI_MODEL_LOADED                           ? "loaded"
+        : info.state == AI_MODEL_NOT_LOADED                       ? "not loaded"
+                                                                  : "model";
+    snprintf(state, state_cap, "%s", st);
+}
+#endif
+
+//! Whether a ribbon button is drawn pressed: its style is on at the cursor (fmt_on, by FormatOp),
+//! or the mode it switches is on.
+static bool ribbon_button_on(const Command* cmd, const bool* fmt_on)
+{
+    int32_t k = cmd->key;
+    if (k >= DAWN_KEY_FMT_BOLD && k <= DAWN_KEY_FMT_CODE_BLOCK)
+        return fmt_on[k - DAWN_KEY_FMT_BOLD];
+    switch (k) {
+    case 6:
+        return app.focus_mode;
+    case 18:
+        return app.plain_mode;
+    case 2:
+        return app.hide_cursor_syntax;
+    case 16:
+        return app.timer_paused;
+    default:
+        return false;
+    }
+}
+
+//! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
+//! surface scale rows tall with face centred in it (face_cols columns at face_scale), and caption
+//! centred under it on the ribbon's band at the caption's scale. Pressed: the box tinted with the
+//! accent and the face in it; disabled: face and caption in the border's colour.
+static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, const char* face,
+    int32_t face_cols, int32_t face_scale, const char* caption, bool enabled, bool pressed)
+{
+    int32_t cs = ribbon_caption_scale(scale);
+    set_bg(pressed ? color_lerp(get_row_select_bg(), get_accent(), 0.35f) : get_row_select_bg());
+    for (int32_t r = 0; r < scale; r++) {
+        move_to(top + r, col);
+        out_spaces(w);
+    }
+    int32_t fw = face_cols * face_scale;
+    move_to(top + (scale - face_scale) / 2, col + (w - fw) / 2);
+    set_fg(!enabled ? get_border() : pressed ? get_accent() : get_fg());
+    print_scaled_str(face, strlen(face), face_scale);
+    set_bg(ribbon_band_bg());
+    int32_t cw = chrome_cols(caption) * cs;
+    move_to(top + scale, col + (w - cw) / 2);
+    set_fg(enabled ? get_dim() : get_border());
+    print_scaled_str(caption, strlen(caption), cs);
+}
+
+//! Where the command menu goes (render_menu): centred, at the chrome's scale
 static MenuPlace menu_place(void)
 {
-    Layout L = calc_layout();
-    MenuPlace p = { .scale = L.ui_scale, .top = 0, .col = 0 };
-    if (menu.bar_menu < 0)
-        return p;
-    MenuBarItem items[MENUBAR_COUNT];
-    MenuBarSlot slots[MENUBAR_COUNT];
-    int32_t kept = menubar_shown(&L, items, slots);
-    p.top = L.menubar ? L.ui_scale + 1 : 1;
-    p.col = L.margin + 1;
-    for (int32_t i = 0; i < kept; i++) {
-        if ((int32_t)items[i] == menu.bar_menu)
-            p.col = L.margin + 1 + slots[i].col;
-    }
-    return p;
+    return (MenuPlace) { .scale = calc_layout().ui_scale };
 }
 
-//! Open the dropdown of the menu bar's menu item (MODE_MENU over the writing screen), or switch the
-//! open one to it.
-static void menu_open_dropdown(int32_t item)
+//! Switch between the light and the dark theme, and remember it (the start screen's d, "light or
+//! dark" on the File ribbon).
+static void theme_toggle(void)
 {
-    menu_build(&menu, item, command_enabled);
-    if (app.mode != MODE_MENU)
-        MODE_PUSH(MODE_MENU);
-}
-
-//! Left or right on a dropdown: the neighbouring menu's dropdown, wrapping round the menus the bar
-//! shows, as a word processor's menus do.
-static void menu_dropdown_step(int32_t dir)
-{
-    Layout L = calc_layout();
-    MenuBarItem items[MENUBAR_COUNT];
-    MenuBarSlot slots[MENUBAR_COUNT];
-    int32_t kept = menubar_shown(&L, items, slots);
-    if (kept <= 0)
-        kept = menubar_items(items, MENUBAR_COUNT);
-    menu_open_dropdown((int32_t)menubar_neighbour(items, kept, (MenuBarItem)menu.bar_menu, dir));
+    app.theme = (app.theme == THEME_DARK) ? THEME_LIGHT : THEME_DARK;
+    highlight_cleanup(app.hl_ctx);
+    app.hl_ctx = highlight_init(app.theme == THEME_DARK);
+    settings_save();
 }
 
 //! The cursor and selection as dawn_format takes them
@@ -3303,7 +3505,7 @@ static FormatCursor format_cursor(void)
     };
 }
 
-//! A ribbon button's key: its FormatOp on the cursor or the selection, as one undo step. The
+//! A Formatting ribbon button's key: its FormatOp on the cursor or the selection, as one undo step. The
 //! cursor and selection follow the text (an insert selects the part to type over).
 static void format_key(int32_t key)
 {
@@ -3337,82 +3539,137 @@ static void format_key(int32_t key)
         block_cache_invalidate((BlockCache*)app.block_cache);
 }
 
-//! The formatting ribbon: the format group's buttons ("B  I  S  `  H1 ...") on the rows calc_layout
-//! keeps for it under the menu bar, in the status line's dim, wrapped between clusters when the row
-//! is narrow. Drawn at L->ui_scale, each button that many rows tall and that many times as wide, laid out in
-//! scaled cells by commands_ribbon_place. A style that is on at the cursor or
-//! over the selection is underlined, a pressed button; when the note cannot be edited (focus mode)
-//! every button is dimmer. Each is a tap on its key (its text and a cell either side, on all of its
-//! rows) and the rest of the ribbon swallows taps, registered only on the writing screen itself.
+//! The open tab's ribbon on the rows calc_layout keeps for it under the tab row, a band of the open
+//! tab's surface across the width: its buttons (ribbon_buttons) where ribbon_layout puts them on the
+//! page showing, a divider between two sections, and on a ribbon that pages a "more" button at the
+//! right end of its first row. Each button is a box with its glyph (the Nerd Font icon when the font
+//! is there) over its caption, drawn at L->ui_scale; the model button names the model and whether
+//! it is loaded. While the ribbon drops open only its rows already down are drawn. A command that
+//! can run is a tap on its key (its box and caption); the rest of the band swallows taps, all
+//! registered on the writing screen only.
 static void render_ribbon(const Layout* L)
 {
-    if (L->ribbon_rows <= 0)
+    if (L->ribbon_rows <= 0 || ribbon_ui.tab < 0)
         return;
-    const Command* items[RIBBON_MAX];
-    RibbonSlot slots[RIBBON_MAX];
-    int32_t n = commands_ribbon(items, RIBBON_MAX);
+    RibbonButton b[RIBBON_MAX];
+    RibbonSlot s[RIBBON_MAX];
+    RibbonFrame f;
     int32_t scale = L->ui_scale;
-    if (commands_ribbon_place(items, n, L->text_width, scale, slots) <= 0)
+    int32_t h = ribbon_button_rows(scale);
+    int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, scale, app.nerd_font, b, RIBBON_MAX);
+    if (!ribbon_layout(b, n, L->chrome_room, scale, L->ribbon_max, s, &f))
         return;
-
+    ribbon_ui.pages = f.pages;
+    if (ribbon_ui.page >= f.pages)
+        ribbon_ui.page = 0;
+    int32_t shown = L->ribbon_rows;
     bool taps = app.mode == MODE_WRITING;
-    bool can = CAN_EDIT();
-    FormatCursor fc = format_cursor();
-    // format_state scans the selection's lines, and a frame comes every few milliseconds: the
-    // pressed states are worked out again only when the cursor, the selection or the text
-    // (its length, or an undo step) changed since the last frame.
+
+    set_bg(ribbon_band_bg());
+    for (int32_t r = 0; r < shown; r++) {
+        move_to(L->ribbon_top + r, 1);
+        out_spaces(L->text_area_cols);
+    }
+    if (taps)
+        hit_add(1, L->ribbon_top, L->text_area_cols, shown, HIT_INERT, 0, 0);
+
+    // The Formatting ribbon's pressed styles: format_state scans the selection's lines, and a frame
+    // comes every few milliseconds, so they are worked out again only when the cursor, the
+    // selection or the text (its length, or an undo step) changed since the last frame.
     static struct {
         bool valid;
         FormatCursor fc;
         size_t len;
         int32_t undo_count, undo_pos;
-        bool pressed[FORMAT_COUNT];
+        bool on[FORMAT_COUNT];
     } cache;
-    size_t len = gap_len(&app.text);
-    if (!cache.valid || cache.fc.cursor != fc.cursor || cache.fc.anchor != fc.anchor
-        || cache.fc.selecting != fc.selecting || cache.len != len || cache.undo_count != app.undo_count
-        || cache.undo_pos != app.undo_pos) {
-        for (int32_t i = 0; i < n && i < FORMAT_COUNT; i++)
-            cache.pressed[i] = format_state(&app.text, &fc, (FormatOp)(items[i]->key - DAWN_KEY_FMT_BOLD));
-        cache.valid = true;
-        cache.fc = fc;
-        cache.len = len;
-        cache.undo_count = app.undo_count;
-        cache.undo_pos = app.undo_pos;
-    }
-    if (taps)
-        hit_add(1, L->ribbon_top, L->text_area_cols, L->ribbon_rows, HIT_INERT, 0, 0);
-    set_bg(get_bg());
-    for (int32_t i = 0; i < n; i++) {
-        int32_t row = L->ribbon_top + slots[i].row;
-        int32_t col = L->margin + 1 + slots[i].col;
-        int32_t w = slots[i].width;
-        bool pressed = can && i < FORMAT_COUNT && cache.pressed[i];
-        const char* label = commands_button_label(items[i]);
-        move_to(row, col);
-        set_fg(can ? get_dim() : get_border());
-        if (pressed)
-            set_underline(UNDERLINE_STYLE_SINGLE);
-        print_scaled_str(label, strlen(label), scale);
-        if (pressed)
-            clear_underline();
-        if (taps) {
-            int32_t from = col > 1 ? col - 1 : col;
-            int32_t to = col + w < L->text_area_cols ? col + w : L->text_area_cols;
-            hit_add(from, row, to - from + 1, scale, HIT_KEY, items[i]->key, 0);
+    if (ribbon_ui.tab == RIBBON_TAB_FORMAT) {
+        FormatCursor fc = format_cursor();
+        size_t len = gap_len(&app.text);
+        if (!cache.valid || cache.fc.cursor != fc.cursor || cache.fc.anchor != fc.anchor
+            || cache.fc.selecting != fc.selecting || cache.len != len || cache.undo_count != app.undo_count
+            || cache.undo_pos != app.undo_pos) {
+            for (int32_t op = 0; op < FORMAT_COUNT; op++)
+                cache.on[op] = format_state(&app.text, &fc, (FormatOp)op);
+            cache.valid = true;
+            cache.fc = fc;
+            cache.len = len;
+            cache.undo_count = app.undo_count;
+            cache.undo_pos = app.undo_pos;
         }
     }
+
+    for (int32_t i = 0; i < n; i++) {
+        if (s[i].page != ribbon_ui.page || s[i].row + h > shown)
+            continue;
+        const Command* cmd = b[i].cmd;
+        int32_t top = L->ribbon_top + s[i].row;
+        int32_t col = L->chrome_left + s[i].col;
+        bool enabled = command_enabled(cmd);
+        bool pressed = enabled && ribbon_button_on(cmd, cache.on);
+        if (i > 0 && b[i].section != b[i - 1].section && s[i - 1].page == s[i].page && s[i - 1].row == s[i].row) {
+            set_bg(ribbon_band_bg());
+            set_fg(get_border());
+            for (int32_t r = 0; r < h; r++) {
+                move_to(top + r, col - 2);
+                out_str("│");
+            }
+        }
+        char face[160];
+        int32_t face_cols, face_scale = scale;
+        const char* caption = cmd->caption;
+        char state[24];
+#if HAS_LIBAI
+        if (cmd->key == DAWN_KEY_AI_MODEL) {
+            // The model button names the model at the caption's scale, cut to the button's width.
+            char name[96];
+            int32_t cs = ribbon_caption_scale(scale);
+            ribbon_model_text(name, sizeof(name), state, sizeof(state));
+            int32_t fit = s[i].width / cs;
+            size_t bytes = chrome_prefix(name, fit);
+            snprintf(face, sizeof(face), "%.*s", (int)bytes, name);
+            face_cols = chrome_cols(face);
+            face_scale = cs;
+            caption = state;
+        } else
+#endif
+            if (app.nerd_font && cmd->icon) {
+            // The icon spreads over the space after it.
+            int32_t k = (int32_t)utf8proc_encode_char((utf8proc_int32_t)cmd->icon, (utf8proc_uint8_t*)face);
+            face[k] = ' ';
+            face[k + 1] = '\0';
+            face_cols = 2;
+        } else {
+            snprintf(face, sizeof(face), "%s", cmd->glyph);
+            face_cols = chrome_cols(face);
+        }
+        (void)state;
+        ribbon_draw_button(top, col, s[i].width, scale, face, face_cols, face_scale, caption, enabled, pressed);
+        if (taps && enabled)
+            hit_add(col, top, s[i].width, h, HIT_KEY, cmd->key, HIT_ARG_COMMAND);
+    }
+
+    // The paging button: the next page, back to the first after the last.
+    if (f.pages > 1 && h <= shown) {
+        int32_t col = L->chrome_left + f.more_col;
+        char caption[32];
+        snprintf(caption, sizeof(caption), "%d/%d", ribbon_ui.page + 1, f.pages);
+        ribbon_draw_button(L->ribbon_top, col, f.more_width, scale, "▸", 1, scale, caption, true, false);
+        if (taps)
+            hit_add(col, L->ribbon_top, f.more_width, h, HIT_KEY, DAWN_KEY_RIBBON_MORE, 0);
+    }
+    set_bg(get_bg());
 }
 
 //! The status panel's corner (dawn_status) on the writing screen without a chat sheet: the two
-//! blank rows above the status line on a desktop terminal, the one blank row above it under the
-//! chrome (the panel stays at scale 1 and never covers the scaled status line).
-static void status_area_writing(const Layout* L)
+//! blank rows above the status line on a desktop terminal; under the tab row, the notice line
+//! while it holds no notice (the panel stays at scale 1).
+static void status_area_writing(const Layout* L, bool notice_shown)
 {
-    if (L->menubar)
-        status_area(L->status_top - 1, L->status_top - 1, L->text_area_cols, status_panel_cols(L), false);
-    else
+    if (!L->tabs)
         status_area(app.rows - 2, app.rows - 1, L->text_area_cols, status_panel_cols(L), false);
+    else if (!notice_shown)
+        status_area(app.rows, app.rows, L->text_area_cols, status_panel_cols(L), false);
 }
 
 //! Lines a page up or down moves in the open menu: what render_menu showed last
@@ -3426,12 +3683,13 @@ static int32_t menu_page(void)
 // #region One-shot tips
 
 //! The tip posted and not yet drawn, TIP_COUNT for none: a tip counts as given (and is saved as
-//! seen) only once render_status_bar() has drawn it.
+//! seen) only once render_status_bar() or render_notice_line() has drawn it.
 static TipId tip_pending = TIP_COUNT;
 
 //! Give a one-shot tip (dawn_tips) as a NOTICE_TIP, which takes the writing screen's whole status
-//! line. Only where that line is drawn and shows notices: the writing screen, not printing or
-//! previewing, not in focus mode, not under the chat's bottom sheet; and never over another
+//! line (the notice line under the tab row). Only where that line is drawn and shows notices: the
+//! writing screen, not printing or previewing, not in focus mode, not under the chat's bottom
+//! sheet; and never over another
 //! notice (a sticky error among them). The moment comes again, and the tip waits for it.
 static void tip_show(TipId id, const char* text)
 {
@@ -3444,7 +3702,7 @@ static void tip_show(TipId id, const char* text)
     tip_pending = id;
 }
 
-//! The status line drew a NOTICE_TIP: the tip behind it is given, and remembered.
+//! The status line or the notice line drew a NOTICE_TIP: the tip behind it is given, and remembered.
 static void tip_drawn(void)
 {
     if (tip_pending == TIP_COUNT)
@@ -3476,13 +3734,13 @@ static void status_put(const char* s, int32_t scale)
     print_scaled_str(s, strlen(s), scale);
 }
 
-//! Render status bar: the bottom L->status_scale rows from L->status_top, drawn at L->status_scale
-//! (half of ui_scale, 1 on a desktop terminal), so under the chrome it keeps its size on screen at any font. Positions are
-//! worked out in scaled columns, the note's width divided by the scale, then placed in screen cells.
+//! Render status bar: the bottom row, L->status_top, on a desktop terminal (where there is no tab
+//! row; under one, render_tabs() says the word count and the timer and render_notice_line() the
+//! notices). Positions are worked out in columns of the line's scale (1), then placed in screen cells.
 static void render_status_bar(const Layout* L)
 {
     int32_t words = count_words(&app.text);
-    int32_t scale = L->status_scale;
+    int32_t scale = 1;
     int32_t row = L->status_top;
     int32_t status_left = L->margin + 1;
     int32_t cols = L->text_width / scale; // scaled columns the line may use
@@ -3660,6 +3918,52 @@ static void render_status_bar(const Layout* L)
         status_put(hints, scale);
     }
 #undef STATUS_COL
+}
+
+//! The notice line under the tab row (the bottom row, where a desktop terminal has its status
+//! line): the notice showing (dawn_notice), from the note's left edge, fading like the status
+//! line's (an error stays at full strength until a key or a tap) and cut with an ellipsis when it
+//! is longer than the note's width; a one-shot tip the same way, given once drawn. Else the voice
+//! helpers' word ("listening") at the right end; else nothing. Nothing in focus mode.
+//! @return whether a notice or a tip is on the line (the status panel then keeps off it)
+static bool render_notice_line(const Layout* L)
+{
+    int32_t row = app.rows;
+    set_bg(get_bg());
+    move_to(row, 1);
+    out_spaces(L->text_area_cols);
+    if (app.focus_mode)
+        return false;
+    int32_t left = L->margin + 1;
+    int32_t room = L->text_width;
+    const char* text;
+    NoticeKind kind;
+    float fresh;
+    if (notice_current(&text, &kind, &fresh)) {
+        size_t len = strlen(text);
+        size_t fit = room > 0 ? tip_prefix(text, room) : 0;
+        bool cut = fit < len;
+        if (cut)
+            len = room > 1 ? tip_prefix(text, room - 1) : 0; // the ellipsis takes a cell
+        move_to(row, left);
+        set_fg(kind == NOTICE_ERROR ? get_error_color() : color_lerp(get_bg(), get_dim(), fresh));
+        print_scaled_str(text, len, 1);
+        if (cut && room > 0)
+            out_str("…");
+        if (kind == NOTICE_TIP)
+            tip_drawn();
+        return true;
+    }
+    const char* voice_text = voice_status_text();
+    if (voice_text) {
+        int32_t col = left + room - (int32_t)strlen(voice_text);
+        if (col >= left) {
+            move_to(row, col);
+            set_fg(get_dim());
+            out_str(voice_text);
+        }
+    }
+    return false;
 }
 
 // #endregion
@@ -4272,12 +4576,12 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
-    // Plain text has no status line, but the menu bar and the ribbon still show (on a phone the
-    // View menu is the way back out). The status panel's corner (dawn_status): the blank rows under
-    // the text.
-    render_menubar(&L);
+    // Plain text has no status line or notice line, but the tab row and a ribbon still show (on a
+    // phone the File ribbon is the way back out). The status panel's corner (dawn_status): the
+    // blank rows under the text.
+    render_tabs(&L);
     render_ribbon(&L);
-    status_area_writing(&L);
+    status_area_writing(&L, false);
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(true);
     status_cursor(cursor_screen_row, cursor_screen_col);
@@ -5173,7 +5477,7 @@ static void handle_writing(int32_t key)
     // this is where a touch-detached view reattaches to the cursor (dawn_touch).
     app.view_detached = false;
 
-    // The formatting ribbon's buttons, one key per FormatOp (a range, which a portable switch
+    // The Formatting ribbon's style buttons, one key per FormatOp (a range, which a portable switch
     // cannot spell as one case).
     if (key >= DAWN_KEY_FMT_BOLD && key <= DAWN_KEY_FMT_CODE_BLOCK) {
         if (CAN_EDIT())
@@ -5183,7 +5487,11 @@ static void handle_writing(int32_t key)
 
     switch (key) {
     case '\x1b':
-        if (app.ai_open)
+        // A typed esc folds an open ribbon away first; "close" on the File ribbon (or in the
+        // command menu) closes the note itself.
+        if (ribbon_ui.tab >= 0 && !key_is_command && !app.ai_open)
+            ribbon_close();
+        else if (app.ai_open)
             app.ai_open = false;
         else if (app.preview_mode)
             app.quit = true;
@@ -5240,24 +5548,36 @@ static void handle_writing(int32_t key)
         MODE_PUSH(MODE_TOUR);
         break;
 
-    case 29: // Ctrl+] - the full command menu (dawn_commands), also "all commands" under Help
+    case 29: // Ctrl+] - the full command menu (dawn_commands), also "all commands" in help
     case DAWN_KEY_CMD_MENU:
-        menu_build(&menu, -1, command_enabled);
+        menu_build(&menu, command_enabled);
         MODE_PUSH(MODE_MENU);
         break;
-    case DAWN_KEY_MENU_FILE: // a tap on a name on the menu bar: that menu's dropdown
-    case DAWN_KEY_MENU_EDIT:
-    case DAWN_KEY_MENU_VIEW:
-    case DAWN_KEY_MENU_AI:
-    case DAWN_KEY_MENU_HELP:
-        menu_open_dropdown(menubar_from_key(key));
+    case DAWN_KEY_TAB_FILE: // a tap on a tab: its ribbon drops open, or folds away
+    case DAWN_KEY_TAB_FORMAT:
+    case DAWN_KEY_TAB_AI:
+        ribbon_toggle(tabs_from_key(key));
         break;
-    case DAWN_KEY_CMD_RIBBON: // View > formatting
-        if (!CAN_MODIFY())
-            break;
-        app.ribbon = !app.ribbon;
-        settings_save();
+    case DAWN_KEY_RIBBON_MORE: // the open ribbon's next page
+        if (ribbon_ui.pages > 1)
+            ribbon_ui.page = (ribbon_ui.page + 1) % ribbon_ui.pages;
         break;
+    case DAWN_KEY_CMD_THEME: // "light or dark" on the File ribbon
+        theme_toggle();
+        break;
+#if HAS_LIBAI
+    case DAWN_KEY_AI_MODEL: // the AI ribbon's model button: the chat's model picker
+        model_picker_open();
+        break;
+    case DAWN_KEY_AI_TITLE:
+        if (CAN_MODIFY())
+            ai_action(AI_ACTION_TITLE);
+        break;
+    case DAWN_KEY_AI_FORMAT:
+        if (CAN_EDIT())
+            ai_action(AI_ACTION_FORMAT);
+        break;
+#endif
 
     case 12: // Ctrl+L - Table of Contents
     {
@@ -5374,6 +5694,7 @@ static void handle_writing(int32_t key)
             app.ai_open = !app.ai_open;
             app.ai_focused = app.ai_open;
             if (app.ai_open) {
+                ribbon_close(); // a chat sheet and a ribbon never share the screen
                 if (!app.ai_session)
                     ai_init_session();
                 // Warm the model now: by the time the question is typed, the note is read.
@@ -6064,6 +6385,7 @@ static int32_t touch_to_key(int32_t key)
             return key;
         switch (t.kind) {
         case HIT_KEY:
+            key_is_command = t.arg == HIT_ARG_COMMAND;
             return t.key;
         case HIT_ROW:
             return hit_pick_row(t.arg) && t.key ? t.key : DAWN_KEY_NONE;
@@ -6147,6 +6469,7 @@ static void handle_input(void)
     // A command picked in the menu is pressed now, through the same path as a typed key.
     int32_t key = pending_key;
     pending_key = DAWN_KEY_NONE;
+    key_is_command = key != DAWN_KEY_NONE; // a command picked in the menu
     if (key == DAWN_KEY_NONE)
         key = input_read_key();
     if (key == DAWN_KEY_NONE)
@@ -6202,10 +6525,7 @@ static void handle_input(void)
             app.mode = MODE_HISTORY;
             break;
         case 'd':
-            app.theme = (app.theme == THEME_DARK) ? THEME_LIGHT : THEME_DARK;
-            highlight_cleanup(app.hl_ctx);
-            app.hl_ctx = highlight_init(app.theme == THEME_DARK);
-            settings_save();
+            theme_toggle();
             break;
         case '?':
             app.help_page = HELP_PAGE_SHORTCUTS;
@@ -6342,8 +6662,8 @@ static void handle_input(void)
             handle_mouse_scroll(key);
             break;
         }
-        if (app.ai_open && app.ai_focused && menubar_from_key(key) >= 0) {
-            // The menu bar stays over a chat sheet: a tap on it leaves the chat for the note.
+        if (app.ai_open && app.ai_focused && tabs_from_key(key) >= 0) {
+            // The tab row stays over a chat sheet: a tap on a tab leaves the chat for its ribbon.
             app.ai_focused = false;
             handle_writing(key);
         } else if (app.ai_open && app.ai_focused) {
@@ -6897,26 +7217,12 @@ static void handle_input(void)
     }
 
     case MODE_MENU:
-        // The release and drag that follow a tap are no keys: the one after the tap on a menu's
-        // name would otherwise act at once. A tap outside the box (no region there) closes the
-        // menu; enter closes it and then presses the command's key (pending_key). A tap on the
-        // open menu's name closes it, on another name opens that one; left and right on a dropdown
-        // open its neighbours.
+        // The release and drag that follow a tap are no keys: the one after the tap that opened
+        // the menu would otherwise act at once. A tap outside the box (no region there) closes the
+        // menu; enter closes it and then presses the command's key (pending_key).
         if (key == DAWN_KEY_MOUSE_RELEASE || key == DAWN_KEY_MOUSE_DRAG)
             break;
-        if (menubar_from_key(key) >= 0) {
-            if (menubar_from_key(key) == menu.bar_menu)
-                MODE_POP();
-            else
-                menu_open_dropdown(menubar_from_key(key));
-            break;
-        }
         switch (key) {
-        case DAWN_KEY_LEFT:
-        case DAWN_KEY_RIGHT:
-            if (menu.bar_menu >= 0)
-                menu_dropdown_step(key == DAWN_KEY_LEFT ? -1 : 1);
-            break;
         case DAWN_KEY_UP:
         case 'k':
             menu.selected = menu_step(&menu, menu.selected, -1, 1);
@@ -7164,9 +7470,6 @@ bool dawn_engine_init(int8_t theme_override, int32_t timer_override)
         app.nerd_font = app.launcher_term;
     }
     app.meaning_index = true; // on unless settings.json says "meaning_index": false
-    // The formatting ribbon is on in the launcher's terminal (under the menu bar), off elsewhere,
-    // until View > formatting saves a choice ("ribbon").
-    app.ribbon = app.launcher_term;
     app.onboarded = false; // the tour shows until settings.json says "onboarded": true
     settings_load();
     // A first run opens on the tour's cards instead of the start screen; a note named on the
@@ -7975,18 +8278,25 @@ static void render_writing(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, bc->total_vrows,
             L.text_height, app.scroll_y);
 
-    // Under a sheet the note has no status line: the chat's input line is the bottom edge.
-    if (!L.ai_sheet)
-        render_status_bar(&L);
-    render_menubar(&L);
+    // Under a sheet the note has no status line: the chat's input line is the bottom edge. Under
+    // the tab row the bottom row is the notice line instead.
+    bool notice_shown = false;
+    if (!L.ai_sheet) {
+        if (L.tabs)
+            notice_shown = render_notice_line(&L);
+        else
+            render_status_bar(&L);
+    }
+    render_tabs(&L);
     render_ribbon(&L);
 
     // The status panel's corner (dawn_status): the two blank rows between the text and the status
-    // line (one under the chrome), or the one between the text and a chat sheet.
+    // line, the notice line under the tab row while it is free, or the one row between the text
+    // and a chat sheet.
     if (L.ai_sheet)
         status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
     else
-        status_area_writing(&L);
+        status_area_writing(&L, notice_shown);
 
     if (app.ai_open) {
         render_ai_panel(&L);

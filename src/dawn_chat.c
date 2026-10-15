@@ -72,6 +72,18 @@ static bool g_after_step;
 //! Edits made to the note during this reply, by tool or by tagged block.
 static int g_edits_this_reply;
 
+//! Why the last edit asked for this reply was not made (edit_note()'s reason), NULL when none failed.
+static const char* g_edit_refused;
+
+//! The AI ribbon's action this turn is (ai_action()), AI_ACTION_NONE for a question typed in the
+//! chat; its end is told in a notice, since the chat may well be closed.
+static AiAction g_turn_action = AI_ACTION_NONE;
+
+//! The error the reply ended with ("Error: ..."), for the action's notice; "" when none.
+static char g_turn_error[120];
+
+static void action_finished(bool stopped);
+
 //! Put a line of its own at the end of the reply that is streaming: what a tool did, or that the
 //! user stopped it. The panel draws these dim, by their first character.
 static void chat_step(const char* line)
@@ -115,9 +127,11 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
                     m->text = dawn_strdup("the model is busy, try again");
                     m->len = strlen(m->text);
                 }
+                snprintf(g_turn_error, sizeof(g_turn_error), "the model is busy, try again");
                 g_after_step = false;
                 return;
             }
+            snprintf(g_turn_error, sizeof(g_turn_error), "%s", chunk + 6 + (chunk[6] == ' '));
             // Replace AI message with error. The end of the reply follows and clears ai_thinking.
             if (app.chat_count > 0 && !app.chat_msgs[app.chat_count - 1].is_user) {
                 ChatMessage* m = &app.chat_msgs[app.chat_count - 1];
@@ -150,6 +164,7 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
         app.ai_thinking = false;
         app.ai_stream = AI_INVALID_ID;
         app.ai_status[0] = '\0';
+        bool stopped = app.ai_stopping;
         if (app.ai_stopping) {
             app.ai_stopping = false;
             mark_stopped();
@@ -158,6 +173,7 @@ static void ai_stream_cb(ai_context_t* context, const char* chunk, void* user_da
             apply_reply_edits();
             g_applying_reply = false;
         }
+        action_finished(stopped);
     }
 }
 
@@ -621,6 +637,8 @@ static char* edit_tool(EditKind kind, const char* params_json)
 {
     char* text = edit_text_param(params_json);
     const char* error = edit_note(kind, text);
+    if (error)
+        g_edit_refused = error;
     char* result;
     char line[512 + PATH_MAX];
     edit_line(kind, error, line, sizeof(line));
@@ -735,6 +753,8 @@ static void apply_reply_edits(void)
             drop_carriage_returns(text);
         }
         const char* error = edit_note(kind, text);
+        if (error)
+            g_edit_refused = error;
         char line[512 + PATH_MAX];
         edit_line(kind, error, line, sizeof(line));
         free(text);
@@ -801,12 +821,14 @@ static void mark_stopped(void)
 
 // #endregion
 
-void ai_send(const char* prompt)
+//! Start a turn: shown goes into the chat as the user's message, prompt to the model, with a
+//! reply of at most max_tokens (0: a rewrite's 384 with a selection, else 768).
+static void ai_send_turn(const char* shown, const char* prompt, int32_t max_tokens)
 {
     if (!app.ai_ready || !app.ai_ctx)
         return;
 
-    chat_add(prompt, true);
+    chat_add(shown, true);
     chat_add("", false);
 
     app.ai_thinking = true;
@@ -815,6 +837,8 @@ void ai_send(const char* prompt)
     ai_set_status("thinking…");
     g_after_step = false;
     g_edits_this_reply = 0;
+    g_edit_refused = NULL;
+    g_turn_error[0] = '\0';
     free(g_turn_path);
     g_turn_path = app.session_path ? dawn_strdup(app.session_path) : NULL;
     free(g_turn_prompt);
@@ -824,9 +848,11 @@ void ai_send(const char* prompt)
             *p = (char)tolower((unsigned char)*p);
 
     // A selection turns this into a rewrite (a smaller, more focused reply than free-form chat).
-    size_t sel_s, sel_e;
-    get_selection(&sel_s, &sel_e);
-    int32_t max_tokens = sel_s != sel_e ? 384 : 768;
+    if (max_tokens <= 0) {
+        size_t sel_s, sel_e;
+        get_selection(&sel_s, &sel_e);
+        max_tokens = sel_s != sel_e ? 384 : 768;
+    }
 
     // One appended turn on the note's warm conversation: the question plus what changed in the
     // note since the model last saw it (dawn_session.c). A quiet job in flight gives way to it.
@@ -838,8 +864,100 @@ void ai_send(const char* prompt)
         free(m->text);
         m->text = dawn_strdup("Error: Couldn't start the request.");
         m->len = strlen(m->text);
+        snprintf(g_turn_error, sizeof(g_turn_error), "couldn't start the request");
+        action_finished(false);
     }
 }
+
+void ai_send(const char* prompt)
+{
+    g_turn_action = AI_ACTION_NONE;
+    ai_send_turn(prompt, prompt, 0);
+}
+
+// #region The AI ribbon's actions
+
+//! Each action: the chat's line for it, what the model is asked, and the words of its notices.
+//! The prompts stay clear of the words that let a replace_note shrink the note (see
+//! prompt_asks_to_shorten()), so a model that loses part of the note is refused as in the chat.
+static const struct {
+    const char* shown;
+    const char* prompt;
+    const char* name;
+} ACTIONS[AI_ACTION_COUNT] = {
+    [AI_ACTION_TITLE] = { "Give the note a title.",
+        "(From dawn, not typed by the user.) Give the note a title: two to six words, in the note's "
+        "language, with no quotes, no Markdown and no final period. Reply with only "
+        "<set_title>the title</set_title>.",
+        "title" },
+    [AI_ACTION_FORMAT] = { "Auto format the note.",
+        "(From dawn, not typed by the user.) Restructure the whole note into well-formed Markdown: "
+        "a heading for each part, lists for runs of items, - [ ] tasks for things to do, paragraphs "
+        "with a blank line between them. Keep every word, fact and line of the note, in its order; "
+        "add nothing new, and do not reword or translate anything. Reply with the whole new note in "
+        "one <replace_note> block and nothing else.",
+        "auto format" },
+};
+
+bool ai_action(AiAction action)
+{
+    if (action <= AI_ACTION_NONE || action >= AI_ACTION_COUNT)
+        return false;
+    char msg[160];
+    if (!app.ai_ready || !app.ai_ctx) {
+        snprintf(msg, sizeof(msg), "%s · AI is off", ACTIONS[action].name);
+        notice_post(NOTICE_ERROR, msg);
+        return false;
+    }
+    if (app.ai_thinking) {
+        snprintf(msg, sizeof(msg), "%s · the AI is still answering, try again after", ACTIONS[action].name);
+        notice_post(NOTICE_INFO, msg);
+        return false;
+    }
+    size_t len = gap_len(&app.text);
+    if (len == 0) {
+        snprintf(msg, sizeof(msg), "%s · the note is empty", ACTIONS[action].name);
+        notice_post(NOTICE_INFO, msg);
+        return false;
+    }
+    // A whole note comes back for auto format: room for all of it, and some to spare.
+    int32_t max_tokens = 64;
+    if (action == AI_ACTION_FORMAT) {
+        size_t want = len / 3 + 256;
+        max_tokens = want > 8192 ? 8192 : (int32_t)want;
+    }
+    g_turn_action = action;
+    snprintf(msg, sizeof(msg), "%s · asking the model…", ACTIONS[action].name);
+    notice_post(NOTICE_INFO, msg);
+    ai_send_turn(ACTIONS[action].shown, ACTIONS[action].prompt, max_tokens);
+    return true;
+}
+
+//! A turn ended: when it was a ribbon action, say how it went. A made edit says so itself
+//! ("edited by AI · ctrl+z undoes", "renamed · ..."); one that was not made says why.
+static void action_finished(bool stopped)
+{
+    AiAction action = g_turn_action;
+    g_turn_action = AI_ACTION_NONE;
+    if (action <= AI_ACTION_NONE || action >= AI_ACTION_COUNT)
+        return;
+    char msg[256];
+    if (stopped) {
+        snprintf(msg, sizeof(msg), "%s · stopped", ACTIONS[action].name);
+        notice_post(NOTICE_INFO, msg);
+        return;
+    }
+    if (g_edits_this_reply > 0)
+        return;
+    const char* why = g_turn_error[0] ? g_turn_error
+        : g_edit_refused                ? g_edit_refused
+        : action == AI_ACTION_TITLE     ? "the model gave no title"
+                                        : "the model sent no new note";
+    snprintf(msg, sizeof(msg), "%s · %s", ACTIONS[action].name, why);
+    notice_post(NOTICE_ERROR, msg);
+}
+
+// #endregion
 
 // Written for the small on-device models TAI serves, which mostly cannot call tools: the note
 // arrives with the conversation's first message and what changed with every later one, and edits
