@@ -25,8 +25,14 @@ Done (on `tl`):
 - The start screen's panel says "ai ready" only once the runtime reports a loaded model, else
   "ai loads on first use" with the configured model (`0459a14`, `src/dawn_status.c`); the user saw
   "ai ready" followed by "loading the model" in the note.
+- In the launcher the note fills the pane with 2-cell margins (upstream centres a 70-column
+  reading column once the terminal is wider than 80, which on a phone with a small font or after
+  a pinch out put the note in a narrow column mid-screen), and the chat is a bottom sheet at any
+  width (`calc_layout`, `3bcc1fe`). The user reported the column on the A065.
 - Installed on the user's phone (A065) over SSH as `~/.local/bin/dawn` (build `0.1.3+d8dd401`);
-  the store build is kept beside it as `dawn.store-2026-10-10`. PR #1 on GitHub has it all.
+  the store build is kept beside it as `dawn.store-2026-10-10`. The `3bcc1fe` build is pushed to
+  `/sdcard/Download/dawn-arm64` (SSH over the Tailscale relay started corrupting connections);
+  install with `cp /sdcard/Download/dawn-arm64 ~/.local/bin/dawn`. PR #1 on GitHub has it all.
 
 - Two one-shot tips, each shown once as a `NOTICE_TIP` that has the writing screen's whole status
   line to itself (`tip_show`, `tip_drawn` and `render_status_bar` in `src/dawn.c`): the first
