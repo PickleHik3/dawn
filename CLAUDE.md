@@ -50,7 +50,7 @@ Tests are seven plain executables, no framework, no ctest:
 ./build/test-store                                 # dawn_fsio, the history CRDT, dawn_notepath naming; exits non-zero on failure
 ./build/test-hit                                   # hit regions and the hint-line parser (dawn_hit); exits non-zero on failure
 ./build/test-format                                # formatting commands on the gap buffer (dawn_format); exits non-zero on failure
-./build/test-commands                              # the command table, action bar fit and ribbon layout at scale 1 and 2, menu lines (dawn_commands); exits non-zero on failure
+./build/test-commands                              # the command table, ui scale, menu bar and ribbon layout at every scale, menu and dropdown lines (dawn_commands); exits non-zero on failure
 ./build/test-tips                                  # the one-shot tips' seen set and its "tips_seen" JSON (dawn_tips); exits non-zero on failure
 ```
 
@@ -126,30 +126,39 @@ the mode's switch, so a tap and its key share one path; a tap on no region reach
 `DAWN_KEY_MOUSE_CLICK`.
 
 `src/dawn_commands.c` is the table of the writing screen's commands (label, group, the key
-`handle_writing` takes, the shortcut as printed, what each needs, its place on the action bar). The
-phone action bar (`render_action_bar` in `dawn.c`, on the blank row above the status line when
-`app.cols < AI_PANEL_MIN_COLS` or `app.launcher_term`) and the command menu (`MODE_MENU`, "more" on the
-bar or Ctrl+], drawn by `render_menu` in `dawn_render.c`) read it, and so does help (`MODE_HELP`, Ctrl+O):
-its shortcut pages list every command by group with its key and its tap ("bar", "ribbon" or "menu"),
-from `help_rows`/`help_paginate`, after a hand-written "move and select" group; a new command goes in
-that table and nowhere else. Help's pages are `HelpPage` (`dawn_types.h`: shortcuts, Markdown cheatsheet,
-activity, meaning index), each over as many screens as the screen's height needs (`app.help_screen`,
-`render_help_screens`); tab and <- turn through them via `render_help_neighbour`. Running a command from
-the bar or the menu presses its key (the menu through `pending_key`), so it behaves as the shortcut does.
-Commands with no chord are the virtual keys `DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON` and
-`DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) and `DAWN_KEY_CMD_TOUR` in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the table's `CMD_GROUP_FORMAT`,
-left out of the menu: toggled by `Aa` on the bar, "formatting" in the menu or `DAWN_KEY_CMD_RIBBON`, off
-by default and saved as `"ribbon"` in settings.json, it takes rows from the note's bottom (`ribbon_rows`
-in `calc_layout`) above the bar's row, wrapping between clusters (`commands_ribbon_layout`). Each button
+`handle_writing` takes, the shortcut as printed, what each needs, the ribbon button's text). Where
+`chrome_place()` in `dawn.c` says so (`app.launcher_term` or `app.cols < AI_PANEL_MIN_COLS`, not in
+preview or print; a wide desktop terminal gets none), a menu bar runs across the top
+(`render_menubar`: `File  Edit  View  AI  Help`, AI only with `HAS_LIBAI`; `menubar_layout`,
+`menubar_of_group`): a tap on a name is a `DAWN_KEY_MENU_*` key that opens that menu's dropdown,
+`MODE_MENU` with `MenuState.bar_menu` set (`menu_build(m, item, ...)`: File = note group, Edit = edit
+and find, View, AI, Help), drawn by `render_menu` in `dawn_render.c` under the name on the popup's
+surface; left/right walk the menus. Ctrl+] (and "all commands" under Help) opens the full grouped menu
+(`bar_menu` -1). Help (`MODE_HELP`, Ctrl+O) reads the same table: its shortcut pages list every command
+by group with its key and its tap ("Edit menu", or "ribbon B"), from `help_rows`/`help_paginate`, after
+a hand-written "move and select" group; a new command goes in that table and nowhere else. Help's pages
+are `HelpPage` (`dawn_types.h`: shortcuts, Markdown cheatsheet, activity, meaning index), each over as
+many screens as the screen's height needs (`app.help_screen`, `render_help_screens`); tab and <- turn
+through them via `render_help_neighbour`. Running a command from a menu presses its key (through
+`pending_key`), so it behaves as the shortcut does. Commands with no chord are the virtual keys
+`DAWN_KEY_CMD_MENU`, `DAWN_KEY_CMD_RIBBON`, `DAWN_KEY_CMD_CHEATSHEET` (help on its cheatsheet) and
+`DAWN_KEY_CMD_TOUR` in `dawn_backend.h`. The formatting ribbon (`render_ribbon` in `dawn.c`) is the
+table's `CMD_GROUP_FORMAT`, left out of the menus: under the menu bar (on the top rows without one),
+toggled by View › formatting (`DAWN_KEY_CMD_RIBBON`), on by default in the launcher and off elsewhere
+until `"ribbon"` in settings.json says otherwise, hidden under a chat sheet and when it would leave the
+note fewer than `RIBBON_MIN_NOTE_ROWS`, wrapping between clusters (`commands_ribbon_place`). Each button
 is a `DAWN_KEY_FMT_*` key, one per `FormatOp` in order, which `handle_writing` turns into one
 `format_apply` (`dawn_format.c`) and one undo step; a style that `format_state` says is on draws
-underlined. Where the terminal has kitty text sizing (`DAWN_CAP_TEXT_SIZING`) and the bar has a place
-(`action_bar_place`, which does not depend on the mode, so a dialog does not move the note), the bar and
-the ribbon are drawn at scale 2 for a finger: `Layout.ui_scale` is 2, the bar takes two rows from
-`Layout.bar_top` (one more taken from the note), and each ribbon row is two screen rows. The scaled
-places, in screen cells, come from `commands_bar_layout` and `commands_ribbon_place` (pure, tested in
-`test-commands`), and tap regions are as tall as the scale. Without text sizing (tmux, xterm) both stay
-one row per line. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
+underlined. Size: `Layout.ui_scale` scales the menu bar, the ribbon, the status line (`render_status_bar`
+works in scaled columns, `Layout.status_top`) and the dropdowns. Where the terminal has kitty text sizing
+(`DAWN_CAP_TEXT_SIZING`) it comes from the pane's pixels (`ui_scale_now`, `commands_ui_scale`: a chrome
+row is about a thirteenth of the pane's width, clamped to 1..4, 2 in the launcher without a pixel size),
+so the chrome keeps its size on screen when a pinch changes the font while the note follows the font;
+without text sizing (tmux, xterm) it is 1. A dropdown drops to the largest scale at which it fits below
+the bar; the status panel corner (`dawn_status.c`) stays at scale 1 on the blank row above the status
+line. Layout: menu bar, ribbon, a blank row, the text, a blank row, the status line; all scaled places, in
+screen cells, come from the pure functions in `dawn_commands.c` (tested in `test-commands`), and tap
+regions are as tall as the scale. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
 
 First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards
@@ -157,7 +166,7 @@ in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` i
 arrows or a swipe turn cards, esc or enter on the last one sets `onboarded` and goes to the start screen).
 "welcome tour" in the help group of the command table (`DAWN_KEY_CMD_TOUR`) pushes it again, and then it
 pops back. Two one-shot tips, the first selection and the first save, go through `tip_show` in
-`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` draws alone across the whole status line; a tip
+`dawn.c` as a `NOTICE_TIP`, which `render_status_bar` draws alone across the whole status line (at the largest scale up to `ui_scale` that holds it whole); a tip
 counts as given only once drawn, never off the writing screen. `src/dawn_tips.c` is the pure set of
 tips given (`TipId`, `tips_seen`, `tips_mark`), saved by name as `"tips_seen"` in settings.json.
 

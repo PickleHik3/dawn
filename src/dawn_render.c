@@ -275,7 +275,7 @@ static const TourCard TOUR_CARDS[] = {
             "dawn saves as you type. esc brings you back.",
             "history (h) lists your notes." } },
     { "format",
-        { "tap Aa above the keyboard: bold, headings, lists,",
+        { "the ribbon under the menus: bold, headings, lists,",
             "or type Markdown: **bold**, # heading, - list.",
             "? opens help, with a Markdown cheatsheet." } },
 #if HAS_LIBAI
@@ -835,8 +835,8 @@ static void help_shortcut_line(const HelpRow* r, int32_t row, const HelpColumns*
 }
 
 //! HELP_PAGE_SHORTCUTS: every command by task, read from the command table (dawn_commands): what
-//! it does, its key, and how to reach it by touch ("bar" and the button, "ribbon" and the button,
-//! or "menu", which is "more" on the bar), under the table's group headings.
+//! it does, its key, and how to reach it by touch (its menu on the menu bar, "Edit menu", or
+//! "ribbon" and the button), under the table's group headings.
 static void render_help_shortcuts(HelpFrame* f)
 {
     HelpRow rows[HELP_ROWS_MAX];
@@ -934,7 +934,7 @@ static const struct {
 #define CHEAT_COUNT ((int32_t)(sizeof(CHEATS) / sizeof(CHEATS[0])))
 
 //! The line under the cheatsheet's rows
-#define CHEAT_NOTE "the ribbon (Aa on the bar) types these for you"
+#define CHEAT_NOTE "the ribbon (View › formatting) types these"
 
 //! Draw a cheatsheet row's "you get" side at the cursor, in at most room columns
 static void help_cheat_got(int32_t i, int32_t room)
@@ -1702,11 +1702,154 @@ void render_toc(void)
     platform_set_cursor_visible(true);
 }
 
-void render_menu(MenuState* m)
+//! The full menu's title, with the key that opens it without a finger
+#define MENU_TITLE "commands"
+#define MENU_TITLE_KEY "  ^]"
+
+//! Draw the open menu on the popup's surface at scale s, with no border: lines of s screen rows
+//! from top, cols scaled columns of text with a cell of padding either side from left, at most
+//! rows screen rows tall. The title first when title is set; headings in the accent; the selected
+//! line on the row highlight. When the lines do not all fit, a first and a last line say "↑ more"
+//! and "↓ more", each a tap that pages that way. Sets m's scroll and page.
+static void render_menu_surface(MenuState* m, int32_t s, int32_t top, int32_t left, int32_t cols, int32_t rows, bool title)
 {
-    // As wide as help (44 columns, or the screen less a column each side on a phone), and as tall
-    // as the list, never taller than the screen: with the keyboard up a phone pane is about 12
-    // rows, so the list scrolls inside the box. Rows: border, title, the list, hints, border.
+    int32_t width = cols * s + 2;
+    int32_t list = rows / s - (title ? 1 : 0);
+    bool scrolls = list < m->count;
+    if (scrolls)
+        list -= 2;
+    if (list < 1)
+        list = 1;
+    menu_scroll_to(m, list);
+    m->page = list;
+    int32_t shown = m->count - m->scroll < list ? m->count - m->scroll : list;
+    int32_t height = ((title ? 1 : 0) + (scrolls ? 2 : 0) + shown) * s;
+
+    DawnColor modal = get_modal_bg();
+    image_mask_region(left, top, width, height, modal);
+    set_bg(modal);
+    for (int32_t r = 0; r < height; r++) {
+        move_to(top + r, left);
+        for (int32_t c = 0; c < width; c++)
+            platform_write_char(' ');
+    }
+    // A tap inside on none of its lines does nothing; outside it closes the menu.
+    hit_add(left, top, width, height, HIT_INERT, 0, 0);
+
+    int32_t text = left + 1;
+    int32_t row = top;
+    if (title) {
+        move_to(row, text);
+        set_fg(get_fg());
+        print_scaled_str(MENU_TITLE, strlen(MENU_TITLE), s);
+        set_fg(get_dim());
+        print_scaled_str(MENU_TITLE_KEY, strlen(MENU_TITLE_KEY), s);
+        row += s;
+    }
+    if (scrolls) {
+        move_to(row, text);
+        set_fg(m->scroll > 0 ? get_dim() : get_border());
+        print_scaled_str("↑ more", strlen("↑ more"), s);
+        if (m->scroll > 0)
+            hit_add(left, row, width, s, HIT_KEY, DAWN_KEY_PGUP, 0);
+        row += s;
+    }
+    for (int32_t i = 0; i < shown; i++, row += s) {
+        int32_t idx = m->scroll + i;
+        const MenuLine* line = &m->lines[idx];
+        if (!line->cmd) {
+            const char* name = commands_group_name(line->group);
+            move_to(row, text);
+            set_fg(get_accent());
+            print_scaled_str(name, strlen(name), s);
+            continue;
+        }
+        bool sel = idx == m->selected;
+        if (sel) {
+            // The selected line sits one rung above the surface (surface_container_highest)
+            set_bg(get_row_select_bg());
+            for (int32_t r = 0; r < s; r++) {
+                move_to(row + r, left);
+                for (int32_t c = 0; c < width; c++)
+                    platform_write_char(' ');
+            }
+        }
+        if (line->enabled)
+            hit_add(left, row, width, s, HIT_ROW, '\r', idx);
+        const char* label = line->cmd->label;
+        const char* sc = line->cmd->shortcut;
+        int32_t sc_w = hist_cols(sc, strlen(sc));
+        move_to(row, text);
+        set_fg(!line->enabled ? get_border() : sel ? get_fg() : get_dim());
+        if (s == 1)
+            hist_write_fit(label, cols - (sc_w > 0 ? sc_w + 2 : 0));
+        else
+            print_scaled_str(label, strlen(label), s); // the width was chosen to hold it
+        if (sc_w > 0) {
+            move_to(row, text + (cols - sc_w) * s);
+            set_fg(line->enabled ? get_dim() : get_border());
+            print_scaled_str(sc, strlen(sc), s);
+        }
+        set_bg(modal);
+    }
+    if (scrolls) {
+        bool more = m->scroll + list < m->count;
+        move_to(row, text);
+        set_fg(more ? get_dim() : get_border());
+        print_scaled_str("↓ more", strlen("↓ more"), s);
+        if (more)
+            hit_add(left, row, width, s, HIT_KEY, DAWN_KEY_PGDN, 0);
+    }
+    platform_set_cursor_visible(false);
+}
+
+void render_menu(MenuState* m, const MenuPlace* p)
+{
+    int32_t scale = p && p->scale > 1 ? p->scale : 1;
+    int32_t need = menu_list_cols(m);
+
+    // A dropdown hangs from its menu's name: its left edge a cell before the name (the open
+    // menu's tab), moved left when it would run off the screen. It takes the largest scale up to
+    // the chrome's at which all its lines fit below the bar and its width fits the screen.
+    if (m->bar_menu >= 0 && p) {
+        int32_t top = p->top > 0 ? p->top : 1;
+        int32_t rows = app.rows - top + 1;
+        int32_t s = scale;
+        while (s > 1 && (m->count * s > rows || need * s + 2 > app.cols))
+            s--;
+        int32_t cols = need * s + 2 <= app.cols ? need : (app.cols - 2) / s;
+        int32_t width = cols * s + 2;
+        int32_t left = p->col - 1;
+        if (left + width - 1 > app.cols)
+            left = app.cols - width + 1;
+        if (left < 1)
+            left = 1;
+        render_menu_surface(m, s, top, left, cols, rows, false);
+        return;
+    }
+
+    // The full menu at the chrome's scale where its widest line fits the screen less a column each
+    // side, centred, a row clear above and below; the list scrolls inside.
+    int32_t title_cols = (int32_t)(strlen(MENU_TITLE) + strlen(MENU_TITLE_KEY));
+    int32_t cols = need > title_cols ? need : title_cols;
+    int32_t s = scale;
+    while (s > 1 && cols * s + 2 > app.cols - 2)
+        s--;
+    if (s > 1) {
+        int32_t width = cols * s + 2;
+        int32_t room = (app.rows - 2) - (app.rows - 2) % s;
+        int32_t want = (m->count + 1) * s;
+        int32_t height = want < room ? want : room;
+        int32_t top = (app.rows - height) / 2 + 1;
+        int32_t left = (app.cols - width) / 2 + 1;
+        render_menu_surface(m, s, top, left, cols, height, true);
+        return;
+    }
+
+    // At scale 1: as wide as help (44 columns, or the screen less a column each side on a phone),
+    // and as tall as the list, never taller than the screen: with the keyboard up a phone pane is
+    // about 12 rows, so the list scrolls inside the box. Rows: border, title, the list, hints,
+    // border.
     int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
     if (width < 24)
         width = app.cols < 24 ? app.cols : 24;
@@ -1717,6 +1860,7 @@ void render_menu(MenuState* m)
     if (visible < 1)
         visible = 1;
     menu_scroll_to(m, visible);
+    m->page = visible;
 
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
@@ -1731,9 +1875,9 @@ void render_menu(MenuState* m)
     // Title, with the key that opens the menu without a finger
     move_to(top + 1, content_left);
     set_fg(get_fg());
-    platform_write_str("commands");
+    platform_write_str(MENU_TITLE);
     set_fg(get_dim());
-    platform_write_str("  ^]");
+    platform_write_str(MENU_TITLE_KEY);
 
     int32_t list_top = top + 2;
     for (int32_t i = 0; i < visible; i++) {

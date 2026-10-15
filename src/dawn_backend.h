@@ -80,6 +80,13 @@ DAWN_ENUM(int32_t) {
     DAWN_KEY_CMD_RIBBON, //!< Show or hide the formatting ribbon
     DAWN_KEY_CMD_CHEATSHEET, //!< Open help on its Markdown cheatsheet page
     DAWN_KEY_CMD_TOUR, //!< Open the first-run tour again (MODE_TOUR)
+    // The menu bar's menus, in MenuBarItem order (dawn_commands.h): a tap on a menu's name opens
+    // its dropdown; the menu is key - DAWN_KEY_MENU_FILE.
+    DAWN_KEY_MENU_FILE,
+    DAWN_KEY_MENU_EDIT,
+    DAWN_KEY_MENU_VIEW,
+    DAWN_KEY_MENU_AI,
+    DAWN_KEY_MENU_HELP,
     // The formatting ribbon's buttons, in FormatOp order (dawn_format.h): the op is
     // key - DAWN_KEY_FMT_BOLD.
     DAWN_KEY_FMT_BOLD,
