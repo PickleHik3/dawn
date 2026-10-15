@@ -17,6 +17,16 @@ Done (on `tl`):
   one-shot tips' seen set (`src/dawn_tips.c`, `"onboarded"` and `"tips_seen"` in settings.json,
   `./build/test-tips`): `9b6b594`. "welcome tour" in the menu's help group opens the tour again.
 - Help footer items keep their columns on every screen (blank back slot on the first): `2488424`.
+- The action bar and the ribbon draw at scale 2 (kitty text sizing, as headings do) where the
+  terminal has it: twice as tall and wide, tap regions to match; unchanged elsewhere. Merge
+  `d8dd401` (`commands_bar_layout`, `commands_ribbon_place` in `src/dawn_commands.c`; `ui_scale`,
+  `bar_top` in the Layout). Checked on the emulator 2026-10-15: both rows of a button tap, the
+  underline shows on scaled text, the menu opens over the scaled bar.
+- The start screen's panel says "ai ready" only once the runtime reports a loaded model, else
+  "ai loads on first use" with the configured model (`0459a14`, `src/dawn_status.c`); the user saw
+  "ai ready" followed by "loading the model" in the note.
+- Installed on the user's phone (A065) over SSH as `~/.local/bin/dawn` (build `0.1.3+d8dd401`);
+  the store build is kept beside it as `dawn.store-2026-10-10`. PR #1 on GitHub has it all.
 
 - Two one-shot tips, each shown once as a `NOTICE_TIP` that has the writing screen's whole status
   line to itself (`tip_show`, `tip_drawn` and `render_status_bar` in `src/dawn.c`): the first
