@@ -484,6 +484,16 @@ static bool query_background_color(DawnColor* out)
     return true;
 }
 
+//! Termux Launcher's terminal, by its environment: TERM_PROGRAM, or the pane variable it sets
+//! inside tmux. Its terminal has kitty text sizing, so no probe is needed there (and a probe on a
+//! slow device can miss its reply window, which would draw every heading and the chrome at 1x).
+static bool launcher_env(void)
+{
+    const char* prog = getenv("TERM_PROGRAM");
+    const char* pane = getenv("TERMUX_LAUNCHER_PANE");
+    return (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
+}
+
 static bool query_text_sizing(void)
 {
     query_write(CSI "1;1H", sizeof(CSI "1;1H") - 1);
@@ -492,7 +502,7 @@ static bool query_text_sizing(void)
     query_write(CSI "6n", sizeof(CSI "6n") - 1);
 
     char buf1[32];
-    size_t len1 = read_response(buf1, sizeof(buf1), 'R', 100);
+    size_t len1 = read_response(buf1, sizeof(buf1), 'R', 250);
 
     int32_t row1, col1;
     if (!term_parse_cpr(buf1, len1, &row1, &col1))
@@ -503,7 +513,7 @@ static bool query_text_sizing(void)
     query_write(CSI "6n", sizeof(CSI "6n") - 1);
 
     char buf2[32];
-    size_t len2 = read_response(buf2, sizeof(buf2), 'R', 100);
+    size_t len2 = read_response(buf2, sizeof(buf2), 'R', 250);
 
     int32_t row2, col2;
     if (!term_parse_cpr(buf2, len2, &row2, &col2))
@@ -514,7 +524,7 @@ static bool query_text_sizing(void)
     query_write(CSI "6n", sizeof(CSI "6n") - 1);
 
     char buf3[32];
-    size_t len3 = read_response(buf3, sizeof(buf3), 'R', 100);
+    size_t len3 = read_response(buf3, sizeof(buf3), 'R', 250);
 
     int32_t row3, col3;
     if (!term_parse_cpr(buf3, len3, &row3, &col3))
@@ -552,7 +562,7 @@ static void detect_capabilities(void)
         posix_state.capabilities |= DAWN_CAP_IMAGES;
     }
 
-    if (query_text_sizing()) {
+    if (launcher_env() || query_text_sizing()) {
         posix_state.capabilities |= DAWN_CAP_TEXT_SIZING;
     }
 
