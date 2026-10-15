@@ -484,14 +484,17 @@ static bool query_background_color(DawnColor* out)
     return true;
 }
 
-//! Termux Launcher's terminal, by its environment: TERM_PROGRAM, or the pane variable it sets
-//! inside tmux. Its terminal has kitty text sizing, so no probe is needed there (and a probe on a
-//! slow device can miss its reply window, which would draw every heading and the chrome at 1x).
+//! Termux Launcher's own terminal, by TERM_PROGRAM, outside any multiplexer. It has kitty text
+//! sizing, so no probe is needed there (and a probe on a slow device can miss its reply window,
+//! which would draw every heading and the chrome at 1x).
 static bool launcher_env(void)
 {
+    // Inside tmux the launcher's pane variable is still set, but tmux swallows OSC 66, so the
+    // probe decides there (and fails, correctly).
+    if (in_multiplexer())
+        return false;
     const char* prog = getenv("TERM_PROGRAM");
-    const char* pane = getenv("TERMUX_LAUNCHER_PANE");
-    return (prog && strcmp(prog, "termux-launcher") == 0) || (pane && pane[0]);
+    return prog && strcmp(prog, "termux-launcher") == 0;
 }
 
 static bool query_text_sizing(void)
