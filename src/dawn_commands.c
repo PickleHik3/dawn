@@ -88,7 +88,7 @@ static const Command COMMANDS[] = {
     { "focus mode", CMD_GROUP_VIEW, 6, "^F", CMD_NEEDS_MODIFY, "focus", "◎", 0xF0208 },
     { "plain text", CMD_GROUP_VIEW, 18, "^R", 0, "plain", "¶", 0xF027D },
     { "hide marks at cursor", CMD_GROUP_VIEW, 2, "^B", 0, "marks", "◌", 0xF0209 },
-    { "light or dark", CMD_GROUP_VIEW, DAWN_KEY_CMD_THEME, "", 0, "theme", "◐", 0xF07F5 },
+    { "light or dark", CMD_GROUP_VIEW, DAWN_KEY_CMD_THEME, "", 0, "theme", "◐", 0xF050E },
 
     // find
     { "find", CMD_GROUP_FIND, 19, "^S", 0, "find", "⌕", 0xF0349 },
