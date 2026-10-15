@@ -79,6 +79,7 @@ typedef struct {
     int32_t ribbon_top; //!< First screen row of the open ribbon (when ribbon_rows > 0)
     int32_t ribbon_rows; //!< Screen rows the open ribbon takes from the note now (fewer while it drops); 0 when none shows
     int32_t ribbon_max; //!< Screen rows the ribbon may take at most (ribbon_layout's max_height)
+    bool ribbon_dropping; //!< The open ribbon is still dropping open (ribbon_rows short of its height): the text cursor stays hidden
     int32_t ui_scale; //!< Scale of the tab row, the ribbons and the command menu: from the pane's pixels where the terminal sizes text and the tab row shows (commands_ui_scale), else 1
     int32_t status_top; //!< The status line's row where there is no tab row (the bottom one)
 } Layout;
@@ -301,6 +302,7 @@ static inline Layout calc_layout(void)
         if (ribbon_layout(b, n, l.chrome_room, l.ui_scale, l.ribbon_max, slots, &f)) {
             int32_t rows = ribbon_shown(f.height);
             l.ribbon_rows = rows;
+            l.ribbon_dropping = rows < f.height;
             l.ribbon_top = l.ui_scale + 1;
             l.top_margin += rows;
             l.text_height -= rows;
@@ -4629,7 +4631,7 @@ static void render_writing_plain(void)
     render_ribbon(&L);
     status_area_writing(&L, false);
     move_to(cursor_screen_row, cursor_screen_col);
-    cursor_visible(true);
+    cursor_visible(!L.ribbon_dropping); // no cursor over the band while a ribbon drops open
     status_cursor(cursor_screen_row, cursor_screen_col);
 }
 
@@ -8413,7 +8415,9 @@ static void render_writing(void)
     if (!app.view_detached)
         voice_draw_overlay(cursor_screen_row, rs.cursor_col, L.margin + L.text_width - rs.cursor_col + 1);
     move_to(cursor_screen_row, rs.cursor_col);
-    cursor_visible(true);
+    // While a ribbon drops open the note moves down a few rows a frame; the cursor waits hidden
+    // until it settles, so no frame shows it over the band.
+    cursor_visible(!L.ribbon_dropping);
     status_cursor(cursor_screen_row, rs.cursor_col);
 }
 
