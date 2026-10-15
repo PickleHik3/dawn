@@ -153,9 +153,10 @@ static inline Layout calc_layout(void)
     l.ai_rows = app.rows;
     l.note_rows = app.rows;
 
-    if (app.ai_open && app.cols < AI_PANEL_MIN_COLS) {
-        // A phone-width terminal has no room beside the note: the chat rises from the bottom as a
-        // sheet, full width, and the note keeps the rows above it. Recomputed every frame, so the
+    if (app.ai_open && (app.cols < AI_PANEL_MIN_COLS || app.launcher_term)) {
+        // A phone-width terminal has no room beside the note, and a phone with a small font is
+        // still a phone (the launcher's terminal, whatever its width): the chat rises from the
+        // bottom as a sheet, full width, and the note keeps the rows above it. Recomputed every frame, so the
         // keyboard showing or hiding (which changes app.rows) resizes both.
         l.ai_cols = app.cols;
         l.ai_start_col = 1;
@@ -188,7 +189,14 @@ static inline Layout calc_layout(void)
         l.ai_cols = 1;
     if (l.text_area_cols < 1)
         l.text_area_cols = 1;
-    l.margin = l.text_area_cols > 80 ? (l.text_area_cols - 70) / 2 : 4;
+    // A desktop terminal reads best in a column of about 70 cells, centred. A phone is a page,
+    // not a desk: in Termux Launcher's terminal the note fills the pane (a pinch out, which gives
+    // more columns, then gives more text per line instead of wider margins), with two cells of
+    // margin on either side so a finger can land before the first letter.
+    if (app.launcher_term)
+        l.margin = l.text_area_cols > 12 ? 2 : 0;
+    else
+        l.margin = l.text_area_cols > 80 ? (l.text_area_cols - 70) / 2 : 4;
     l.text_width = l.text_area_cols - l.margin * 2;
     if (l.text_width < 1) {
         l.margin = 0;
