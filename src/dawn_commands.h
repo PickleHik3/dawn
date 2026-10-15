@@ -149,6 +149,12 @@ int32_t ribbon_caption_scale(int32_t scale);
 //! Screen rows a ribbon button takes at scale: its glyph's scale rows and its caption's under them
 int32_t ribbon_button_rows(int32_t scale);
 
+//! Blank screen rows between one row of ribbon buttons and the next on a page (a caption and the
+//! boxes under it): 1 where the chrome is scaled (scale 2 on), 0 at scale 1, where a terminal's
+//! rows are few. A rule above a stacked section is drawn in that row (it takes RIBBON_RULE rows
+//! when the gap is narrower). None above a page's first row or below its last.
+int32_t ribbon_row_gap(int32_t scale);
+
 //! Columns a button's glyph is given at scale 1: 2, the Nerd Font icon's block (the icon and a
 //! space, one OSC 66 block w=2) and the widest text glyph alike, so a button is as wide with the
 //! font as without it; more only for a text glyph wider than that
@@ -177,7 +183,7 @@ int32_t ribbon_more_cols(int32_t scale);
 //! Where a ribbon button goes
 typedef struct {
     int32_t page; //!< The page it is on, 0 first (always 0 when the ribbon fits at once)
-    int32_t row; //!< Screen rows from the ribbon's top
+    int32_t row; //!< Screen rows from the ribbon's top (of its page)
     int32_t col; //!< Screen cells from the ribbon's left edge
     int32_t width; //!< Screen cells it takes
     bool rule_above; //!< A thin rule runs across the ribbon on the screen row above: the button opens
@@ -188,7 +194,7 @@ typedef struct {
 typedef struct {
     int32_t rows; //!< Most rows of buttons a page shows
     int32_t pages; //!< 1 when every button shows at once
-    int32_t height; //!< Screen rows the ribbon takes: its tallest page's rows of buttons and rules
+    int32_t height; //!< Screen rows the ribbon takes: its tallest page's rows of buttons and the gaps and rules between them
     int32_t more_col; //!< Where the paging button goes on the first row (pages > 1)
     int32_t more_width; //!< Its width in screen cells (0 when there is none)
 } RibbonFrame;
@@ -197,12 +203,13 @@ typedef struct {
 //! either goes on after the one before it on the same row (after RIBBON_DIVIDER cells, where a
 //! divider goes; it needs its first button to fit there, and what does not fit wraps to the left
 //! edge of the rows under it) or starts at the left edge of a new row, under a RIBBON_RULE-row rule.
-//! Of those choices the one with the fewest rows wins, then the one splitting the fewest sections
-//! over rows, so a section stays a block unless going on saves a row. A section on rows of its own
-//! spreads its buttons evenly over them (the buttons are one width, so they form a grid). When the rows
-//! and rules are taller than max_height screen rows, the ribbon pages: as many rows as fit on each
-//! page (no rule opens a page), the room of each narrowed by a paging button at the right end of
-//! the first row.
+//! Two rows on a page are ribbon_row_gap(scale) rows apart, the rule drawn in that gap (the larger
+//! of the two counts). Of those choices the one with the fewest rows wins, then the one splitting
+//! the fewest sections over rows, so a section stays a block unless going on saves a row. A section
+//! on rows of its own spreads its buttons evenly over them (the buttons are one width, so they form
+//! a grid). When the rows, gaps and rules are taller than max_height screen rows, the ribbon pages:
+//! as many rows as fit on each page (no gap or rule opens a page), the room of each narrowed by a
+//! paging button at the right end of the first row.
 //! @param slots receives each button's place (n entries)
 //! @return false (frame zeroed) when there are no buttons, one is wider than room, or not even one
 //!         row fits max_height
