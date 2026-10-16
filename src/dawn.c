@@ -194,7 +194,7 @@ static int32_t ui_scale_now(void)
     int32_t w = 0, h = 0;
     if (!DAWN_BACKEND(app)->img_cell_px || !DAWN_BACKEND(app)->img_cell_px(&w, &h))
         w = h = 0;
-    return commands_ui_scale(app.cols, w, h, app.launcher_term);
+    return commands_ui_scale(app.cols, w, h);
 }
 
 //! Calculate layout dimensions based on window size and AI panel state

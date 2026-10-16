@@ -58,13 +58,17 @@ const char* commands_group_name(CommandGroup group);
 //! Biggest scale the tab row and the ribbons are drawn at
 #define UI_SCALE_MAX 4
 
+//! A chrome row (the tab row, a ribbon button's glyph) is about the pane's width over this on
+//! screen: 26 gives about 41 pixels on a 1080-pixel phone, one row of the launcher's normal font
+#define UI_SCALE_DIVISOR 26
+
 //! The scale the tab row, the ribbons and the command menu are drawn at where the terminal sizes
-//! text (kitty's OSC 66), chosen from the pane's pixels so a row of them is about a thirteenth of
-//! the pane's width on screen whatever the font: round(cols x cell_w / 13 / cell_h), between 1 and
-//! UI_SCALE_MAX. A pinch to a small font (more columns, smaller cells) raises it and a large font
-//! lowers it, so the chrome stays the same size. Without the cell size (cell_w or cell_h not above
-//! 0): 2 in Termux Launcher's terminal, 1 elsewhere.
-int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h, bool launcher);
+//! text (kitty's OSC 66), chosen from the pane's pixels so a row of them is about
+//! 1/UI_SCALE_DIVISOR of the pane's width on screen whatever the font:
+//! round(cols x cell_w / UI_SCALE_DIVISOR / cell_h), between 1 and UI_SCALE_MAX. A pinch to a
+//! small font (more columns, smaller cells) raises it and a large font lowers it, so the chrome
+//! stays the same size. Without the cell size (cell_w or cell_h not above 0) it is 1.
+int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h);
 
 // #region Tab row
 

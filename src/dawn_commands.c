@@ -146,13 +146,14 @@ const char* commands_group_name(CommandGroup group)
     return group < CMD_GROUP_COUNT ? GROUP_NAMES[group] : "";
 }
 
-int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h, bool launcher)
+int32_t commands_ui_scale(int32_t cols, int32_t cell_w, int32_t cell_h)
 {
     if (cols <= 0 || cell_w <= 0 || cell_h <= 0)
-        return launcher ? 2 : 1;
-    // round(cols x cell_w / 13 / cell_h) in integers: (2 x px + 13 x cell_h) / (26 x cell_h)
+        return 1;
+    // round(cols x cell_w / D / cell_h) in integers: (2 x px + D x cell_h) / (2 x D x cell_h)
     int64_t px = (int64_t)cols * cell_w;
-    int64_t scale = (2 * px + 13 * (int64_t)cell_h) / (26 * (int64_t)cell_h);
+    int64_t d = UI_SCALE_DIVISOR;
+    int64_t scale = (2 * px + d * cell_h) / (2 * d * cell_h);
     if (scale < 1)
         scale = 1;
     if (scale > UI_SCALE_MAX)

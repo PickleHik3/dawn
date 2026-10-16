@@ -173,8 +173,8 @@ through them via `render_help_neighbour`. Running a command from the menu presse
 chord are the virtual keys `DAWN_KEY_CMD_*` and `DAWN_KEY_AI_*` in `dawn_backend.h`. Size:
 `Layout.ui_scale` scales the tab row, the ribbons and the command menu. Where the terminal has kitty
 text sizing (`DAWN_CAP_TEXT_SIZING`) it comes from the pane's pixels (`ui_scale_now`,
-`commands_ui_scale`: a chrome row is about a thirteenth of the pane's width, clamped to 1..4, 2 in the
-launcher without a pixel size), lowered until the three tabs fit (`tabs_scale`), so the chrome keeps its
+`commands_ui_scale`: a chrome row is about 1/26 of the pane's width (`UI_SCALE_DIVISOR`), clamped to
+1..4, 1 without a pixel size), lowered until the three tabs fit (`tabs_scale`), so the chrome keeps its
 size on screen when a pinch changes the font while the note follows the font; without text sizing
 (tmux, xterm) it is 1. A button's caption is at half the scale (`ribbon_caption_scale`). Under the tab
 row there is no status line: the bottom row is the notice line (`render_notice_line`: a notice or a

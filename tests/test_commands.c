@@ -93,30 +93,29 @@ static void test_entries(void)
 
 static void test_ui_scale(void)
 {
-    // A 1080-pixel-wide phone: the chrome's row is about 1080 / 13 = 83 pixels whatever the font.
-    CHECK(commands_ui_scale(53, 20, 44, true) == 2); // the normal font: 83 / 44 rounds to 2
-    CHECK(commands_ui_scale(120, 9, 19, true) == 4); // pinched small: 83 / 19 rounds to 4
-    CHECK(commands_ui_scale(80, 13, 28, true) == 3); // between: 80 / 28 rounds to 3
-    CHECK(commands_ui_scale(30, 36, 80, true) == 1); // a large font: 83 / 80 rounds to 1
-    CHECK(commands_ui_scale(200, 5, 11, true) == UI_SCALE_MAX); // 7, held at the most
-    CHECK(commands_ui_scale(10, 10, 200, false) == 1); // never below 1
+    // A 1080-pixel-wide phone: the chrome's row is about 1080 / 26 = 41 pixels whatever the font.
+    CHECK(commands_ui_scale(53, 20, 44) == 1); // the normal font: 41 / 44 rounds to 1
+    CHECK(commands_ui_scale(120, 9, 19) == 2); // pinched small: 41 / 19 rounds to 2
+    CHECK(commands_ui_scale(160, 7, 13) == 3); // pinched smaller: 43 / 13 rounds to 3
+    CHECK(commands_ui_scale(30, 36, 80) == 1); // a large font: 41 / 80 is held at 1
+    CHECK(commands_ui_scale(300, 5, 8) == UI_SCALE_MAX); // 7, held at the most
+    CHECK(commands_ui_scale(10, 10, 200) == 1); // never below 1
     // Rounding: exactly half way rounds up, just under rounds down.
-    CHECK(commands_ui_scale(13, 3, 2, false) == 2); // 1.5
-    CHECK(commands_ui_scale(13, 29, 20, false) == 1); // 1.45
-    // No pixel size: 2 in Termux Launcher's terminal, 1 elsewhere.
-    CHECK(commands_ui_scale(53, 0, 0, true) == 2);
-    CHECK(commands_ui_scale(53, 0, 0, false) == 1);
-    CHECK(commands_ui_scale(53, 20, 0, true) == 2);
-    CHECK(commands_ui_scale(0, 20, 44, false) == 1);
+    CHECK(commands_ui_scale(26, 3, 2) == 2); // 1.5
+    CHECK(commands_ui_scale(26, 29, 20) == 1); // 1.45
+    // No pixel size: 1.
+    CHECK(commands_ui_scale(53, 0, 0) == 1);
+    CHECK(commands_ui_scale(53, 20, 0) == 1);
+    CHECK(commands_ui_scale(0, 20, 44) == 1);
     // A 1080-pixel pane at any font: below the cap the chrome's row on screen (scale x cell
-    // height) is within half a cell of a thirteenth of the width.
+    // height) is within half a cell of 1/UI_SCALE_DIVISOR of the width.
     for (int32_t cell_h = 8; cell_h <= 80; cell_h++) {
         int32_t cell_w = cell_h / 2;
         int32_t cols = 1080 / cell_w;
-        int32_t scale = commands_ui_scale(cols, cell_w, cell_h, true);
+        int32_t scale = commands_ui_scale(cols, cell_w, cell_h);
         CHECK(scale >= 1 && scale <= UI_SCALE_MAX);
         int32_t px = scale * cell_h;
-        int32_t want = cols * cell_w / 13;
+        int32_t want = cols * cell_w / UI_SCALE_DIVISOR;
         if (scale < UI_SCALE_MAX)
             CHECK(px - want <= cell_h / 2 + 1 && want - px <= cell_h / 2 + 1);
     }
