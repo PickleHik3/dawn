@@ -3743,15 +3743,12 @@ static void render_ribbon(const Layout* L)
     set_bg(get_bg());
 }
 
-//! The status panel's corner (dawn_status) on the writing screen without a chat sheet: the two
-//! blank rows above the status line on a desktop terminal; under the tab row, the notice line
-//! while it holds no notice (the panel stays at scale 1).
-static void status_area_writing(const Layout* L, bool notice_shown)
+//! The status panel's corner (dawn_status) on a desktop terminal's writing screen without a chat
+//! sheet: the two blank rows above the status line. (Under the tab row it is the notice line while
+//! that holds no notice: render_writing.)
+static void status_area_writing(const Layout* L)
 {
-    if (!L->tabs)
-        status_area(app.rows - 2, app.rows - 1, L->text_area_cols, status_panel_cols(L), false);
-    else if (!notice_shown)
-        status_area(app.rows, app.rows, L->text_area_cols, status_panel_cols(L), false);
+    status_area(app.rows - 2, app.rows - 1, L->text_area_cols, status_panel_cols(L), false);
 }
 
 //! Lines a page up or down moves in the open menu: what render_menu showed last
@@ -4002,15 +3999,17 @@ static void render_status_bar(const Layout* L)
 #undef STATUS_COL
 }
 
-//! The notice line under the tab row (the bottom row, where a desktop terminal has its status
-//! line): the notice showing (dawn_notice), from the note's left edge, fading like the status
-//! line's (an error stays at full strength until a key or a tap) and cut with an ellipsis when it
-//! is longer than the note's width; a one-shot tip the same way, given once drawn. Else the voice
-//! helpers' word ("listening") at the right end; else nothing. Nothing in focus mode.
+//! The notice line under the tab row, on screen row row: the bottom row (where a desktop terminal
+//! has its status line), or the row between the note and a chat sheet. It is always kept for this,
+//! blank when there is nothing to say, so a notice coming or going moves nothing. The notice
+//! showing (dawn_notice), from the note's left edge, fading like the status line's (an error stays
+//! at full strength until a key or a tap) and cut with an ellipsis when it is longer than the
+//! note's width; a one-shot tip the same way, given once drawn. Else the voice helpers' word
+//! ("listening") at the right end; else nothing. Nothing in focus mode.
 //! @return whether a notice or a tip is on the line (the status panel then keeps off it)
-static bool render_notice_line(const Layout* L)
+static bool render_notice_line(const Layout* L, int32_t row)
 {
-    int32_t row = app.rows;
+    reset_attrs();
     set_bg(get_bg());
     move_to(row, 1);
     out_spaces(L->text_area_cols);
@@ -4046,6 +4045,56 @@ static bool render_notice_line(const Layout* L)
         }
     }
     return false;
+}
+
+// #endregion
+
+// #region Screen zones under the tab row
+
+//! The writing screen's parts of a frame (dawn_backend's frame_part_begin/end)
+enum { PART_CHROME, PART_NOTE };
+
+//! The last frame's parts were the only output on their rows (the writing screen, or a popup in
+//! the chrome's band), so a part unchanged since then may be left out of this frame
+static bool parts_clean = false;
+
+//! This frame drew the writing screen's parts (render() resets it)
+static bool parts_drawn = false;
+
+static void part_begin(int32_t part)
+{
+    parts_drawn = true;
+    if (DAWN_BACKEND(app)->frame_part_begin)
+        DAWN_BACKEND(app)->frame_part_begin(part);
+    reset_attrs(); // a part may be left out, so it starts from nothing the output before it left
+}
+
+static void part_end(int32_t part)
+{
+    if (DAWN_BACKEND(app)->frame_part_end)
+        DAWN_BACKEND(app)->frame_part_end(part, parts_clean);
+}
+
+//! The rows of the writing screen's zones under the tab row: the chrome on the top rows (the tab
+//! row, then a ribbon or a popup's band), the note's rows from the blank one under the chrome down
+//! to note_last, and bottom, the one row kept for the notice line: the screen's last, or with a
+//! chat sheet the row between the note and the sheet.
+static void zones_rows(const Layout* L, int32_t* note_first, int32_t* note_last, int32_t* bottom)
+{
+    *note_first = L->top_margin - 1;
+    *bottom = L->ai_sheet ? L->note_rows : app.rows;
+    *note_last = *bottom - 1;
+}
+
+//! The chrome's part: the tab row and the open ribbon (render_tabs, render_ribbon), on rows only
+//! they paint.
+static void render_chrome_part(const Layout* L)
+{
+    part_begin(PART_CHROME);
+    render_tabs(L);
+    render_ribbon(L);
+    part_end(PART_CHROME);
+    reset_attrs();
 }
 
 // #endregion
@@ -4550,15 +4599,24 @@ static int32_t plain_wrap_width = 0;
 
 static void render_writing_plain(void)
 {
+    Layout L = calc_layout();
+    // Under the tab row the same zones as render_writing: the chrome's part first, then the note's
+    // on its own rows, the notice line under it.
+    bool zones = L.tabs && !IS_PRINT_MODE();
+    int32_t note_first = 1, note_last = app.rows, bottom_row = app.rows;
+    if (zones) {
+        zones_rows(&L, &note_first, &note_last, &bottom_row);
+        render_chrome_part(&L);
+        part_begin(PART_NOTE);
+    }
     set_bg(get_bg());
     cursor_home();
 
-    for (int32_t r = 0; r < app.rows; r++) {
-        move_to(r + 1, 1);
+    for (int32_t r = note_first; r <= note_last; r++) {
+        move_to(r, 1);
         clear_line();
     }
 
-    Layout L = calc_layout();
     size_t sel_s, sel_e;
     get_selection(&sel_s, &sel_e);
     size_t len = gap_len(&app.text);
@@ -4658,12 +4716,16 @@ static void render_writing_plain(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, wr->count,
             L.text_height, app.scroll_y);
 
-    // Plain text has no status line or notice line, but the tab row and a ribbon still show (on a
-    // phone the File ribbon is the way back out). The status panel's corner (dawn_status): the
-    // blank rows under the text.
-    render_tabs(&L);
-    render_ribbon(&L);
-    status_area_writing(&L, false);
+    // Plain text has no status line, but the tab row and a ribbon still show (on a phone the File
+    // ribbon is the way back out), and under it the notice line. The status panel's corner
+    // (dawn_status): the blank rows under the text, or the notice line while it is free.
+    if (zones) {
+        part_end(PART_NOTE);
+        if (!render_notice_line(&L, bottom_row))
+            status_area(bottom_row, bottom_row, L.text_area_cols, status_panel_cols(&L), false);
+    } else {
+        status_area_writing(&L);
+    }
     move_to(cursor_screen_row, cursor_screen_col);
     cursor_visible(!L.ribbon_dropping); // no cursor over the band while a ribbon drops open
     status_cursor(cursor_screen_row, cursor_screen_col);
@@ -4803,6 +4865,7 @@ static void render(void)
     sync_begin();
     cursor_visible(false);
     scrollind_frame_begin();
+    parts_drawn = false;
 
     switch (app.mode) {
     case MODE_WELCOME:
@@ -4872,6 +4935,9 @@ static void render(void)
     // over a dialog.
     status_frame(app.mode == MODE_WELCOME || (app.mode == MODE_WRITING && !app.focus_mode));
     scrollind_frame_end();
+    // Only the writing screen leaves its parts' rows to its parts alone; a dialog or another
+    // screen drawn over them means the next frame sends them whole.
+    parts_clean = parts_drawn && app.mode == MODE_WRITING;
     sync_end();
     out_flush();
 }
@@ -8103,8 +8169,33 @@ static void render_writing(void)
         set_bg(get_bg());
     }
 
+    // Under the tab row the screen is three zones (zones_rows): the chrome on top, the note, and
+    // the bottom line (the notice line, or the row between the note and a chat sheet), then the
+    // sheet. The chrome and the note are each one part of the frame (frame_part_begin): each paints
+    // its own rows and nothing else does, so a part that has not changed is not sent again, and a
+    // notice fading in the bottom line repaints that line alone. The chrome is drawn first, and the
+    // note's clearing keeps off its rows.
+    bool zones = !print_mode && L.tabs;
+    int32_t note_first = 1, note_last = app.rows, bottom_row = app.rows;
+    if (zones) {
+        zones_rows(&L, &note_first, &note_last, &bottom_row);
+        render_chrome_part(&L);
+    }
+
     // In print mode: no screen clearing, no image frames, no AI panel
-    if (!print_mode) {
+    if (zones) {
+        part_begin(PART_NOTE);
+        image_frame_start();
+        set_bg(get_bg());
+        for (int32_t r = note_first; r <= note_last; r++) {
+            move_to(r, 1);
+            out_spaces(L.text_area_cols);
+        }
+        if (app.style == STYLE_ELEGANT)
+            set_italic(true);
+        if (app.ai_open && app.ai_focused)
+            set_dim(true);
+    } else if (!print_mode) {
         image_frame_start();
         set_bg(get_bg());
         cursor_home();
@@ -8258,7 +8349,7 @@ static void render_writing(void)
                 }
 
                 int32_t screen_row = VROW_TO_SCREEN(&L, running_vrow, scroll_y);
-                if (screen_row >= L.top_margin && screen_row <= max_row) {
+                if (screen_row >= L.top_margin && screen_row < max_row) {
                     move_to(screen_row, L.margin + 1);
                     // Check if this blank line is in selection - show selection background
                     size_t sel_s, sel_e;
@@ -8333,7 +8424,7 @@ static void render_writing(void)
         for (size_t p = trailing_start; p < len; p++) {
             if (gap_at(&app.text, p) == '\n') {
                 int32_t screen_row = VROW_TO_SCREEN(&L, running_vrow, scroll_y);
-                if (screen_row >= L.top_margin && screen_row <= max_row) {
+                if (screen_row >= L.top_margin && screen_row < max_row) {
                     move_to(screen_row, L.margin + 1);
                     // Check if this blank line is in selection - show selection background
                     bool in_sel = selecting && p >= sel_s && p < sel_e;
@@ -8408,25 +8499,51 @@ static void render_writing(void)
         scrollind_show(SCROLLIND_NOTE, L.text_area_cols, L.top_margin, L.text_height, bc->total_vrows,
             L.text_height, app.scroll_y);
 
-    // Under a sheet the note has no status line: the chat's input line is the bottom edge. Under
-    // the tab row the bottom row is the notice line instead.
-    bool notice_shown = false;
-    if (!L.ai_sheet) {
-        if (L.tabs)
-            notice_shown = render_notice_line(&L);
-        else
-            render_status_bar(&L);
+    if (zones) {
+        int32_t cursor_row = VROW_TO_SCREEN(&L, rs.cursor_virtual_row, app.scroll_y);
+        if (cursor_row < L.top_margin)
+            cursor_row = L.top_margin;
+        if (cursor_row > max_row - 1)
+            cursor_row = max_row - 1;
+        int32_t cursor_col = rs.cursor_col < L.margin + 1 ? L.margin + 1 : rs.cursor_col;
+        // The listening shimmer is drawn on the note's rows, so it is part of the note.
+        bool shimmer = !app.view_detached && !(app.ai_open && app.ai_focused);
+        if (shimmer)
+            voice_draw_overlay(cursor_row, cursor_col, L.margin + L.text_width - cursor_col + 1);
+        part_end(PART_NOTE);
+        reset_attrs();
+        // The bottom line: a notice or a tip, else the status panel's corner (dawn_status)
+        if (!render_notice_line(&L, bottom_row))
+            status_area(bottom_row, bottom_row, L.text_area_cols, status_panel_cols(&L), false);
+        if (app.ai_open) {
+            render_ai_panel(&L);
+            if (app.ai_focused) {
+                image_frame_end();
+                out_flush();
+                return;
+            }
+            reset_attrs();
+        }
+        image_frame_end();
+        move_to(cursor_row, cursor_col);
+        // While a ribbon drops open the note moves down a few rows a frame; the cursor waits
+        // hidden until it settles, so no frame shows it over the band.
+        cursor_visible(!L.ribbon_dropping);
+        status_cursor(cursor_row, cursor_col);
+        return;
     }
-    render_tabs(&L);
-    render_ribbon(&L);
+
+    // Under a sheet (in preview, where there is no tab row) the note has no status line: the
+    // chat's input line is the bottom edge.
+    if (!L.ai_sheet)
+        render_status_bar(&L);
 
     // The status panel's corner (dawn_status): the two blank rows between the text and the status
-    // line, the notice line under the tab row while it is free, or the one row between the text
-    // and a chat sheet.
+    // line, or the one row between the text and a chat sheet.
     if (L.ai_sheet)
         status_area(L.note_rows, L.note_rows, L.text_area_cols, status_panel_cols(&L), false);
     else
-        status_area_writing(&L, notice_shown);
+        status_area_writing(&L);
 
     if (app.ai_open) {
         render_ai_panel(&L);
