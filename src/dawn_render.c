@@ -383,7 +383,7 @@ void render_tour(void)
         DAWN_BACKEND(app)->write_str(c->lines[i], len < (size_t)room ? len : (size_t)room);
     }
 
-    // Dots, the card shown filled: "• ○ ○"
+    // Dots, the card shown hollow and the others filled: "○ • •"
     row += TOUR_LINES + gap;
     int32_t dots_col = (app.cols - (cards * 2 - 1) + 2) / 2;
     move_to(row, dots_col < 1 ? 1 : dots_col);
@@ -391,7 +391,7 @@ void render_tour(void)
         if (i > 0)
             platform_write_char(' ');
         set_fg(i == card ? get_accent() : get_dim());
-        platform_write_str(i == card ? "•" : "○");
+        platform_write_str(i == card ? "○" : "•");
     }
 
     // The footer's hints are taps on their keys. Opened again from a command, esc closes it and
