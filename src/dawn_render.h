@@ -101,11 +101,24 @@ typedef struct {
 
 //! Render the open menu (MODE_MENU) over the note, its lines' shortcuts right-aligned, the
 //! selection highlighted and kept in view (m's scroll and page are updated), commands that cannot
-//! run now drawn dim. The menu (Ctrl+]) is every command under its group's heading, centred: in a
+//! run now drawn dim. The menu (Ctrl+]) is every command under its group's heading, centred (or at
+//! the top of the band under the tab row, render_popup_band): in a
 //! bordered box at scale 1, or on the popup's surface under a title at p->scale when it is above 1
 //! and the menu fits the width. Each command that can run is a tap on its row; the rest of the menu swallows taps, and
 //! a tap anywhere else closes it.
 void render_menu(MenuState* m, const MenuPlace* p);
+
+//! Put the popups drawn next (the menu, search, the table of contents, the conflict dialog, the
+//! frontmatter and image editors) in the band of rows rows from screen row top, under the tab
+//! row, as wide as the screen on the ribbon's surface, instead of centred over the screen; rows 0
+//! goes back to centred. The note is laid out under the band, so a popup never covers it.
+void render_popup_band(int32_t top, int32_t rows);
+
+//! Rows mode's popup takes in a band under the tab row when room rows are free there (m is the
+//! menu's state, scale the chrome's): the menu as tall as its lines, search and the table of
+//! contents all of room, the conflict dialog and the editors their own height. 0 when the popup
+//! does not fit room (it is then centred over the screen) or mode has no popup.
+int32_t render_popup_rows(AppMode mode, const MenuState* m, int32_t scale, int32_t room);
 
 // #endregion
 

@@ -80,6 +80,8 @@ typedef struct {
     int32_t ribbon_rows; //!< Screen rows the open ribbon takes from the note now (fewer while it drops); 0 when none shows
     int32_t ribbon_max; //!< Screen rows the ribbon may take at most (ribbon_layout's max_height)
     bool ribbon_dropping; //!< The open ribbon is still dropping open (ribbon_rows short of its height): the text cursor stays hidden
+    int32_t popup_top; //!< First screen row of the band a popup takes under the tab row (when popup_rows > 0)
+    int32_t popup_rows; //!< Screen rows that band takes from the note (render_popup_rows); 0 when the popup, if any, is centred
     int32_t ui_scale; //!< Scale of the tab row, the ribbons and the command menu: from the pane's pixels where the terminal sizes text and the tab row shows (commands_ui_scale), else 1
     int32_t status_top; //!< The status line's row where there is no tab row (the bottom one)
 } Layout;
@@ -138,6 +140,29 @@ typedef struct {
 // #endregion
 
 // #region Pure Helper Functions
+
+//! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
+static MenuState menu;
+
+//! Whether the mode up is a popup over the writing screen, which goes in a band under the tab row
+//! where there is one (calc_layout): the menu, search, the table of contents, the conflict dialog,
+//! and the frontmatter and image editors opened from a note. Help, history and the tour are
+//! screens of their own.
+static bool popup_over_note(void)
+{
+    switch (app.mode) {
+    case MODE_MENU:
+    case MODE_SEARCH:
+    case MODE_TOC:
+    case MODE_CONFLICT:
+    case MODE_BLOCK_EDIT:
+        return true;
+    case MODE_FM_EDIT:
+        return app.prev_mode == MODE_WRITING;
+    default:
+        return false;
+    }
+}
 
 //! The tab row's open ribbon (dawn_commands): which tab, how far it has dropped, which page shows
 static struct {
@@ -289,12 +314,28 @@ static inline Layout calc_layout(void)
         l.text_height = app.rows - l.top_margin - 2;
     if (l.text_height < 1)
         l.text_height = 1;
+    // A popup over the note (popup_over_note) takes a band under the tab row in the ribbon's place,
+    // as tall as it needs (render_popup_rows) and never leaving the note fewer than
+    // RIBBON_MIN_NOTE_ROWS: the note shrinks under it and is never covered. Where it does not fit
+    // it is centred over the screen as on a desktop.
+    int32_t popup = 0;
+    if (l.tabs && !l.ai_overlay && popup_over_note()) {
+        int32_t room = l.text_height - RIBBON_MIN_NOTE_ROWS;
+        popup = room > 0 ? render_popup_rows(app.mode, &menu, l.ui_scale, room) : 0;
+    }
+    if (popup > 0) {
+        l.popup_top = l.ui_scale + 1;
+        l.popup_rows = popup;
+        l.top_margin += popup;
+        l.text_height -= popup;
+    }
     // The open tab's ribbon hangs under the tab row, its rows of buttons ui_scale + a caption's rows
     // each and a blank row apart when scaled (ribbon_row_gap), with the one blank row kept between
     // it and the text, so the note never draws under a
     // button. It pages rather than leave the note fewer than RIBBON_MIN_NOTE_ROWS, and while it
-    // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open.
-    if (l.tabs && ribbon_ui.tab >= 0 && !app.ai_open) {
+    // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open, and it
+    // gives way to a popup's band (and comes back when the popup closes).
+    else if (l.tabs && ribbon_ui.tab >= 0 && !app.ai_open) {
         RibbonButton b[RIBBON_MAX];
         RibbonSlot slots[RIBBON_MAX];
         RibbonFrame f;
@@ -3243,9 +3284,6 @@ skip_chat:
 
 // #region Commands: the tab row, its ribbons and the command menu
 
-//! The command menu's lines and highlight while MODE_MENU is up (dawn_commands)
-static MenuState menu;
-
 //! The key of a command picked in the menu, pressed at the top of the next handle_input() as if
 //! it had been typed, so running it from the menu is the same as pressing its shortcut.
 static int32_t pending_key = DAWN_KEY_NONE;
@@ -3369,7 +3407,7 @@ static void render_tabs(const Layout* L)
             break; // narrower than even scale 1 holds: the tabs that fit
         int32_t col = L->chrome_left + slots[i].col;
         const char* name = tabs_name(items[i]);
-        bool open = (int32_t)items[i] == ribbon_ui.tab && !app.ai_open;
+        bool open = (int32_t)items[i] == ribbon_ui.tab && !app.ai_open && L->popup_rows == 0;
         set_bg(open ? ribbon_band_bg() : tab_band_bg());
         if (open) {
             for (int32_t r = 1; r <= scale; r++) {
@@ -4867,6 +4905,17 @@ static void render(void)
     scrollind_frame_begin();
     parts_drawn = false;
 
+    // A popup over the note is drawn in its band under the tab row where calc_layout gave it one
+    // (the note laid out under the band), else centred over the screen.
+    bool in_band = false;
+    if (popup_over_note()) {
+        Layout band = calc_layout();
+        if (band.popup_rows > 0) {
+            render_popup_band(band.popup_top, band.popup_rows);
+            in_band = true;
+        }
+    }
+
     switch (app.mode) {
     case MODE_WELCOME:
         render_welcome();
@@ -4935,9 +4984,10 @@ static void render(void)
     // over a dialog.
     status_frame(app.mode == MODE_WELCOME || (app.mode == MODE_WRITING && !app.focus_mode));
     scrollind_frame_end();
-    // Only the writing screen leaves its parts' rows to its parts alone; a dialog or another
-    // screen drawn over them means the next frame sends them whole.
-    parts_clean = parts_drawn && app.mode == MODE_WRITING;
+    // Only the writing screen, or a popup in its band, leaves the parts' rows to the parts alone; a
+    // dialog or another screen drawn over them means the next frame sends them whole.
+    render_popup_band(0, 0);
+    parts_clean = parts_drawn && (app.mode == MODE_WRITING || in_band);
     sync_end();
     out_flush();
 }

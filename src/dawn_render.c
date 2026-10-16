@@ -56,6 +56,35 @@ static void platform_reset_attrs(void)
 
 // #region Utility Functions
 
+//! The band under the tab row a writing screen's popup goes in (render_popup_band): rows 0 when
+//! there is none and popups are centred over the screen
+static struct {
+    int32_t top, rows;
+} popup_band;
+
+void render_popup_band(int32_t top, int32_t rows)
+{
+    popup_band.top = top;
+    popup_band.rows = rows > 0 ? rows : 0;
+}
+
+//! Rows a popup may be tall: the band's when it has one, else the screen's less margin
+static int32_t popup_room(int32_t margin)
+{
+    return popup_band.rows > 0 ? popup_band.rows : app.rows - margin;
+}
+
+//! The band across the screen on the popup's surface, as a ribbon is: the popup is drawn on it
+static void popup_band_fill(void)
+{
+    set_bg(get_modal_bg());
+    for (int32_t r = 0; r < popup_band.rows; r++) {
+        move_to(popup_band.top + r, 1);
+        for (int32_t c = 0; c < app.cols; c++)
+            platform_write_char(' ');
+    }
+}
+
 void render_clear(void)
 {
     set_bg(get_bg());
@@ -97,6 +126,17 @@ void render_popup_box(int32_t width, int32_t height, int32_t* out_top, int32_t* 
         top = 1;
     if (left < 1)
         left = 1;
+
+    // In the band under the tab row: the band is the box, on the ribbon's surface across the
+    // screen, with no border; the note is below it, so nothing is masked.
+    if (popup_band.rows > 0) {
+        popup_band_fill();
+        if (out_top)
+            *out_top = popup_band.top;
+        if (out_left)
+            *out_left = left;
+        return;
+    }
 
     DawnColor bg = get_modal_bg();
     image_mask_region(left, top, width, height, bg);
@@ -1283,7 +1323,9 @@ void render_finished(void)
 #endif
 }
 
-void render_fm_edit(void)
+//! The frontmatter editor's box for room rows: its width (70, less on a narrow screen) and its
+//! height, the fields' rows (the current string field wrapped) and six, at most room.
+static int32_t fm_edit_box(int32_t room, int32_t* width)
 {
     int32_t box_width = 70;
     if (box_width > app.cols - 4)
@@ -1315,8 +1357,17 @@ void render_fm_edit(void)
         field_rows = 1;
 
     int32_t box_height = 6 + field_rows;
-    if (box_height > app.rows - 4)
-        box_height = app.rows - 4;
+    if (box_height > room)
+        box_height = room;
+    *width = box_width;
+    return box_height;
+}
+
+void render_fm_edit(void)
+{
+    int32_t box_width = 0;
+    int32_t box_height = fm_edit_box(popup_room(4), &box_width);
+    int32_t content_width = box_width - 4;
 
     int32_t top, left;
     render_popup_box(box_width, box_height, &top, &left);
@@ -1558,7 +1609,7 @@ void render_toc(void)
 
     // Calculate dimensions
     int32_t width = app.cols > 80 ? 70 : app.cols - 6;
-    int32_t max_height = app.rows - 6;
+    int32_t max_height = popup_room(6);
     int32_t list_height = max_height - 7; // Space for header, filter, footer
     if (list_height < 3)
         list_height = 3;
@@ -1726,7 +1777,8 @@ static void render_menu_surface(MenuState* m, int32_t s, int32_t top, int32_t le
     int32_t height = ((title ? 1 : 0) + (scrolls ? 2 : 0) + shown) * s;
 
     DawnColor modal = get_modal_bg();
-    image_mask_region(left, top, width, height, modal);
+    if (popup_band.rows == 0)
+        image_mask_region(left, top, width, height, modal); // over the note's images
     set_bg(modal);
     for (int32_t r = 0; r < height; r++) {
         move_to(top + r, left);
@@ -1803,25 +1855,43 @@ static void render_menu_surface(MenuState* m, int32_t s, int32_t top, int32_t le
     platform_set_cursor_visible(false);
 }
 
+//! The menu's scale and height in room rows (popup_room): the chrome's scale where its widest line
+//! fits the screen less a column each side, a row clear above and below when centred (none in the
+//! band), as tall as its lines in whole lines of that scale, the list scrolling inside; at scale 1
+//! a bordered box of its lines, the title and the hints.
+//! @param cols receives the text's scaled columns (scale above 1)
+static int32_t menu_box(const MenuState* m, int32_t scale, int32_t room, bool band, int32_t* out_scale, int32_t* cols)
+{
+    int32_t need = menu_list_cols(m);
+    int32_t title_cols = (int32_t)(strlen(MENU_TITLE) + strlen(MENU_TITLE_KEY));
+    *cols = need > title_cols ? need : title_cols;
+    int32_t s = scale > 1 ? scale : 1;
+    while (s > 1 && *cols * s + 2 > app.cols - 2)
+        s--;
+    *out_scale = s;
+    if (s > 1) {
+        int32_t avail = band ? room : room - 2;
+        avail -= avail % s;
+        int32_t want = (m->count + 1) * s;
+        return want < avail ? want : avail;
+    }
+    int32_t height = m->count + 4;
+    return height < room ? height : room;
+}
+
 void render_menu(MenuState* m, const MenuPlace* p)
 {
     int32_t scale = p && p->scale > 1 ? p->scale : 1;
-    int32_t need = menu_list_cols(m);
-
-    // The full menu at the chrome's scale where its widest line fits the screen less a column each
-    // side, centred, a row clear above and below; the list scrolls inside.
-    int32_t title_cols = (int32_t)(strlen(MENU_TITLE) + strlen(MENU_TITLE_KEY));
-    int32_t cols = need > title_cols ? need : title_cols;
-    int32_t s = scale;
-    while (s > 1 && cols * s + 2 > app.cols - 2)
-        s--;
+    int32_t cols = 0;
+    int32_t s = 1;
+    bool band = popup_band.rows > 0;
+    int32_t height = menu_box(m, scale, popup_room(0), band, &s, &cols);
     if (s > 1) {
         int32_t width = cols * s + 2;
-        int32_t room = (app.rows - 2) - (app.rows - 2) % s;
-        int32_t want = (m->count + 1) * s;
-        int32_t height = want < room ? want : room;
-        int32_t top = (app.rows - height) / 2 + 1;
+        int32_t top = band ? popup_band.top : (app.rows - height) / 2 + 1;
         int32_t left = (app.cols - width) / 2 + 1;
+        if (band)
+            popup_band_fill();
         render_menu_surface(m, s, top, left, cols, height, true);
         return;
     }
@@ -1833,9 +1903,6 @@ void render_menu(MenuState* m, const MenuPlace* p)
     int32_t width = app.cols - 2 < 44 ? app.cols - 2 : 44;
     if (width < 24)
         width = app.cols < 24 ? app.cols : 24;
-    int32_t height = m->count + 4;
-    if (height > app.rows)
-        height = app.rows;
     int32_t visible = height - 4;
     if (visible < 1)
         visible = 1;
@@ -2022,7 +2089,7 @@ void render_search(void)
 
     // Calculate dimensions
     int32_t width = app.cols > 90 ? 80 : app.cols - 6;
-    int32_t max_height = app.rows - 6;
+    int32_t max_height = popup_room(6);
     int32_t list_height = max_height - 8;
     if (list_height < 3)
         list_height = 3;
@@ -2248,6 +2315,50 @@ static int32_t conflict_wrap(const char* text, int32_t width, size_t* starts, si
     return n;
 }
 
+//! The conflict dialog's text and size
+typedef struct {
+    int32_t width, text_w; //!< The box's columns and its text's
+    int32_t gap; //!< Blank rows between two choices
+    int32_t body_n; //!< Lines of the body shown
+    char body[3 * PATH_MAX];
+    size_t starts[16], lens[16]; //!< The body's lines
+} ConflictBox;
+
+//! Lay the conflict dialog out in room rows. Rows: border, blank, title, blank, body, blank, the
+//! choices with a blank between (easier to tap), blank, border. Short screens lose the blanks
+//! between choices, then body lines.
+//! @return its height
+static int32_t conflict_box(int32_t room, ConflictBox* b)
+{
+    int32_t width = app.cols - 4 < 60 ? app.cols - 4 : 60;
+    if (width < 24)
+        width = app.cols < 24 ? app.cols : 24;
+    b->width = width;
+    b->text_w = width - 6;
+
+    const char* name = app.session_path ? notepath_base(app.session_path, NULL) : "this note";
+    if (app.conflict_path)
+        snprintf(b->body, sizeof(b->body), "%s was changed outside dawn while you had unsaved edits here. Your text is safe in %s. Saving is paused until you choose.",
+            name, notepath_base(app.conflict_path, NULL));
+    else
+        snprintf(b->body, sizeof(b->body), "%s was changed outside dawn while you had unsaved edits here. A copy of your text could not be written, so keep the note open. Saving is paused until you choose.",
+            name);
+
+    int32_t body_n = conflict_wrap(b->body, b->text_w > 8 ? b->text_w : 8, b->starts, b->lens,
+        (int32_t)(sizeof(b->starts) / sizeof(b->starts[0])));
+    int32_t gap = 1;
+    int32_t fixed = 7 + CONFLICT_CHOICES + (CONFLICT_CHOICES - 1) * gap;
+    if (fixed + body_n > room) {
+        gap = 0;
+        fixed = 7 + CONFLICT_CHOICES;
+    }
+    if (fixed + body_n > room)
+        body_n = room - fixed > 1 ? room - fixed : 1;
+    b->gap = gap;
+    b->body_n = body_n;
+    return fixed + body_n;
+}
+
 void render_conflict(void)
 {
     static const char* const labels[CONFLICT_CHOICES] = {
@@ -2261,34 +2372,15 @@ void render_conflict(void)
         [CONFLICT_KEEP] = "saving stays paused",
     };
 
-    int32_t width = app.cols - 4 < 60 ? app.cols - 4 : 60;
-    if (width < 24)
-        width = app.cols < 24 ? app.cols : 24;
-    int32_t text_w = width - 6;
-
-    char body[3 * PATH_MAX];
-    const char* name = app.session_path ? notepath_base(app.session_path, NULL) : "this note";
-    if (app.conflict_path)
-        snprintf(body, sizeof(body), "%s was changed outside dawn while you had unsaved edits here. Your text is safe in %s. Saving is paused until you choose.",
-            name, notepath_base(app.conflict_path, NULL));
-    else
-        snprintf(body, sizeof(body), "%s was changed outside dawn while you had unsaved edits here. A copy of your text could not be written, so keep the note open. Saving is paused until you choose.",
-            name);
-
-    // Rows: border, blank, title, blank, body, blank, the choices with a blank between (easier to
-    // tap), blank, border. Short screens lose the blanks between choices, then body lines.
-    enum { BODY_MAX = 16 };
-    size_t starts[BODY_MAX], lens[BODY_MAX];
-    int32_t body_n = conflict_wrap(body, text_w > 8 ? text_w : 8, starts, lens, BODY_MAX);
-    int32_t gap = 1;
-    int32_t fixed = 7 + CONFLICT_CHOICES + (CONFLICT_CHOICES - 1) * gap;
-    if (fixed + body_n > app.rows) {
-        gap = 0;
-        fixed = 7 + CONFLICT_CHOICES;
-    }
-    if (fixed + body_n > app.rows)
-        body_n = app.rows - fixed > 1 ? app.rows - fixed : 1;
-    int32_t height = fixed + body_n;
+    ConflictBox box;
+    int32_t height = conflict_box(popup_room(0), &box);
+    int32_t width = box.width;
+    int32_t text_w = box.text_w;
+    int32_t gap = box.gap;
+    int32_t body_n = box.body_n;
+    const char* body = box.body;
+    const size_t* starts = box.starts;
+    const size_t* lens = box.lens;
 
     int32_t top, left;
     render_popup_box(width, height, &top, &left);
@@ -2330,6 +2422,49 @@ void render_conflict(void)
             platform_write_str(hints[c]);
         }
         row += 1 + gap;
+    }
+}
+
+// #endregion
+
+// #region Popups under the tab row
+
+//! The fewest rows the table of contents and search need: their header, three rows of list and
+//! the footer
+#define POPUP_TOC_MIN 10
+#define POPUP_SEARCH_MIN 11
+//! The image editor's box, which does not shrink
+#define POPUP_IMAGE_ROWS 13
+
+int32_t render_popup_rows(AppMode mode, const MenuState* m, int32_t scale, int32_t room)
+{
+    switch (mode) {
+    case MODE_MENU: {
+        if (!m)
+            return 0;
+        int32_t s = 1, cols = 0;
+        int32_t h = menu_box(m, scale, room, true, &s, &cols);
+        bool scrolls = s > 1 ? (m->count + 1) * s > h : m->count + 4 > h;
+        int32_t least = s > 1 ? (MENU_MIN_LINES + 3) * s : MENU_MIN_LINES + 4;
+        return scrolls && h < least ? 0 : h;
+    }
+    case MODE_TOC:
+        return room >= POPUP_TOC_MIN ? room : 0;
+    case MODE_SEARCH:
+        return room >= POPUP_SEARCH_MIN ? room : 0;
+    case MODE_CONFLICT: {
+        ConflictBox b;
+        int32_t h = conflict_box(room, &b);
+        return h <= room ? h : 0;
+    }
+    case MODE_FM_EDIT: {
+        int32_t w = 0;
+        return room >= 7 ? fm_edit_box(room, &w) : 0;
+    }
+    case MODE_BLOCK_EDIT:
+        return room >= POPUP_IMAGE_ROWS ? POPUP_IMAGE_ROWS : 0;
+    default:
+        return 0;
     }
 }
 
