@@ -142,6 +142,9 @@ typedef struct {
 #define DAWN_MOUSE_SCROLL_UP 0x02
 #define DAWN_MOUSE_SCROLL_DOWN 0x04
 
+//! Parts a frame may mark for frame_part_begin/frame_part_end
+#define DAWN_FRAME_PARTS 4
+
 typedef struct {
     int16_t year; //!< Year (e.g., 2024)
     uint8_t mon, mday; //!< Month (0-11), day (1-31)
@@ -209,6 +212,15 @@ typedef struct DawnBackend {
     void (*flush)(void);
     void (*sync_begin)(void);
     void (*sync_end)(void);
+    //! Open part (0..DAWN_FRAME_PARTS-1) of the frame between sync_begin and the flush: a run of
+    //! output that paints screen cells nothing else in the frame touches (optional: NULL where
+    //! frames are not gathered, and then frame_part_end is NULL too)
+    void (*frame_part_begin)(int32_t part);
+    //! Close the open part. With reuse (the caller knows nothing else has drawn on its cells since
+    //! this part was last sent), a part byte-identical to the last one sent is left out of the
+    //! frame: the terminal shows it already, so an unchanged tab row or note is not repainted when
+    //! only a notice under it changes. A resize or a cleared screen forgets every part.
+    void (*frame_part_end)(int32_t part, bool reuse);
     void (*set_title)(const char* title);
     void (*link_begin)(const char* url);
     void (*link_end)(void);

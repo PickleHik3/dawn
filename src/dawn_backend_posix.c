@@ -98,6 +98,27 @@ static size_t last_frame_len = 0;
 static bool frame_capturing = false;
 static bool frame_forced = true;
 
+// Parts of a frame (frame_part_begin/end): the engine marks runs of output that paint cells
+// nothing else in the frame touches, the tab row or the note. A part byte-identical to the one
+// last sent is cut from the frame, so while a notice fades (a new frame every few milliseconds) the
+// terminal is sent the notice line alone, not a screen that is blanked and painted again: on a
+// terminal that shows a frame before it is all in, that blank flickered the tab row, which used
+// to be erased first and drawn last. Forgotten on a resize, a cleared screen and a failed buffer.
+static struct {
+    char* bytes;
+    size_t len;
+    bool valid;
+} frame_parts[DAWN_FRAME_PARTS];
+static int32_t part_open = -1; //!< The part being gathered, -1 for none
+static size_t part_start = 0; //!< Where it starts in frame_buf
+
+static void frame_parts_forget(void)
+{
+    for (int32_t i = 0; i < DAWN_FRAME_PARTS; i++)
+        frame_parts[i].valid = false;
+    part_open = -1;
+}
+
 static void frame_append(const char* s, size_t len)
 {
     if (frame_len + len > frame_cap) {
@@ -111,6 +132,7 @@ static void frame_append(const char* s, size_t len)
             fwrite(s, 1, len, stdout);
             frame_len = 0;
             frame_forced = true;
+            frame_parts_forget();
             return;
         }
         frame_buf = grown;
@@ -192,6 +214,44 @@ static inline void buf_append_char(char c)
         buf_flush();
     }
     output_buf[output_buf_pos++] = c;
+}
+
+static void posix_frame_part_begin(int32_t part)
+{
+    part_open = -1;
+    if (!frame_capturing || part < 0 || part >= DAWN_FRAME_PARTS)
+        return;
+    buf_flush();
+    part_open = part;
+    part_start = frame_len;
+}
+
+static void posix_frame_part_end(int32_t part, bool reuse)
+{
+    if (part != part_open || !frame_capturing) {
+        part_open = -1;
+        return;
+    }
+    part_open = -1;
+    buf_flush();
+    if (part_start > frame_len)
+        return; // the buffer failed and was written through: nothing to compare or cut
+    const char* bytes = frame_buf + part_start;
+    size_t len = frame_len - part_start;
+    if (reuse && frame_parts[part].valid && frame_parts[part].len == len
+        && (len == 0 || memcmp(frame_parts[part].bytes, bytes, len) == 0)) {
+        frame_len = part_start; // on screen already
+        return;
+    }
+    char* keep = realloc(frame_parts[part].bytes, len > 0 ? len : 1);
+    if (!keep) {
+        frame_parts[part].valid = false;
+        return;
+    }
+    memcpy(keep, bytes, len);
+    frame_parts[part].bytes = keep;
+    frame_parts[part].len = len;
+    frame_parts[part].valid = true;
 }
 
 // Buffered printf-style output (slow path, avoid in hot loops)
@@ -906,6 +966,7 @@ static void posix_clear_screen(void)
     if (posix_state.mode == DAWN_MODE_PRINT)
         return;
     buf_append_str(CLEAR_SCREEN CURSOR_HOME);
+    frame_parts_forget();
 }
 
 static void posix_clear_line(void)
@@ -1746,6 +1807,7 @@ static bool posix_check_resize(void)
     if (posix_state.resize_needed) {
         posix_state.resize_needed = 0;
         frame_forced = true;
+        frame_parts_forget();
         return true;
     }
     return false;
@@ -2496,6 +2558,7 @@ static void posix_image_clear_all(void)
     buf_append_str("\x1b_Ga=d,d=A,q=2\x1b\\");
     buf_flush();
     fflush(stdout);
+    frame_parts_forget(); // a part kept on screen may have placed an image this took away
     for (int32_t i = 0; i < transmitted_count; i++) {
         free(transmitted_images[i].path);
     }
@@ -3064,6 +3127,8 @@ const DawnBackend dawn_backend_posix = {
     .flush = posix_flush,
     .sync_begin = posix_sync_begin,
     .sync_end = posix_sync_end,
+    .frame_part_begin = posix_frame_part_begin,
+    .frame_part_end = posix_frame_part_end,
     .set_title = posix_set_title,
     .link_begin = posix_link_begin,
     .link_end = posix_link_end,

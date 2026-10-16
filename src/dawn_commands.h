@@ -128,10 +128,10 @@ int32_t tabs_status(int32_t words, const char* timer, const char* alert, int32_t
 //! Most buttons one ribbon holds
 #define RIBBON_MAX 32
 
-//! Screen cells between two buttons of one section
+//! Screen cells between two buttons of one section, at least (a spread row may widen it)
 #define RIBBON_GAP 1
 
-//! Screen cells between two sections: a gap, the divider's column, a gap
+//! Screen cells between two sections, at least: a gap, the divider's column, a gap
 #define RIBBON_DIVIDER 3
 
 //! Screen rows of the thin rule between a section and the one stacked under it
@@ -214,7 +214,12 @@ typedef struct {
 //! a grid). When the rows, gaps and rules are taller than max_height screen rows, the ribbon pages:
 //! as many rows as fit on each page (no gap or rule opens a page), the room of each narrowed by a
 //! paging button at the right end of the first row.
-//! @param slots receives each button's place (n entries)
+//! Then every row is spread to the full room (less the paging button): its buttons are widened
+//! evenly by whole cells, all of a row one width, and the cells left over widen its gaps (else its
+//! dividers, else its one button), so no strip is left empty at the right. Rows that hold one
+//! section only and follow each other are one grid, set as the fullest of them: a shorter last row
+//! keeps the columns above it.
+//! @param slots receives each button's place (n entries); a slot's width is its button's or more
 //! @return false (frame zeroed) when there are no buttons, one is wider than room, or not even one
 //!         row fits max_height
 bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,

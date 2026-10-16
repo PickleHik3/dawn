@@ -148,7 +148,9 @@ width (its widest; captions at most 7 columns, every glyph budgeted 2) so they f
 `ribbon_layout` (`ribbon_pack`) lets a section go on after the one before it on the same row, behind
 a divider, wrapping what does not fit to the left edge, or start a row of its own under a thin rule,
 its buttons spread evenly; it takes the way with the fewest rows, then the fewest split sections
-(File at six a row: 3 | 3, then 2 | 4); above scale 1 two rows of buttons are a blank row apart
+(File at six a row: 3 | 3, then 2 | 4); then each row is spread to the ribbon's right edge
+(`ribbon_spread`: its buttons widened evenly, the cells left over to its gaps), rows of one section
+in a run kept one grid as the fullest of them; above scale 1 two rows of buttons are a blank row apart
 (`ribbon_row_gap`, counted in the layout; a stacked section's rule is drawn in it); a ribbon pages
 with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer than
 `RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
@@ -183,6 +185,20 @@ one-shot tip while one is up, else the status panel's corner); a desktop termina
 in screen cells, come from the pure functions in `dawn_commands.c` (tested in `test-commands`), and tap
 regions are as tall as what they cover. The AI panel is not a mode: it is `app.ai_open`/`ai_focused`, drawn as a side
 panel or, at phone width, a bottom sheet.
+
+Zone rule under the tab row: nothing is ever drawn over the note. The writing screen is the chrome
+(the tab row, then the open ribbon or a popup's band), the note, and one bottom row always kept for
+the notice line (notices, tips, the status panel's corner; with a chat sheet it is the row between
+the note and the sheet), so a notice coming or going moves nothing. A popup over the note
+(`popup_over_note`: the menu, search, contents, the conflict dialog, the frontmatter and image
+editors) takes a band under the tab row in the ribbon's place (`Layout.popup_rows` from
+`render_popup_rows`, drawn through `render_popup_band`), and the note re-wraps under it; only where
+it does not fit is it centred as on a desktop. The chat sheet takes its rows from the note. The
+chrome and the note are each a frame part (`frame_part_begin`/`end` in the backend, `PART_CHROME`,
+`PART_NOTE` in `dawn.c`): each paints only its own rows, the chrome first, and a part unchanged since
+it was last sent is left out of the frame, so a fading notice repaints only its line. Anything new
+drawn on the writing screen goes in one of the zones; drawing over another zone's rows from outside
+its part leaves stale cells when that part is skipped.
 
 First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards
 in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` in `dawn.c`; enter and the
