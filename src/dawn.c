@@ -3714,12 +3714,14 @@ static void render_ribbon(const Layout* L)
         int32_t col = L->chrome_left + s[i].col;
         bool enabled = command_enabled(cmd);
         bool pressed = enabled && ribbon_button_on(cmd, cache.on);
-        // A section beside the one before it: a divider between them, as tall as the row.
+        // A section beside the one before it: a divider between them, as tall as the row, in the
+        // middle of the space between the two (wider than RIBBON_DIVIDER when the row was spread).
         if (i > 0 && b[i].section != b[i - 1].section && s[i - 1].page == s[i].page && s[i - 1].row == s[i].row) {
+            int32_t prev_end = L->chrome_left + s[i - 1].col + s[i - 1].width;
             set_bg(ribbon_band_bg());
             set_fg(get_border());
             for (int32_t r = 0; r < h; r++) {
-                move_to(top + r, col - 2);
+                move_to(top + r, prev_end + (col - prev_end - 1) / 2);
                 out_str("│");
             }
         }

@@ -541,6 +541,99 @@ static int32_t ribbon_pack(const RibbonButton* b, int32_t n, int32_t room, Ribbo
     return best_rows;
 }
 
+//! Spare cells share k: the j-th of k (0 first) gets its part, the parts adding up to spare and
+//! differing by at most one, the larger ones last
+static int32_t ribbon_share(int32_t spare, int32_t k, int32_t j)
+{
+    return k > 0 ? spare * (j + 1) / k - spare * j / k : 0;
+}
+
+//! Widen packed rows (slots[].row a row's index, cols from its left edge) to end at right: the
+//! spare cells of a row go to its buttons evenly (each a whole number of cells wider, all of a row
+//! one width), and what is left over to its gaps, then to its dividers when it has no gaps, or to
+//! the one button of a row that has neither. Rows that hold one section only and follow each other
+//! (a section spread over rows, or what of a section did not fit the row it went on in) are one
+//! grid: all are set as the fullest of them is, so a shorter last row keeps the columns of the rows
+//! above it rather than reaching the right edge.
+static void ribbon_spread(const RibbonButton* b, int32_t n, int32_t right, RibbonSlot* slots)
+{
+    int32_t i = 0;
+    while (i < n) {
+        // The rows of this block: one row, or the run of rows from here holding only b[i]'s section.
+        int32_t end = i; // past the block's last button
+        int32_t model = i; // the first button of its fullest row
+        int32_t model_k = 0;
+        bool single = true;
+        int32_t r0 = i;
+        while (r0 < n) {
+            int32_t r1 = r0;
+            bool one = true;
+            while (r1 < n && slots[r1].row == slots[r0].row) {
+                one = one && b[r1].section == b[r0].section;
+                r1++;
+            }
+            if (r0 > i && (!single || !one || b[r0].section != b[i].section))
+                break;
+            if (r1 - r0 > model_k) {
+                model_k = r1 - r0;
+                model = r0;
+            }
+            single = one;
+            end = r1;
+            r0 = r1;
+            if (!one)
+                break; // a row of two sections is a block of its own
+        }
+        // The fullest row's spread: each button e cells wider, the rest of its spare cells (rest)
+        // shared out over its gaps, else its dividers, else the one button.
+        int32_t k = model_k;
+        int32_t last = model + k - 1;
+        int32_t spare = right - (slots[last].col + slots[last].width);
+        if (spare < 0)
+            spare = 0;
+        int32_t e = spare / k;
+        int32_t rest = spare - e * k;
+        int32_t gaps = 0, dividers = 0;
+        for (int32_t j = model + 1; j <= last; j++) {
+            if (b[j].section == b[j - 1].section)
+                gaps++;
+            else
+                dividers++;
+        }
+        if (gaps == 0 && dividers == 0) {
+            e += rest;
+            rest = 0;
+        }
+        bool to_gaps = gaps > 0;
+        int32_t share_k = to_gaps ? gaps : dividers;
+        // Where the fullest row's buttons go, by their place in the row.
+        int32_t col[RIBBON_MAX];
+        int32_t at = 0, seen = 0;
+        for (int32_t j = 0; j < k; j++) {
+            int32_t x = model + j;
+            if (j > 0) {
+                int32_t sep = slots[x].col - (slots[x - 1].col + slots[x - 1].width);
+                bool gap = b[x].section == b[x - 1].section;
+                if (gap == to_gaps)
+                    sep += ribbon_share(rest, share_k, seen++);
+                at += sep;
+            }
+            col[j] = at;
+            at += slots[x].width + e;
+        }
+        // Every row of the block set by it.
+        for (int32_t x = i; x < end;) {
+            int32_t y = x;
+            for (int32_t j = 0; y < end && slots[y].row == slots[x].row; j++, y++) {
+                slots[y].col = col[j];
+                slots[y].width += e;
+            }
+            x = y;
+        }
+        i = end;
+    }
+}
+
 bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,
     RibbonSlot* slots, RibbonFrame* frame)
 {
@@ -594,13 +687,16 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
         if (on_page > frame->rows)
             frame->rows = on_page;
     }
+    // Every row spread to the edge: the paging button's when it pages, else the room's (rows packed
+    // around the paging button that came to one page after all reach the room's edge too).
+    frame->pages = page + 1;
+    ribbon_spread(buttons, n, frame->pages > 1 ? frame->more_col - RIBBON_GAP : room, slots);
     for (int32_t i = 0; i < n; i++) {
         int32_t r = slots[i].row;
         slots[i].page = row_page[r];
         slots[i].row = row_top[r];
         slots[i].rule_above = row_rule[r] && slots[i].col == 0;
     }
-    frame->pages = page + 1;
     if (frame->pages == 1) {
         frame->more_col = 0;
         frame->more_width = 0;
