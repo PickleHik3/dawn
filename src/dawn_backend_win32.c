@@ -1819,7 +1819,7 @@ static void win32_image_mask_region(int32_t col, int32_t row, int32_t cols, int3
         return;
 
     buf_printf(CSI "%d;%dH", row, col);
-    buf_printf("\x1b_Ga=T,f=32,s=1,v=1,c=%d,r=%d,z=-1,q=2;%s\x1b\\", cols, rows, b64_data);
+    buf_printf("\x1b_Ga=T,f=32,s=1,v=1,c=%d,r=%d,z=-1,C=1,q=2;%s\x1b\\", cols, rows, b64_data); // C=1: no wrap or scroll
 
     free(b64_data);
 }
