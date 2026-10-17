@@ -325,11 +325,71 @@ int32_t ribbon_caption_scale(int32_t scale)
     return scale / 2 > 1 ? scale / 2 : 1;
 }
 
-int32_t ribbon_button_rows(int32_t scale)
+int32_t ribbon_glyph_rows(int32_t scale, bool sized)
 {
     if (scale < 1)
         scale = 1;
-    return scale + ribbon_caption_scale(scale);
+    return sized && scale < 2 ? 2 : scale;
+}
+
+void ribbon_glyph_frac(int32_t glyph_rows, int32_t* num, int32_t* den)
+{
+    if (glyph_rows < 2) {
+        *num = 0;
+        *den = 0;
+        return;
+    }
+    *num = 2 * glyph_rows - 1;
+    *den = 2 * glyph_rows;
+}
+
+//! a / b rounded down (b > 0), for a of either sign
+static int64_t floor_div(int64_t a, int64_t b)
+{
+    return a >= 0 ? a / b : -((-a + b - 1) / b);
+}
+
+RibbonGlyphPlace ribbon_glyph_place(int32_t w, int32_t block, int32_t num, int32_t den)
+{
+    RibbonGlyphPlace best = { .col = w > block ? (w - block) / 2 : 0, .halign = 2 };
+    if (w <= block)
+        return best;
+    if (num <= 0 || den <= num) {
+        num = 1; // drawn the whole block's size: only h=2 means anything
+        den = 1;
+    }
+    // In units of 1 / (2 den) cells: the box's centre is w den; with the block from cell x the
+    // text's centre is 2 den x plus, for h=2, block den; for h=0, block num (half the text's
+    // width); for h=1, 2 block den - block num.
+    static const int32_t ORDER[3] = { 2, 0, 1 };
+    int64_t best_err = -1;
+    int64_t unit = 2 * (int64_t)den;
+    int64_t target = (int64_t)w * den;
+    for (int32_t k = 0; k < 3; k++) {
+        int32_t h = ORDER[k];
+        if (num == den && h != 2)
+            break;
+        int64_t off = h == 2 ? (int64_t)block * den : h == 0 ? (int64_t)block * num : 2 * (int64_t)block * den - (int64_t)block * num;
+        int64_t x0 = floor_div(target - off, unit);
+        for (int64_t x = x0; x <= x0 + 1; x++) {
+            if (x < 0 || x > w - block)
+                continue;
+            int64_t err = unit * x + off - target;
+            err = err < 0 ? -err : err;
+            if (best_err < 0 || err < best_err) {
+                best_err = err;
+                best = (RibbonGlyphPlace) { .col = (int32_t)x, .halign = h };
+            }
+        }
+    }
+    return best;
+}
+
+int32_t ribbon_button_rows(int32_t scale, bool sized)
+{
+    if (scale < 1)
+        scale = 1;
+    return ribbon_glyph_rows(scale, sized) + ribbon_caption_scale(scale);
 }
 
 int32_t ribbon_row_gap(int32_t scale)
@@ -355,21 +415,21 @@ int32_t ribbon_glyph_cols(const Command* cmd, bool icons)
     return w > 2 ? w : 2;
 }
 
-int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons)
+int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons, bool sized)
 {
     if (!cmd)
         return 0;
     if (scale < 1)
         scale = 1;
     int32_t cs = ribbon_caption_scale(scale);
-    int32_t glyph = ribbon_glyph_cols(cmd, icons) * scale + 2;
+    int32_t glyph = ribbon_glyph_cols(cmd, icons) * ribbon_glyph_rows(scale, sized) + 2;
     int32_t caption = text_cols(cmd->caption ? cmd->caption : cmd->label) * cs;
     if (cmd->key == DAWN_KEY_AI_MODEL && caption < RIBBON_MODEL_STATE_COLS * cs)
         caption = RIBBON_MODEL_STATE_COLS * cs;
     return glyph > caption ? glyph : caption;
 }
 
-int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* out, int32_t max)
+int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, bool sized, RibbonButton* out, int32_t max)
 {
     int32_t n = 0;
     int32_t section = -1;
@@ -396,7 +456,7 @@ int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* o
     // One width for the whole ribbon, its widest button's, so the buttons line up as a grid.
     int32_t widest = 0;
     for (int32_t i = 0; i < n; i++) {
-        int32_t w = ribbon_button_cols(out[i].cmd, scale, icons);
+        int32_t w = ribbon_button_cols(out[i].cmd, scale, icons, sized);
         widest = w > widest ? w : widest;
     }
     for (int32_t i = 0; i < n; i++)
@@ -412,7 +472,7 @@ int32_t ribbon_tab_of(const Command* cmd)
     int32_t nt = tabs_items(tabs, RIBBON_TAB_COUNT);
     RibbonButton b[RIBBON_MAX];
     for (int32_t t = 0; t < nt; t++) {
-        int32_t n = ribbon_buttons(tabs[t], 1, false, b, RIBBON_MAX);
+        int32_t n = ribbon_buttons(tabs[t], 1, false, false, b, RIBBON_MAX);
         for (int32_t i = 0; i < n; i++) {
             if (b[i].cmd == cmd)
                 return (int32_t)tabs[t];
@@ -421,11 +481,11 @@ int32_t ribbon_tab_of(const Command* cmd)
     return -1;
 }
 
-int32_t ribbon_more_cols(int32_t scale)
+int32_t ribbon_more_cols(int32_t scale, bool sized)
 {
     if (scale < 1)
         scale = 1;
-    int32_t glyph = 1 * scale + 2; // "▸"
+    int32_t glyph = 1 * ribbon_glyph_rows(scale, sized) + 2; // "▸"
     int32_t caption = 4 * ribbon_caption_scale(scale); // "more"
     return glyph > caption ? glyph : caption;
 }
@@ -634,15 +694,15 @@ static void ribbon_spread(const RibbonButton* b, int32_t n, int32_t right, Ribbo
     }
 }
 
-bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,
-    RibbonSlot* slots, RibbonFrame* frame)
+bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, bool sized,
+    int32_t max_height, RibbonSlot* slots, RibbonFrame* frame)
 {
     *frame = (RibbonFrame) { 0 };
     if (scale < 1)
         scale = 1;
     if (n > RIBBON_MAX)
         n = RIBBON_MAX;
-    int32_t h = ribbon_button_rows(scale);
+    int32_t h = ribbon_button_rows(scale, sized);
     if (n <= 0 || max_height < h)
         return false;
     bool stacked[RIBBON_MAX];
@@ -654,7 +714,7 @@ bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t
         total += ribbon_row_sep(scale, stacked[r]);
     if (total > max_height) {
         // Too tall: pages of as many rows as fit, each row narrowed by the paging button.
-        int32_t more = ribbon_more_cols(scale);
+        int32_t more = ribbon_more_cols(scale, sized);
         int32_t narrow = room - more - RIBBON_GAP;
         if (narrow <= 0)
             return false;

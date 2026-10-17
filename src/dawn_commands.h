@@ -150,8 +150,37 @@ typedef struct {
 //! The scale a ribbon button's caption is drawn at under a glyph drawn at scale: half, at least 1
 int32_t ribbon_caption_scale(int32_t scale);
 
-//! Screen rows a ribbon button takes at scale: its glyph's scale rows and its caption's under them
-int32_t ribbon_button_rows(int32_t scale);
+//! Screen rows a ribbon button's glyph (its box) takes at scale: scale, but 2 at scale 1 where the
+//! terminal sizes text (sized), so a button is never a flat one-row box with its glyph against the
+//! top: the glyph is drawn sized and centred in those rows (ribbon_glyph_frac, ribbon_glyph_place).
+//! Without text sizing (sized false, always scale 1) it is 1, the glyph plain text.
+int32_t ribbon_glyph_rows(int32_t scale, bool sized);
+
+//! The part of its block a glyph is drawn at in glyph_rows rows (OSC 66 n=, d=): (2g - 1) / 2g, so
+//! a glyph is half a row less than its box with a quarter row clear above and below (3/4 in 2 rows,
+//! 5/6 in 3, 7/8 in 4), and an icon block (2g cells) draws its icon an odd count of cells wide
+//! (2g - 1), which can be centred exactly in a box of either parity (ribbon_glyph_place).
+//! 0, 0 (plain text) for glyph_rows under 2.
+void ribbon_glyph_frac(int32_t glyph_rows, int32_t* num, int32_t* den);
+
+//! Where a glyph block goes in a button: the block's first cell from the box's left edge and its
+//! OSC 66 h= (0 left, 1 right, 2 centred)
+typedef struct {
+    int32_t col;
+    int32_t halign;
+} RibbonGlyphPlace;
+
+//! Place a block of block cells, whose text the terminal draws block * num / den cells wide
+//! (centred in the block by h=2, at its left edge by h=0, its right by h=1), so the text's centre
+//! falls on the centre of a box w cells wide: exactly when the arithmetic allows it (the block
+//! centred when w - block is even, else the text an integer count of cells of w's parity at the
+//! block's left edge), else as near as can be (a 1-column text glyph at 3/4 in an odd box: a
+//! quarter cell off). The block stays inside the box when it fits; h=2 wins a tie.
+RibbonGlyphPlace ribbon_glyph_place(int32_t w, int32_t block, int32_t num, int32_t den);
+
+//! Screen rows a ribbon button takes at scale: its glyph's rows (ribbon_glyph_rows) and its
+//! caption's under them
+int32_t ribbon_button_rows(int32_t scale, bool sized);
 
 //! Blank screen rows between one row of ribbon buttons and the next on a page (a caption and the
 //! boxes under it): 1 where the chrome is scaled (scale 2 on), 0 at scale 1, where a terminal's
@@ -164,10 +193,10 @@ int32_t ribbon_row_gap(int32_t scale);
 //! font as without it; more only for a text glyph wider than that
 int32_t ribbon_glyph_cols(const Command* cmd, bool icons);
 
-//! Screen cells a button needs at scale: its glyph at scale with a cell either side, or its
-//! caption at the caption's scale when that is wider; the model button's caption is its state, up
-//! to RIBBON_MODEL_STATE_COLS columns.
-int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons);
+//! Screen cells a button needs at scale: its glyph at its rows' scale (ribbon_glyph_rows) with a
+//! cell either side, or its caption at the caption's scale when that is wider; the model button's
+//! caption is its state, up to RIBBON_MODEL_STATE_COLS columns.
+int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons, bool sized);
 
 //! A tab's buttons in order, with their sections, all as wide as the widest of them at scale (so
 //! they line up as a grid): File is details, pause and close, then undo, redo, cut, copy and paste,
@@ -175,14 +204,14 @@ int32_t ribbon_button_cols(const Command* cmd, int32_t scale, bool icons);
 //! the chat and the model, then undo, title, auto format and read aloud. Commands this build lacks
 //! are left out.
 //! @return how many were written to out (at most max)
-int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, RibbonButton* out, int32_t max);
+int32_t ribbon_buttons(RibbonTab tab, int32_t scale, bool icons, bool sized, RibbonButton* out, int32_t max);
 
 //! The first tab whose ribbon holds cmd (left to right), or -1 when none does (it is then in the
 //! full command menu, commands_in_menu)
 int32_t ribbon_tab_of(const Command* cmd);
 
 //! Screen cells the paging button ("more") takes at scale
-int32_t ribbon_more_cols(int32_t scale);
+int32_t ribbon_more_cols(int32_t scale, bool sized);
 
 //! Where a ribbon button goes
 typedef struct {
@@ -203,7 +232,8 @@ typedef struct {
     int32_t more_width; //!< Its width in screen cells (0 when there is none)
 } RibbonFrame;
 
-//! Lay a ribbon's n buttons out in rows of room screen cells at scale, RIBBON_GAP apart. A section
+//! Lay a ribbon's n buttons out in rows of room screen cells at scale (each ribbon_button_rows(scale,
+//! sized) tall, sized: the terminal sizes text), RIBBON_GAP apart. A section
 //! either goes on after the one before it on the same row (after RIBBON_DIVIDER cells, where a
 //! divider goes; it needs its first button to fit there, and what does not fit wraps to the left
 //! edge of the rows under it) or starts at the left edge of a new row, under a RIBBON_RULE-row rule.
@@ -222,8 +252,8 @@ typedef struct {
 //! @param slots receives each button's place (n entries); a slot's width is its button's or more
 //! @return false (frame zeroed) when there are no buttons, one is wider than room, or not even one
 //!         row fits max_height
-bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, int32_t max_height,
-    RibbonSlot* slots, RibbonFrame* frame);
+bool ribbon_layout(const RibbonButton* buttons, int32_t n, int32_t room, int32_t scale, bool sized,
+    int32_t max_height, RibbonSlot* slots, RibbonFrame* frame);
 
 // #endregion
 

@@ -329,8 +329,9 @@ static inline Layout calc_layout(void)
         l.top_margin += popup;
         l.text_height -= popup;
     }
-    // The open tab's ribbon hangs under the tab row, its rows of buttons ui_scale + a caption's rows
-    // each and a blank row apart when scaled (ribbon_row_gap), with the one blank row kept between
+    // The open tab's ribbon hangs under the tab row, its rows of buttons a box (ui_scale rows, 2 at
+    // scale 1 where text is sized) and a caption's rows each (ribbon_button_rows) and a blank row
+    // apart when scaled (ribbon_row_gap), with the one blank row kept between
     // it and the text, so the note never draws under a
     // button. It pages rather than leave the note fewer than RIBBON_MIN_NOTE_ROWS, and while it
     // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open, and it
@@ -339,9 +340,10 @@ static inline Layout calc_layout(void)
         RibbonButton b[RIBBON_MAX];
         RibbonSlot slots[RIBBON_MAX];
         RibbonFrame f;
-        int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, l.ui_scale, app.nerd_font, b, RIBBON_MAX);
+        bool sized = HAS_CAP(DAWN_CAP_TEXT_SIZING);
+        int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, l.ui_scale, app.nerd_font, sized, b, RIBBON_MAX);
         l.ribbon_max = l.text_height - RIBBON_MIN_NOTE_ROWS;
-        if (ribbon_layout(b, n, l.chrome_room, l.ui_scale, l.ribbon_max, slots, &f)) {
+        if (ribbon_layout(b, n, l.chrome_room, l.ui_scale, sized, l.ribbon_max, slots, &f)) {
             int32_t rows = ribbon_shown(f.height);
             l.ribbon_rows = rows;
             l.ribbon_dropping = rows < f.height;
@@ -3489,46 +3491,32 @@ typedef enum {
     FACE_BOLD = 1 << 0,
     FACE_ITALIC = 1 << 1,
     FACE_STRIKE = 1 << 2,
-    FACE_BLOCK = 1 << 3, //!< One OSC 66 block face_cols wide (w=): a Nerd Font icon and its space
 } FaceStyle;
 
-//! A Nerd Font icon on a ribbon button is drawn this part of its block's size (OSC 66 n= and d=),
-//! so it keeps a margin inside its box rather than filling it edge to edge (a tall icon poked out
-//! of it): at scale 2 an icon 1.5 rows high with a quarter row clear above and below.
-#define RIBBON_ICON_NUM 3
-#define RIBBON_ICON_DEN 4
-
 //! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
-//! surface scale rows tall with face centred in it (face_cols columns at face_scale, set in style;
-//! FACE_BLOCK sends it as one block of face_cols cells drawn RIBBON_ICON_NUM/DEN of its size,
-//! print_scaled_block), and caption centred under it on the ribbon's band at the caption's scale.
-//! Pressed: the box tinted with the accent and the face in it; disabled: face and caption in the
-//! border's colour.
-static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, const char* face,
-    int32_t face_cols, int32_t face_scale, uint32_t style, const char* caption, bool enabled, bool pressed)
+//! surface glyph_rows rows tall (ribbon_glyph_rows) with face in it, and caption centred under it
+//! on the ribbon's band at the caption's scale (ribbon_caption_scale(scale)). face is face_cols
+//! columns of text (a Nerd Font icon and its space, a text glyph, the model's name), set in style.
+//! In a box of 2 rows or more it is one OSC 66 block glyph_rows scale and face_cols cells wide
+//! (print_scaled_block), drawn num/den of the block's size, centred in the box's rows (v=2) and,
+//! by the block's column and h= (ribbon_glyph_place), in its width; with 0, 0 full size, each
+//! character sized on its own (print_scaled_str). In a one-row box (no text sizing) plain text,
+//! centred. Pressed: the box tinted with the accent and the face in it; disabled: face and caption
+//! in the border's colour.
+static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, int32_t glyph_rows,
+    const char* face, int32_t face_cols, int32_t num, int32_t den, uint32_t style, const char* caption, bool enabled,
+    bool pressed)
 {
     int32_t cs = ribbon_caption_scale(scale);
     set_bg(pressed ? color_lerp(get_row_select_bg(), get_accent(), 0.35f) : get_row_select_bg());
-    for (int32_t r = 0; r < scale; r++) {
+    for (int32_t r = 0; r < glyph_rows; r++) {
         move_to(top + r, col);
         out_spaces(w);
     }
-    int32_t fw = face_cols * face_scale;
-    int32_t fx = (w - fw) / 2;
-    int32_t halign = 2; // the icon centred in its block (h=2)
-    if (style & FACE_BLOCK) {
-        // A block covers fw cells, an even count, so centred in a box an odd count of cells wider
-        // it sits half a cell left of centre (4 cells in File's 7). The launcher draws the shrunk
-        // icon fw * NUM / DEN cells wide (3 at scale 2); when that leaves an even count in the box,
-        // the icon goes at its block's left edge (h=0) and the block where that centres it: a
-        // 3-cell icon from cell 2 of 7.
-        int32_t iw = fw * RIBBON_ICON_NUM;
-        if ((w - fw) % 2 != 0 && iw % RIBBON_ICON_DEN == 0 && (w - iw / RIBBON_ICON_DEN) % 2 == 0) {
-            fx = (w - iw / RIBBON_ICON_DEN) / 2;
-            halign = 0;
-        }
-    }
-    move_to(top + (scale - face_scale) / 2, col + (fx > 0 ? fx : 0));
+    RibbonGlyphPlace at = { .col = (w - face_cols) / 2, .halign = 2 };
+    if (glyph_rows > 1)
+        at = ribbon_glyph_place(w, face_cols * glyph_rows, num, den);
+    move_to(top, col + (at.col > 0 ? at.col : 0));
     set_fg(!enabled ? get_border() : pressed ? get_accent() : get_fg());
     if (style & FACE_BOLD)
         set_bold(true);
@@ -3536,10 +3524,10 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
         set_italic(true);
     if (style & FACE_STRIKE)
         set_strikethrough(true);
-    if (style & FACE_BLOCK)
-        print_scaled_block(face, strlen(face), face_scale, face_cols, RIBBON_ICON_NUM, RIBBON_ICON_DEN, halign);
+    if (num > 0)
+        print_scaled_block(face, strlen(face), glyph_rows, face_cols, num, den, at.halign);
     else
-        print_scaled_str(face, strlen(face), face_scale);
+        print_scaled_str(face, strlen(face), glyph_rows); // full size: each character sized
     if (style & FACE_BOLD)
         set_bold(false);
     if (style & FACE_ITALIC)
@@ -3549,7 +3537,7 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
     set_bg(ribbon_band_bg());
     int32_t cw = chrome_cols(caption) * cs;
     int32_t cx = (w - cw) / 2;
-    move_to(top + scale, col + (cx > 0 ? cx : 0));
+    move_to(top + glyph_rows, col + (cx > 0 ? cx : 0));
     set_fg(enabled ? get_dim() : get_border());
     print_scaled_str(caption, strlen(caption), cs);
 }
@@ -3636,14 +3624,16 @@ static void format_key(int32_t key)
 //! tab's surface across the width: its buttons (ribbon_buttons) where ribbon_layout puts them on the
 //! page showing, a divider between two sections side by side, a thin rule above a section stacked
 //! under another, and on a ribbon that pages a "more" button at the right end of its first row.
-//! Each button is a box with its glyph centred in it (the Nerd Font icon when the font is there, at
-//! a scale one two-cell OSC 66 block of the icon and a space, the icon drawn three quarters of the
-//! block's size; a blank row (ribbon_row_gap) between two rows of buttons;
-//! bold, italic and strike set in their own style) over its caption, drawn at L->ui_scale; the
-//! model button's glyph is the model's short name when it fits, its caption whether the model is
-//! loaded. While the ribbon drops open only its rows already down are drawn. A command that
-//! can run is a tap on its key (its box and caption); the rest of the band swallows taps, all
-//! registered on the writing screen only.
+//! Each button is a box with its glyph centred in it (ribbon_draw_button), over its caption, drawn
+//! at L->ui_scale; a blank row (ribbon_row_gap) between two rows of buttons. Where the terminal
+//! sizes text the box is ribbon_glyph_rows tall (2 at scale 1) and the glyph one OSC 66 block in
+//! it: the Nerd Font icon when the font is there as a two-cell block of the icon and a space (the
+//! launcher draws an icon full size only so), else the text glyph (bold, italic and strike set in
+//! their own style), both drawn ribbon_glyph_frac of the block's size; without text sizing a
+//! one-row box with the glyph plain. The model button's glyph is the model's short name when it
+//! fits, its caption whether the model is loaded. While the ribbon drops open only its rows already
+//! down are drawn. A command that can run is a tap on its key (its box and caption); the rest of
+//! the band swallows taps, all registered on the writing screen only.
 static void render_ribbon(const Layout* L)
 {
     if (L->ribbon_rows <= 0 || ribbon_ui.tab < 0)
@@ -3652,9 +3642,13 @@ static void render_ribbon(const Layout* L)
     RibbonSlot s[RIBBON_MAX];
     RibbonFrame f;
     int32_t scale = L->ui_scale;
-    int32_t h = ribbon_button_rows(scale);
-    int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, scale, app.nerd_font, b, RIBBON_MAX);
-    if (!ribbon_layout(b, n, L->chrome_room, scale, L->ribbon_max, s, &f))
+    bool sized = HAS_CAP(DAWN_CAP_TEXT_SIZING);
+    int32_t h = ribbon_button_rows(scale, sized);
+    int32_t g = ribbon_glyph_rows(scale, sized); // the box's rows
+    int32_t frac_num, frac_den; // a glyph's part of its block
+    ribbon_glyph_frac(g, &frac_num, &frac_den);
+    int32_t n = ribbon_buttons((RibbonTab)ribbon_ui.tab, scale, app.nerd_font, sized, b, RIBBON_MAX);
+    if (!ribbon_layout(b, n, L->chrome_room, scale, sized, L->ribbon_max, s, &f))
         return;
     ribbon_ui.pages = f.pages;
     if (ribbon_ui.page >= f.pages)
@@ -3727,6 +3721,7 @@ static void render_ribbon(const Layout* L)
         }
         char face[160];
         int32_t face_cols = 0;
+        int32_t num = frac_num, den = frac_den;
         uint32_t style = FACE_PLAIN;
         const char* caption = cmd->caption;
         char state[24];
@@ -3740,22 +3735,25 @@ static void render_ribbon(const Layout* L)
             caption = state;
             ribbon_model_short(name, face, sizeof(face));
             face_cols = chrome_cols(face);
-            named = face_cols > 0 && face_cols * scale <= s[i].width - 2;
+            // Drawn at the chrome's scale: full size in a box of scale rows, or a part of a taller
+            // block (1/2 of 2 rows at scale 1), which is at most 7 cells (OSC 66 w=).
+            named = face_cols > 0 && face_cols * g <= s[i].width - 2 && (g == scale || face_cols <= 7);
         }
 #endif
         (void)state;
         if (named) {
-            // face holds the model's name
+            // face holds the model's name, at the chrome's scale
+            num = g > scale ? scale : 0;
+            den = g > scale ? g : 0;
         } else if (app.nerd_font && cmd->icon) {
-            // Scaled, the icon and a space as one block two cells wide (OSC 66 w=2): the launcher
+            // Sized, the icon and a space as one block two cells wide (OSC 66 w=2): the launcher
             // draws a Nerd Font icon full size only so, and each sized on its own comes out about
-            // half a letter high. At scale 1 nothing is sized: the icon alone on its own cell.
+            // half a letter high. Without text sizing: the icon alone on its own cell.
             int32_t k = (int32_t)utf8proc_encode_char((utf8proc_int32_t)cmd->icon, (utf8proc_uint8_t*)face);
             face_cols = 1;
-            if (scale > 1) {
+            if (g > 1) {
                 face[k++] = ' ';
                 face_cols = 2;
-                style = FACE_BLOCK;
             }
             face[k] = '\0';
         } else {
@@ -3766,7 +3764,7 @@ static void render_ribbon(const Layout* L)
                 : cmd->key == DAWN_KEY_FMT_STRIKE ? FACE_STRIKE
                                                   : FACE_PLAIN;
         }
-        ribbon_draw_button(top, col, s[i].width, scale, face, face_cols, scale, style, caption, enabled, pressed);
+        ribbon_draw_button(top, col, s[i].width, scale, g, face, face_cols, num, den, style, caption, enabled, pressed);
         if (taps && enabled)
             hit_add(col, top, s[i].width, h, HIT_KEY, cmd->key, HIT_ARG_COMMAND);
     }
@@ -3776,7 +3774,8 @@ static void render_ribbon(const Layout* L)
         int32_t col = L->chrome_left + f.more_col;
         char caption[32];
         snprintf(caption, sizeof(caption), "%d/%d", ribbon_ui.page + 1, f.pages);
-        ribbon_draw_button(L->ribbon_top, col, f.more_width, scale, "▸", 1, scale, FACE_PLAIN, caption, true, false);
+        ribbon_draw_button(L->ribbon_top, col, f.more_width, scale, g, "▸", 1, frac_num, frac_den, FACE_PLAIN, caption,
+            true, false);
         if (taps)
             hit_add(col, L->ribbon_top, f.more_width, h, HIT_KEY, DAWN_KEY_RIBBON_MORE, 0);
     }
