@@ -104,12 +104,21 @@ static bool frame_forced = true;
 // terminal is sent the notice line alone, not a screen that is blanked and painted again: on a
 // terminal that shows a frame before it is all in, that blank flickered the tab row, which used
 // to be erased first and drawn last. Forgotten on a resize, a cleared screen and a failed buffer.
+// Two things keep a skipped part's cells and images true. Kitty image masks (img_mask, z=-1) are
+// drawn outside the parts (the status panel's corner on the notice line, a dialog), so they are
+// not left to the note part's per-frame image clear, which is cut with the part: they are deleted
+// at the start of the next frame (posix_sync_begin), outside every part. And a placement never
+// moves the cursor (C=1): one ending in the last column wraps the cursor, and on the bottom row
+// that scrolls the screen, which no part knows of, so skipped parts stayed scrolled while each
+// frame's mask stacked on the last one (a panel-coloured block growing up from the bottom right
+// over the note while the model loaded, and the tab row scrolled away).
 static struct {
     char* bytes;
     size_t len;
     bool valid;
 } frame_parts[DAWN_FRAME_PARTS];
 static int32_t part_open = -1; //!< The part being gathered, -1 for none
+static bool masks_placed = false; //!< A mask was sent that no frame-start delete has removed yet
 static size_t part_start = 0; //!< Where it starts in frame_buf
 
 static void frame_parts_forget(void)
@@ -1147,6 +1156,12 @@ static void posix_sync_begin(void)
     }
     if (posix_state.capabilities & DAWN_CAP_SYNC_OUTPUT) {
         buf_append_str(SYNC_START);
+    }
+    // Last frame's masks go before any part: the note part's own image clear is cut whenever the
+    // part is, so it cannot be what removes them (and is not counted as having done so).
+    if (masks_placed && !in_multiplexer()) {
+        buf_append_str("\x1b_Ga=d,d=z,z=-1,q=2\x1b\\");
+        masks_placed = false;
     }
 }
 
@@ -2559,6 +2574,7 @@ static void posix_image_clear_all(void)
     buf_flush();
     fflush(stdout);
     frame_parts_forget(); // a part kept on screen may have placed an image this took away
+    masks_placed = false; // written straight out, so they are gone
     for (int32_t i = 0; i < transmitted_count; i++) {
         free(transmitted_images[i].path);
     }
@@ -2577,8 +2593,11 @@ static void posix_image_mask_region(int32_t col, int32_t row, int32_t cols, int3
     if (!b64_data)
         return;
 
+    // C=1: the cursor stays put. Moved past a mask that ends in the last column it would wrap, and
+    // on the bottom row scroll the whole screen.
     buf_printf(CSI "%d;%dH", row, col);
-    buf_printf("\x1b_Ga=T,f=32,s=1,v=1,c=%d,r=%d,z=-1,q=2;%s\x1b\\", cols, rows, b64_data);
+    buf_printf("\x1b_Ga=T,f=32,s=1,v=1,c=%d,r=%d,z=-1,C=1,q=2;%s\x1b\\", cols, rows, b64_data);
+    masks_placed = true;
 
     free(b64_data);
 }
