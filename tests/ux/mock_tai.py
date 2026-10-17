@@ -41,6 +41,7 @@ QUERY_PREFIX = "task: search result | query: "
 class Knobs:
     reply_mode = "plain"  # plain | tool | edit | claim | error409 | notools | slow
     active_generation = False
+    runtime_state = "ready"  # ready | loading: what /v1/ai/runtime reports (loading shows dawn's status panel)
     speak_seconds = 0.4
     title_reply = "good"  # good | junk: what the quiet-lane title prompt gets back
     embed_model = "embeddinggemma-300m"
@@ -137,7 +138,9 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, models())
         if p in ("/v1/ai/runtime", "/v1/ai/status"):
             return self._json(200, {"ok": True, "runtime": {
-                "loaded": True, "loadedModelId": CHAT_ID, "state": "ready",
+                "loaded": K.runtime_state == "ready",
+                "loadedModelId": CHAT_ID if K.runtime_state == "ready" else "",
+                "state": K.runtime_state,
                 "activeGeneration": K.active_generation}})
         return self._json(404, {"error": {"message": "no such route", "code": "not_found"}})
 

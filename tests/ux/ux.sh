@@ -16,11 +16,12 @@
 #        ux.sh shot <name>        capture the screen to shots/<name>.txt (+ .ansi with colours)
 # Mock knobs: curl -XPOST localhost:8765/_mock/reply_mode/{plain|tool|edit|error409|notools|slow}
 #             curl -XPOST localhost:8765/_mock/speak_seconds/3.0
+#             curl -XPOST localhost:8765/_mock/runtime_state/loading   (the status panel's "loading the model")
 SESS=${DAWN_UX_SESSION:-dawnux}; OUT=${DAWN_UX_SHOTS:-shots}
 case "$1" in
   k) shift; tmux send-keys -t "$SESS" "$@"; sleep 0.35;;
   t) shift; tmux send-keys -t "$SESS" -l -- "$*"; sleep 0.35;;
   seq) shift; hex=$(python3 -c "import sys; print(' '.join('%02x'%b for b in sys.argv[1].encode().decode('unicode_escape').encode('latin1')))" "$*"); tmux send-keys -t "$SESS" -H $hex; sleep 0.5;;
   shot) shift; mkdir -p "$OUT"; tmux capture-pane -t "$SESS" -p > "$OUT/$1.txt"; tmux capture-pane -t "$SESS" -p -e > "$OUT/$1.ansi"; sed 's/[[:space:]]*$//' "$OUT/$1.txt" | awk 'NF{b=0} !NF{b++} b<2';;
-  *) sed -n 2,20p "$0"; exit 1;;
+  *) sed -n 2,19p "$0"; exit 1;;
 esac
