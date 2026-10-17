@@ -202,7 +202,11 @@ chrome and the note are each a frame part (`frame_part_begin`/`end` in the backe
 `PART_NOTE` in `dawn.c`): each paints only its own rows, the chrome first, and a part unchanged since
 it was last sent is left out of the frame, so a fading notice repaints only its line. Anything new
 drawn on the writing screen goes in one of the zones; drawing over another zone's rows from outside
-its part leaves stale cells when that part is skipped.
+its part leaves stale cells when that part is skipped. Nothing may move the terminal under a
+skipped part either: a kitty placement is sent with `C=1` (one that moved the cursor past the last
+column on the bottom row scrolled the screen), and image masks (`image_mask_region`, drawn outside
+the parts) are deleted at the next frame's start (`posix_sync_begin`), not by the note part's image
+clear, which is cut with the part.
 
 First run: until settings.json holds `"onboarded": true`, `dawn_engine_init` opens on `MODE_TOUR` (cards
 in `TOUR_CARDS`, drawn by `render_tour` in `dawn_render.c`, keys in `tour_key` in `dawn.c`; enter and the
