@@ -329,9 +329,9 @@ static inline Layout calc_layout(void)
         l.top_margin += popup;
         l.text_height -= popup;
     }
-    // The open tab's ribbon hangs under the tab row, its rows of buttons a box (ui_scale rows, 2 at
-    // scale 1 where text is sized) and a caption's rows each (ribbon_button_rows) and a blank row
-    // apart when scaled (ribbon_row_gap), with the one blank row kept between
+    // The open tab's ribbon hangs under the tab row, its rows of buttons each one box of glyph rows
+    // (ui_scale rows, 2 at scale 1 where text is sized) over a caption's rows (ribbon_button_rows),
+    // a blank row apart (ribbon_row_gap), with the one blank row kept between
     // it and the text, so the note never draws under a
     // button. It pages rather than leave the note fewer than RIBBON_MIN_NOTE_ROWS, and while it
     // drops open (ribbon_shown) it takes its rows a few at a time. Never with a chat open, and it
@@ -3493,23 +3493,25 @@ typedef enum {
     FACE_STRIKE = 1 << 2,
 } FaceStyle;
 
-//! One ribbon button from screen row top, column col, w cells wide: a box of the button's own
-//! surface glyph_rows rows tall (ribbon_glyph_rows) with face in it, and caption centred under it
-//! on the ribbon's band at the caption's scale (ribbon_caption_scale(scale)). face is face_cols
-//! columns of text (a Nerd Font icon and its space, a text glyph, the model's name), set in style.
-//! In a box of 2 rows or more it is one OSC 66 block glyph_rows scale and face_cols cells wide
-//! (print_scaled_block), drawn num/den of the block's size, centred in the box's rows (v=2) and,
-//! by the block's column and h= (ribbon_glyph_place), in its width; with 0, 0 full size, each
-//! character sized on its own (print_scaled_str). In a one-row box (no text sizing) plain text,
-//! centred. Pressed: the box tinted with the accent and the face in it; disabled: face and caption
-//! in the border's colour.
+//! One ribbon button from screen row top, column col, w cells wide: one box of the button's own
+//! surface, its glyph_rows rows (ribbon_glyph_rows) with face in them over its caption's rows, the
+//! caption centred at the caption's scale (ribbon_caption_scale(scale)), a tile as in a word
+//! processor's ribbon. face is face_cols columns of text (a Nerd Font icon and its space, a text
+//! glyph, the model's name), set in style. In a box of 2 glyph rows or more it is one OSC 66 block
+//! glyph_rows scale and face_cols cells wide (print_scaled_block), drawn num/den of the block's
+//! size, centred in the glyph rows (v=2) and, by the block's column and h= (ribbon_glyph_place), in
+//! its width; with 0, 0 full size, each character sized on its own (print_scaled_str). With one
+//! glyph row (no text sizing) plain text, centred. The face is the text colour and the caption one
+//! step fainter (get_dim); pressed: the box tinted with the accent and the face in it; disabled:
+//! each a step fainter again, the face dim and the caption faint (get_faint).
 static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scale, int32_t glyph_rows,
     const char* face, int32_t face_cols, int32_t num, int32_t den, uint32_t style, const char* caption, bool enabled,
     bool pressed)
 {
     int32_t cs = ribbon_caption_scale(scale);
-    set_bg(pressed ? color_lerp(get_row_select_bg(), get_accent(), 0.35f) : get_row_select_bg());
-    for (int32_t r = 0; r < glyph_rows; r++) {
+    DawnColor box = pressed ? color_lerp(get_row_select_bg(), get_accent(), 0.35f) : get_row_select_bg();
+    set_bg(box);
+    for (int32_t r = 0; r < glyph_rows + cs; r++) {
         move_to(top + r, col);
         out_spaces(w);
     }
@@ -3517,7 +3519,7 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
     if (glyph_rows > 1)
         at = ribbon_glyph_place(w, face_cols * glyph_rows, num, den);
     move_to(top, col + (at.col > 0 ? at.col : 0));
-    set_fg(!enabled ? get_border() : pressed ? get_accent() : get_fg());
+    set_fg(!enabled ? get_dim() : pressed ? get_accent() : get_fg());
     if (style & FACE_BOLD)
         set_bold(true);
     if (style & FACE_ITALIC)
@@ -3534,11 +3536,10 @@ static void ribbon_draw_button(int32_t top, int32_t col, int32_t w, int32_t scal
         set_italic(false);
     if (style & FACE_STRIKE)
         set_strikethrough(false);
-    set_bg(ribbon_band_bg());
     int32_t cw = chrome_cols(caption) * cs;
     int32_t cx = (w - cw) / 2;
     move_to(top + glyph_rows, col + (cx > 0 ? cx : 0));
-    set_fg(enabled ? get_dim() : get_border());
+    set_fg(enabled ? get_dim() : get_faint(box));
     print_scaled_str(caption, strlen(caption), cs);
 }
 
@@ -3624,15 +3625,15 @@ static void format_key(int32_t key)
 //! tab's surface across the width: its buttons (ribbon_buttons) where ribbon_layout puts them on the
 //! page showing, a divider between two sections side by side, a thin rule above a section stacked
 //! under another, and on a ribbon that pages a "more" button at the right end of its first row.
-//! Each button is a box with its glyph centred in it (ribbon_draw_button), over its caption, drawn
-//! at L->ui_scale; a blank row (ribbon_row_gap) between two rows of buttons. Where the terminal
-//! sizes text the box is ribbon_glyph_rows tall (2 at scale 1) and the glyph one OSC 66 block in
-//! it: the Nerd Font icon when the font is there as a two-cell block of the icon and a space (the
+//! Each button is one box (ribbon_draw_button) holding its glyph centred in its glyph rows over its
+//! caption, drawn at L->ui_scale; a blank row of the band (ribbon_row_gap) between two rows of
+//! buttons, so the boxes read as tiles. Where the terminal sizes text the glyph rows are
+//! ribbon_glyph_rows (2 at scale 1) and the glyph one OSC 66 block in them: the Nerd Font icon when the font is there as a two-cell block of the icon and a space (the
 //! launcher draws an icon full size only so), else the text glyph (bold, italic and strike set in
 //! their own style), both drawn ribbon_glyph_frac of the block's size; without text sizing a
-//! one-row box with the glyph plain. The model button's glyph is the model's short name when it
+//! single glyph row with the glyph plain. The model button's glyph is the model's short name when it
 //! fits, its caption whether the model is loaded. While the ribbon drops open only its rows already
-//! down are drawn. A command that can run is a tap on its key (its box and caption); the rest of
+//! down are drawn. A command that can run is a tap on its key (its whole box); the rest of
 //! the band swallows taps, all registered on the writing screen only.
 static void render_ribbon(const Layout* L)
 {

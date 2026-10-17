@@ -178,14 +178,15 @@ typedef struct {
 //! quarter cell off). The block stays inside the box when it fits; h=2 wins a tie.
 RibbonGlyphPlace ribbon_glyph_place(int32_t w, int32_t block, int32_t num, int32_t den);
 
-//! Screen rows a ribbon button takes at scale: its glyph's rows (ribbon_glyph_rows) and its
-//! caption's under them
+//! Screen rows a ribbon button takes at scale: one box of its glyph's rows (ribbon_glyph_rows) and
+//! its caption's under them
 int32_t ribbon_button_rows(int32_t scale, bool sized);
 
-//! Blank screen rows between one row of ribbon buttons and the next on a page (a caption and the
-//! boxes under it): 1 where the chrome is scaled (scale 2 on), 0 at scale 1, where a terminal's
-//! rows are few. A rule above a stacked section is drawn in that row (it takes RIBBON_RULE rows
-//! when the gap is narrower). None above a page's first row or below its last.
+//! Blank screen rows between one row of ribbon buttons and the next on a page: 1 at every scale,
+//! sized or not. The caption is inside its button's box, so without the gap two rows of boxes
+//! would touch and run together as columns; the band showing between them (as RIBBON_GAP does
+//! between columns) makes each box a tile. A rule above a stacked section is drawn in that row (it
+//! takes RIBBON_RULE rows when the gap is narrower). None above a page's first row or below its last.
 int32_t ribbon_row_gap(int32_t scale);
 
 //! Columns a button's glyph is given at scale 1: 2, the Nerd Font icon's block (the icon and a
