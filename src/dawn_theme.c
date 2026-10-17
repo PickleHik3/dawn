@@ -422,6 +422,10 @@ DawnColor get_dim(void)
         return m->dim;
     return app.theme == THEME_DARK ? DARK_DIM : LIGHT_DIM;
 }
+DawnColor get_faint(DawnColor bg)
+{
+    return color_lerp(get_dim(), bg, 0.5f);
+}
 DawnColor get_accent(void)
 {
     const MaterialPalette* m = material_for(app.theme);

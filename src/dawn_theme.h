@@ -78,6 +78,12 @@ DawnColor get_fg(void);
 //! Get current theme's dimmed/muted text color
 DawnColor get_dim(void);
 
+//! Text one step fainter than get_dim() on background bg: halfway from the dim colour to bg, so
+//! fg, dim and faint read as three steps toward bg on any surface (a ribbon button that cannot run
+//! now draws its glyph dim and its caption faint)
+//! @param bg the background the text sits on
+DawnColor get_faint(DawnColor bg);
+
 //! Get current theme's accent color (highlights, links)
 DawnColor get_accent(void);
 
