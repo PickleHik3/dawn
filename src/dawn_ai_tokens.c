@@ -236,6 +236,22 @@ char* ai_note_snapshot(const GapBuffer* gb, void* block_cache, size_t cursor, si
         info->has_selection = true;
     }
 
+    // A note that fits what is left of the budget goes whole, in order, as the one <note>: the
+    // section around the cursor and its neighbours would show the same text in pieces (the ones
+    // before it walked backward) and leave the note counted as cut, so replace_note would refuse
+    // a short note only because it has a heading or a preamble.
+    if (budget > 0 && (sec_start_pos != 0 || sec_end_pos != (uint32_t)doc_len)
+        && doc_len <= (size_t)budget * 4) { // slice_within_budget()'s bound: it would not cut it
+        char* all = gap_substr(gb, 0, doc_len);
+        if (all && ai_estimate_tokens(all) <= budget) {
+            sec_start_pos = 0;
+            sec_end_pos = (uint32_t)doc_len;
+            header_idx = -1; // nothing lies before or after it
+            info->section_heading[0] = '\0';
+        }
+        free(all);
+    }
+
     // 2) The section around the cursor.
     if (budget > 0) {
         bool cut;
