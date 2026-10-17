@@ -142,20 +142,23 @@ then help; AI = chat and the model button (glyph: the model's short name when it
 caption: loaded, loading or not loaded; a tap opens the chat's model picker, `DAWN_KEY_AI_MODEL`),
 then undo, title (`DAWN_KEY_AI_TITLE`), auto format (`DAWN_KEY_AI_FORMAT`; both are `ai_action` in
 `dawn_chat.c`, USER-lane chat turns whose edit is a tagged block) and read aloud. Every command is on
-a ribbon or in the full menu (`ribbon_tab_of`, `commands_in_menu`, tested). Each button is a box with
-its glyph centred over its caption, about three rows tall at scale 2, all of a ribbon's buttons one
+a ribbon or in the full menu (`ribbon_tab_of`, `commands_in_menu`, tested). Each button is one box (a tile)
+holding its glyph centred over its caption, the glyph in the text colour and the caption one step
+fainter (`get_dim`; a command that cannot run now: glyph dim, caption `get_faint`), about three rows
+tall at scale 2, the whole box its tap region, all of a ribbon's buttons one
 width (its widest; captions at most 7 columns, every glyph budgeted 2) so they form a grid. Where
-text is sized the box is `ribbon_glyph_rows` tall (2 even at scale 1, so a button is 3 rows there;
-`ribbon_layout` and friends take `sized` as a parameter) and the glyph one OSC 66 block in it, drawn
+text is sized the glyph rows are `ribbon_glyph_rows` (2 even at scale 1, so a button is 3 rows there;
+`ribbon_layout` and friends take `sized` as a parameter) and the glyph one OSC 66 block in them, drawn
 `ribbon_glyph_frac` of its size ((2g-1)/2g: 3/4 in 2 rows), v=2, its column and h= from
-`ribbon_glyph_place` so an icon is centred exactly at either width parity; without sizing one row, plain.
+`ribbon_glyph_place` so an icon is centred exactly at either width parity; without sizing one glyph row, plain.
 `ribbon_layout` (`ribbon_pack`) lets a section go on after the one before it on the same row, behind
 a divider, wrapping what does not fit to the left edge, or start a row of its own under a thin rule,
 its buttons spread evenly; it takes the way with the fewest rows, then the fewest split sections
 (File at six a row: 3 | 3, then 2 | 4); then each row is spread to the ribbon's right edge
 (`ribbon_spread`: its buttons widened evenly, the cells left over to its gaps), rows of one section
-in a run kept one grid as the fullest of them; above scale 1 two rows of buttons are a blank row apart
-(`ribbon_row_gap`, counted in the layout; a stacked section's rule is drawn in it); a ribbon pages
+in a run kept one grid as the fullest of them; two rows of buttons are a blank row of the band apart
+at every scale, so the boxes do not run together (`ribbon_row_gap`, counted in the layout; a
+stacked section's rule is drawn in it); a ribbon pages
 with a "more" button (`DAWN_KEY_RIBBON_MORE`) rather than leave the note fewer than
 `RIBBON_MIN_NOTE_ROWS`. The text cursor stays hidden while a ribbon drops (`Layout.ribbon_dropping`).
 Icons are Nerd Font code points, used only when `app.nerd_font` (on in the launcher when a file under

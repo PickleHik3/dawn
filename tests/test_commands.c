@@ -358,8 +358,9 @@ static void test_ribbons(void)
     CHECK(ribbon_caption_scale(4) == 2);
     CHECK(ribbon_button_rows(1, false) == 2 && ribbon_button_rows(2, false) == 3 && ribbon_button_rows(3, false) == 4);
     CHECK(ribbon_button_rows(4, false) == 6);
-    // A blank row between two rows of buttons where the chrome is scaled; none at scale 1.
-    CHECK(ribbon_row_gap(1) == 0 && ribbon_row_gap(2) == 1 && ribbon_row_gap(4) == 1);
+    // A blank row between two rows of buttons at every scale: the caption is inside its box, and
+    // the band showing between two rows of boxes keeps them tiles.
+    CHECK(ribbon_row_gap(1) == 1 && ribbon_row_gap(2) == 1 && ribbon_row_gap(4) == 1);
     // Where the terminal sizes text a button's box is 2 rows even at scale 1 (its glyph sized and
     // centred in them), so a button is 3 rows there; from scale 2 on the box is scale rows as without.
     CHECK(ribbon_glyph_rows(1, false) == 1 && ribbon_glyph_rows(1, true) == 2);
@@ -492,18 +493,22 @@ static void test_ribbons(void)
     // A wrapping section spreads evenly: in 45 cells five 7-cell buttons fit a row, so the sixteen
     // styles go four rows of four rather than leave one alone on a fourth.
     CHECK(ribbon_layout(b, n, 45, 1, false, 40, s, &f) && f.rows == 5 && f.pages == 1);
-    CHECK(s[3].row == 0 && s[3].col == 35 && s[3].width == 10 && s[4].row == 2 && s[4].col == 0);
+    CHECK(s[3].row == 0 && s[3].col == 35 && s[3].width == 10 && s[4].row == 3 && s[4].col == 0);
     CHECK(s[1].col == 11 && s[2].col == 23); // the two cells left over widen the last two gaps
-    CHECK(s[styles - 1].row == 6 && s[styles - 1].col == 35 && s[styles].row == 8 + RIBBON_RULE);
-    // The phone at scale 1 with text sized (53 cells): the same four rows, each a row taller (a
-    // 2-row box and its caption), no gap between them but the rule above help's.
-    for (int32_t sized = 0; sized < 2; sized++) {
-        n = ribbon_buttons(RIBBON_TAB_FORMAT, 1, true, sized != 0, b, RIBBON_MAX);
-        CHECK(n == styles + 4 && b[0].width == 7);
-        CHECK(ribbon_layout(b, n, 53, 1, sized != 0, 40, s, &f) && f.rows == 4 && f.pages == 1);
-        int32_t bh = sized ? 3 : 2;
-        CHECK(f.height == 4 * bh + RIBBON_RULE && s[6].row == bh && s[styles].row == 3 * bh + RIBBON_RULE);
-    }
+    CHECK(s[styles - 1].row == 9 && s[styles - 1].col == 35 && s[styles].row == 11 + RIBBON_RULE);
+    // The phone at scale 1 (53 cells, 57 alike: seven a row fit, but sixteen spread over three
+    // rows go six, six, four): the styles' three rows and help's under a rule, a blank row between
+    // two rows (the rule drawn in it); with text sized each row is a row taller (a 2-row glyph and
+    // its caption in one box).
+    for (int32_t sized = 0; sized < 2; sized++)
+        for (int32_t room = 53; room <= 57; room += 4) {
+            n = ribbon_buttons(RIBBON_TAB_FORMAT, 1, true, sized != 0, b, RIBBON_MAX);
+            CHECK(n == styles + 4 && b[0].width == 7);
+            CHECK(ribbon_layout(b, n, room, 1, sized != 0, 40, s, &f) && f.rows == 4 && f.pages == 1);
+            int32_t bh = sized ? 3 : 2;
+            CHECK(f.height == 4 * bh + 2 + RIBBON_RULE && s[6].row == bh + 1);
+            CHECK(s[12].row == 2 * bh + 2 && s[styles].row == 3 * bh + 2 + RIBBON_RULE && s[styles].rule_above);
+        }
 
     // File on the phone (51 or 53 cells, six buttons a row): 3 | 5 | 4 go on two rows with no rule,
     // a blank row apart, the clipboard going on after the note's three and wrapping, the finding

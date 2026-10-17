@@ -394,7 +394,8 @@ int32_t ribbon_button_rows(int32_t scale, bool sized)
 
 int32_t ribbon_row_gap(int32_t scale)
 {
-    return scale > 1 ? 1 : 0;
+    (void)scale; // one row at every scale: a button's caption is inside its box
+    return 1;
 }
 
 //! Screen rows between a page's row of buttons and the one before it: the gap, or the rule's rows
