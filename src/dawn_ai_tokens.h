@@ -47,7 +47,9 @@ typedef struct {
 //! Build the text of the note to attach to a question, filling a token budget in order:
 //! selection, then the section around the cursor (its heading to the next heading of the same or
 //! higher level), then the outline (every heading, in order), then neighbouring paragraphs
-//! alternating before/after the section until the budget is spent. relevant (may be NULL) are
+//! alternating before/after the section until the budget is spent. When the whole note fits what
+//! the selection leaves of the budget, the section is the whole note (in order, info->whole_note
+//! set, no section_heading), whatever its headings and wherever the cursor. relevant (may be NULL) are
 //! pieces of the note ranked by relevance to the question (dawn_embed, best first, already checked
 //! against the current text): between the outline and the neighbours, each one not inside the
 //! selection or the section is added while the budget lasts (info->relevant_hashes names the ones
