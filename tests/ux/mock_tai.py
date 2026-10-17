@@ -39,10 +39,12 @@ QUERY_PREFIX = "task: search result | query: "
 
 
 class Knobs:
-    reply_mode = "plain"  # plain | tool | edit | claim | error409 | notools | slow
+    reply_mode = "plain"  # plain | tool | edit | rewrite | claim | error409 | notools | slow
     active_generation = False
     runtime_state = "ready"  # ready | loading: what /v1/ai/runtime reports (loading shows dawn's status panel)
     speak_seconds = 0.4
+    chat_window = 8192  # the chat model's _endpoint_context_window (0: not listed, as when unknown)
+    tokenize_fail = False  # /v1/tokenize answers 500
     title_reply = "good"  # good | junk: what the quiet-lane title prompt gets back
     embed_model = "embeddinggemma-300m"
     embed_revision = "r1"
@@ -95,8 +97,9 @@ def models():
     return {
         "object": "list",
         "data": [
-            {"id": CHAT_ID, "object": "model", "_display_name": "Mock Chat 4B",
-             "_endpoint_context_window": 8192, "_size": 2_400_000_000, "_capabilities": ["text_chat", "tool_use"]},
+            dict({"id": CHAT_ID, "object": "model", "_display_name": "Mock Chat 4B",
+                  "_size": 2_400_000_000, "_capabilities": ["text_chat", "tool_use"]},
+                 **({"_endpoint_context_window": K.chat_window} if K.chat_window > 0 else {})),
             {"id": "mock-tiny-1b", "object": "model", "_display_name": "Mock Tiny 1B",
              "_endpoint_context_window": 4096, "_size": 700_000_000, "_capabilities": ["text_chat", "tool_use"]},
             embedder,
@@ -158,6 +161,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/v1/embeddings":
             return self.embeddings(body)
         if p == "/v1/tokenize":
+            if K.tokenize_fail:
+                return self._json(500, {"error": {"message": "tokenizer failed", "code": "internal_error"}})
             return self._json(200, {"tokens": max(1, len((body or {}).get("input", "")) // 4)})
         if p == "/v1/ai/runtime/cancel":
             return self._json(200, {"ok": True})
@@ -217,6 +222,8 @@ class H(BaseHTTPRequestHandler):
             text = "I have added the task \"- [ ] buy milk\" to the note."
         elif last_tool is not None:
             text = f"The tool said: {last_tool.get('content')!s}"[:200]
+        elif mode == "rewrite":
+            text = "<replace_note>\nThe note, rewritten whole by the mock model.\n</replace_note>"
         elif mode == "edit":
             text = "Adding a line for you.\n<append_to_note>\n- [ ] line appended by the mock model\n</append_to_note>"
         else:
