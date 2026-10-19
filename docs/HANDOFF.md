@@ -4,6 +4,37 @@ A rolling note for the next agent. Read it before starting; before ending a sess
 move finished items out, add what you left open, and date your entry. Newest session first. Keep
 it short: a line per item, with file:line or the command that shows it.
 
+## 2026-10-19 · Word-style tabs and ribbons, chrome zones (branch `feat/touch-onboarding`, PR #1)
+
+Done (merged on the branch; on Pong as `~/.local/bin/dawn` 0.1.3+9459575):
+- Menu bar replaced by three tabs (File, Formatting, AI) that drop a ribbon of icon tiles; no
+  status line, a reserved notice line at the bottom: merges `dab0d6d`, `3863498`, `4bf8e6c`,
+  `10213de`. AI ribbon: chat, model (picker), undo, title, auto format (`ai_action` in
+  `src/dawn_chat.c`), read aloud.
+- Nerd icons need the launcher's scaled-symbols fix (launcher `pre`, commits `4b2e82533`,
+  `c9b179b5b`): dawn sends each icon as one `66;s=2:w=2:n=3:d=4:v=2:h=…;<icon><space>` block
+  (`print_scaled_block`); `nerd_font_installed` looks for "nerd" under `~/.termux/fonts/`.
+- Chrome a notch smaller (user picked option C from a prototype on branch `proto/chrome-sizes`):
+  `UI_SCALE_DIVISOR 26` (`574e408`). Tiles two rows tall where text sizing exists, glyph centred
+  (`51e7b5a`); caption inside the tile, fainter (`get_faint`, `c38b893`).
+- Popups (command menu, search, contents, conflict, frontmatter/image editors) open as a band under
+  the tab row, never over the note; frame parts repaint only what changed, so a notice no longer
+  flickers the chrome (`1214512`). Kitty masks carry `C=1` and are deleted at frame start, which
+  fixed a rectangle growing from the status corner while a model loads (`25d9ff2`).
+- A note that fits the token budget goes to the model whole, so short notes are no longer refused
+  "too long to replace whole" (`9459575`, `src/dawn_ai_tokens.c`).
+
+Open:
+- Device checks owed on Pong: model-load panel no longer grows; tiles' look and size (Formatting is
+  ~15 rows at scale 1 and pages with the keyboard up); auto format and title against a loaded model;
+  search/contents/editor bands (only the command menu was seen on the emulator).
+- AI ribbon's first row stretches two buttons to half the width each; cap if the user dislikes it.
+- `ai_note_snapshot`: paragraphs before the section go out in reverse order when the note doesn't
+  fit; the 128-token floor caps "whole" near 500 characters on ~2k-token models.
+- A scale-2 heading on the note's last row spills into the notice line (predates this work).
+- Recipes: emulator x86_64 build `tests/ux/emu/build-x86_64.sh`; arm64 is the same script with
+  `ANDROID_ABI=arm64-v8a` and an `aarch64` sysroot; install on Pong over SSH (`nothingphone2`).
+
 ## 2026-10-14 · touch and onboarding
 
 Done (on `tl`):
